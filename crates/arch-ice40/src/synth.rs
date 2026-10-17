@@ -136,7 +136,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let t = Instant::now();
     let before = net.aig.num_ands();
     let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
-    net.aig = aig.cleanup();
+    net.aig = synth_logic::opt::balance(&aig).cleanup();
     log.push(format!(
         "fraiged in {:.2}s: {} -> {} AND nodes ({} merged, {} refuted, {} undecided)",
         t.elapsed().as_secs_f64(),

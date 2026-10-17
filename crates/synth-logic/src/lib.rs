@@ -13,6 +13,7 @@ pub mod fraig;
 pub mod lower;
 pub mod lutmap;
 pub mod net;
+pub mod opt;
 pub mod sat;
 
 pub use aig::{Aig, Lit};

@@ -116,6 +116,19 @@ impl Aig {
         Lit::new(n, false)
     }
 
+    /// The node `and(a, b)` would return, if it exists without creating
+    /// one.
+    pub fn find_and(&self, a: Lit, b: Lit) -> Option<Lit> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        if a == Lit::FALSE || a == !b {
+            return Some(Lit::FALSE);
+        }
+        if a == Lit::TRUE || a == b {
+            return Some(b);
+        }
+        self.strash.get(&(a, b)).map(|&n| Lit::new(n, false))
+    }
+
     pub fn or(&mut self, a: Lit, b: Lit) -> Lit {
         !self.and(!a, !b)
     }
