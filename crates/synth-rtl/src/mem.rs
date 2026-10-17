@@ -387,6 +387,49 @@ fn mux_tree(m: &mut Module, index: &[SigBit], words: &[Sig], width: usize) -> Si
     go(m, index, words, width, 0)
 }
 
+/// Removes writes of a word's own current value: where a write port's data
+/// selects the data of an asynchronous read of the same address (bit for
+/// bit), that selection becomes a condition that disables the write
+/// instead. The read port often becomes unused. Returns the number of
+/// write enable bits changed.
+pub fn remove_feedback_writes(m: &mut Module) -> usize {
+    let mut mux_of: FxHashMap<SigBit, (CellId, usize)> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive
+            && let CellKind::Mux { y, .. } = &c.kind
+        {
+            for (i, &b) in y.iter().enumerate() {
+                mux_of.insert(b, (ci, i));
+            }
+        }
+    }
+    let mut changed = 0;
+    for mi in (0..m.memories.len()).map(MemId::new) {
+        if !m.memories[mi].alive {
+            continue;
+        }
+        let mem = m.memories[mi].clone();
+        for wi in 0..mem.writes.len() {
+            for r in mem.reads.iter().filter(|r| r.clk.is_none() && r.addr == mem.writes[wi].addr) {
+                let w = m.memories[mi].writes[wi].clone();
+                let mut new = w.clone();
+                let mut memo = FxHashMap::default();
+                for i in 0..w.data.width() {
+                    let (e, d) =
+                        crate::dff::deep_hold(m, &mux_of, r.data.0[i], w.data.0[i], &mut memo, 0);
+                    if e != SigBit::ONE {
+                        new.en.0[i] = m.and1(w.en.0[i], e);
+                        new.data.0[i] = d;
+                        changed += 1;
+                    }
+                }
+                m.memories[mi].writes[wi] = new;
+            }
+        }
+    }
+    changed
+}
+
 /// Merges write ports of the same memory that share a clock and address
 /// (e.g. one per byte lane) into one port with per-bit enables; later ports
 /// keep priority. Returns the number of ports removed.

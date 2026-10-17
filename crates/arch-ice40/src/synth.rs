@@ -52,6 +52,9 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     ));
     let n = dff::extract_controls(&mut m);
     log.push(format!("{n} flip-flop bits with enable/reset"));
+    if mem::remove_feedback_writes(&mut m) > 0 {
+        opt::clean(&mut m)?;
+    }
     mem::merge_write_ports(&mut m);
     let n = mem::merge_read_ffs(&mut m);
     if n > 0 {

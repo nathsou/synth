@@ -113,7 +113,7 @@ pub fn extract_controls(m: &mut Module) -> usize {
 
 /// Splits a multiplexer tree `t` (input of flip-flop bit `q`) into an enable
 /// (when a leaf other than `q` is selected) and the data loaded then.
-fn deep_hold(
+pub(crate) fn deep_hold(
     m: &mut Module,
     mux_of: &FxHashMap<SigBit, (CellId, usize)>,
     q: SigBit,

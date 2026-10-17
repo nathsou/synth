@@ -305,6 +305,9 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             eprintln!("info: dff: {n} flip-flop bits gained controls");
         }
         "memff" => {
+            if mem::remove_feedback_writes(m) > 0 {
+                opt::clean(m)?;
+            }
             mem::merge_write_ports(m);
             let n = mem::merge_read_ffs(m);
             eprintln!("info: memff: {n} read ports made synchronous");
