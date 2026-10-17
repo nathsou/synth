@@ -349,6 +349,11 @@ pub enum CellKind {
         b: Sig,
         s: SigBit,
         y: Sig,
+        /// Built from a `?:` expression rather than `if`/`case`. Hardware
+        /// semantics are identical; only simulation of an unknown select
+        /// differs (`?:` merges both inputs, `if` picks `a`), which matters
+        /// when the netlist is compared against its source in a simulator.
+        ternary: bool,
     },
     /// `y = s[i] ? cases[i] : default` for the (one-hot) set bit `i`.
     Pmux {
@@ -551,6 +556,10 @@ pub struct Module {
     pub memories: IndexVec<MemId, Memory>,
     /// Direct connections: `lhs` (wire bits) is driven by `rhs`.
     pub connections: Vec<(Sig, Sig)>,
+    /// Named wire bits that were connected to another signal and have no
+    /// driver of their own: `lhs` has the value of `rhs`. Informational only
+    /// (debug output and waveforms); passes need not keep it up to date.
+    pub aliases: Vec<(Sig, Sig)>,
 }
 
 impl Module {

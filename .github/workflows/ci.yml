@@ -59,3 +59,21 @@ jobs:
         run: cargo build --release -p synth
       - name: Bitstream-level simulation
         run: tools/ci_bitsim.sh
+
+  rtlsim:
+    name: frontend differential simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install iverilog (test oracle only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog
+      - name: Build
+        run: cargo build --release -p synth
+      - name: Elaborated netlists vs source RTL
+        run: tools/ci_rtlsim.sh

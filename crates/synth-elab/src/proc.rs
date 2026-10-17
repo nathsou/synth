@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use synth_core::{Logic, LogicVec, Span};
+use synth_core::{Diagnostic, Logic, LogicVec, Span};
 use synth_rtl::{CellKind, Clock, Control, Dff, Latch, MemId, MemWrite, Sig, SigBit, UnaryOp};
 use synth_verilog::ast::{self, Expr, Stmt};
 
@@ -41,6 +41,8 @@ pub(crate) struct ProcState {
     pub clocked: bool,
     /// Executing an `initial` block (constant interpretation).
     pub initial: bool,
+    /// Errors that are reported even when the process is otherwise dropped.
+    pub hard_errors: Vec<Diagnostic>,
 }
 
 impl ProcState {
@@ -54,6 +56,7 @@ impl ProcState {
             writes: Vec::new(),
             clocked,
             initial,
+            hard_errors: Vec::new(),
         }
     }
 
@@ -95,15 +98,6 @@ fn split_condition(e: &Expr) -> Option<(&Expr, bool)> {
         }
         Expr::Ident(..) | Expr::Index { .. } => Some((e, false)),
         _ => None,
-    }
-}
-
-fn peel_block(s: &Stmt) -> &Stmt {
-    match s {
-        Stmt::Block { decls, stmts, .. } if decls.is_empty() && stmts.len() == 1 => {
-            peel_block(&stmts[0])
-        }
-        other => other,
     }
 }
 
@@ -154,7 +148,9 @@ impl<'a> Elab<'a> {
         // Per-bit mux structure created by this process, for latch analysis.
         let mut muxes: HashMap<SigBit, (SigBit, SigBit, SigBit)> = HashMap::new();
         for ci in first_cell..self.out.cells.len() {
-            if let CellKind::Mux { a, b, s, y } = &self.out.cells[synth_rtl::CellId::new(ci)].kind {
+            if let CellKind::Mux { a, b, s, y, .. } =
+                &self.out.cells[synth_rtl::CellId::new(ci)].kind
+            {
                 for i in 0..y.width() {
                     muxes.insert(y.0[i], (*s, a.0[i], b.0[i]));
                 }
@@ -240,8 +236,24 @@ impl<'a> Elab<'a> {
             self.commit_clocked(&st, clk, None, None);
             return;
         }
-        // Asynchronous reset: `if (rst) <reset> else <logic>`.
-        let Stmt::If { cond, then, otherwise, .. } = peel_block(body) else {
+        // Asynchronous reset: `if (rst) <reset> else <logic>`, possibly inside
+        // blocks that declare local variables.
+        let mut body = body;
+        let mut scopes = 0;
+        while let Stmt::Block { name, decls, stmts, .. } = body
+            && stmts.len() == 1
+        {
+            scopes += usize::from(self.enter_block(name, decls));
+            body = &stmts[0];
+        }
+        self.async_process(&bits, body, span);
+        for _ in 0..scopes {
+            self.scopes.pop();
+        }
+    }
+
+    fn async_process(&mut self, bits: &[(SigBit, bool)], body: &'a Stmt, span: Span) {
+        let Stmt::If { cond, then, otherwise, .. } = body else {
             self.error(span, "processes with several edges must start with `if (<async reset>)`");
             return;
         };
@@ -381,6 +393,9 @@ impl<'a> Elab<'a> {
         if self.diags.items[before..].iter().any(|d| d.severity == synth_core::Severity::Error) {
             self.diags.items.truncate(before);
             self.warn_once(body.span(), "`initial` block is not synthesizable and was ignored");
+        }
+        self.diags.items.extend(st.hard_errors);
+        if self.diags.items.len() > before {
             return;
         }
         for &k in &st.order {
@@ -396,25 +411,32 @@ impl<'a> Elab<'a> {
 
     // ---------------- statements ----------------
 
+    /// Opens the scope of a named block or one with declarations; returns
+    /// whether a scope was pushed.
+    fn enter_block(&mut self, name: &Option<ast::Ident>, decls: &'a [ast::Item]) -> bool {
+        let prefix = match name {
+            Some(n) => format!("{}{}.", self.prefix(), n.name),
+            None => self.prefix(),
+        };
+        let scoped = name.is_some() || !decls.is_empty();
+        if scoped {
+            self.scopes.push(Scope { names: HashMap::new(), prefix });
+            for d in decls {
+                match d {
+                    ast::Item::Var(v) => self.local_vars(v),
+                    ast::Item::Param(p) => self.param_decl(p, &[]),
+                    _ => {}
+                }
+            }
+        }
+        scoped
+    }
+
     pub(crate) fn exec(&mut self, s: &'a Stmt) {
         match s {
             Stmt::Null(_) => {}
             Stmt::Block { name, decls, stmts, .. } => {
-                let prefix = match name {
-                    Some(n) => format!("{}{}.", self.prefix(), n.name),
-                    None => self.prefix(),
-                };
-                let scoped = name.is_some() || !decls.is_empty();
-                if scoped {
-                    self.scopes.push(Scope { names: HashMap::new(), prefix });
-                    for d in decls {
-                        match d {
-                            ast::Item::Var(v) => self.local_vars(v),
-                            ast::Item::Param(p) => self.param_decl(p, &[]),
-                            _ => {}
-                        }
-                    }
-                }
+                let scoped = self.enter_block(name, decls);
                 for st in stmts {
                     self.exec(st);
                 }
@@ -639,6 +661,39 @@ impl<'a> Elab<'a> {
                     }
                 }
             }
+            Lvalue::ArrayDyn { elems, indices, index, index_signed } => {
+                let iw = index.width();
+                let mut new_vals = Vec::new();
+                for (bits, &i) in elems.iter().zip(&indices) {
+                    let tv = LogicVec::from_i64(i, iw.max(64));
+                    if tv.resize(iw, index_signed).resize(iw.max(64), index_signed) != tv {
+                        continue; // not representable in the index width
+                    }
+                    let hit = self.out.eq_const(index.clone(), &tv.resize(iw, false));
+                    for (j, &bk) in bits.iter().enumerate() {
+                        let st = self.proc.as_ref().unwrap();
+                        let old = if nonblocking {
+                            st.nba.get(&bk).copied().unwrap_or(bk)
+                        } else {
+                            st.current(bk)
+                        };
+                        let val = self.out.mux(hit, Sig::bit(old), Sig::bit(v.0[j])).0[0];
+                        new_vals.push((bk, val));
+                    }
+                }
+                let st = self.proc.as_mut().unwrap();
+                for (k, val) in new_vals {
+                    if val == k {
+                        continue;
+                    }
+                    st.note(k);
+                    if nonblocking {
+                        st.nba.insert(k, val);
+                    } else {
+                        st.vals.insert(k, val);
+                    }
+                }
+            }
             Lvalue::Mem { mem, addr, lo, width } => {
                 if initial {
                     let (Some(a), Some(d)) = (addr.as_const(), v.as_const()) else {
@@ -809,10 +864,23 @@ impl<'a> Elab<'a> {
     }
 
     fn readmem(&mut self, hex: bool, args: &'a [Expr], span: Span) {
-        let (Some(Expr::Str(file, _)), Some(target)) = (args.first(), args.get(1)) else {
+        let (Some(fexpr), Some(target)) = (args.first(), args.get(1)) else {
             self.error(span, "expected $readmem(\"file\", memory[, start[, end]])");
             return;
         };
+        let file = match fexpr {
+            Expr::Str(f, _) => f.clone(),
+            // A string-valued parameter: bytes from the most significant end.
+            e => {
+                let Some((v, _)) = self.const_expr(e) else { return };
+                let Some(f) = const_string(&v) else {
+                    self.error(e.span(), "memory file name must be a string");
+                    return;
+                };
+                f
+            }
+        };
+        let file = file.as_str();
         let Expr::Ident(parts, tspan) = target else {
             self.error(target.span(), "expected a memory");
             return;
@@ -836,13 +904,13 @@ impl<'a> Elab<'a> {
             .chain(std::iter::once(Path::new(file).to_path_buf()))
             .collect();
         let Some(text) = candidates.iter().find_map(|p| std::fs::read_to_string(p).ok()) else {
-            self.error(span, format!("cannot read memory file \"{file}\""));
+            self.hard_error(span, format!("cannot read memory file \"{file}\""));
             return;
         };
         let words = match read_mem_file(&text, hex, m.width as usize) {
             Ok(w) => w,
             Err(e) => {
-                self.error(span, format!("{file}: {e}"));
+                self.hard_error(span, format!("{file}: {e}"));
                 return;
             }
         };
@@ -913,6 +981,18 @@ impl<'a> Elab<'a> {
         v
     }
 
+    /// Drops the process state of a returning subroutine's variables (wires
+    /// created since `first`): their values were consumed by the caller and
+    /// they must not become process outputs (or latches).
+    fn forget_locals(&mut self, first: usize) {
+        let Some(st) = self.proc.as_mut() else { return };
+        let local = |b: &SigBit| matches!(b, SigBit::Wire(w, _) if w.index() >= first);
+        st.vals.retain(|k, _| !local(k));
+        st.nba.retain(|k, _| !local(k));
+        st.seen.retain(|k| !local(k));
+        st.order.retain(|k| !local(k));
+    }
+
     fn set_local(&mut self, v: &VarInfo, val: &Sig) {
         if let Some(st) = self.proc.as_mut() {
             for i in 0..v.width {
@@ -963,6 +1043,7 @@ impl<'a> Elab<'a> {
             self.proc = Some(ProcState::new(false, false));
         }
         self.depth += 1;
+        let first_local = self.out.wires.len();
         let prefix = format!("{}.", self.fresh(&f.name.name));
         self.scopes.push(Scope { names: HashMap::new(), prefix });
         for d in &f.decls {
@@ -998,6 +1079,7 @@ impl<'a> Elab<'a> {
         self.exec(&f.body);
         let result = self.read_bits(&Sig::wire(ret.wire, ret.width));
         self.scopes.pop();
+        self.forget_locals(first_local);
         self.depth -= 1;
         if temp_proc {
             self.proc = None;
@@ -1033,6 +1115,7 @@ impl<'a> Elab<'a> {
             };
             inputs.push((v, w, p.signed, msb, lsb));
         }
+        let first_local = self.out.wires.len();
         let prefix = format!("{}.", self.fresh(&t.name.name));
         self.scopes.push(Scope { names: HashMap::new(), prefix });
         let mut locals = Vec::new();
@@ -1050,6 +1133,7 @@ impl<'a> Elab<'a> {
         let outs: Vec<Sig> =
             locals.iter().map(|l| self.read_bits(&Sig::wire(l.wire, l.width))).collect();
         self.scopes.pop();
+        self.forget_locals(first_local);
         for (i, (p, _)) in ports.iter().enumerate() {
             if p.dir != ast::Direction::Input
                 && let Some(lv) = self.lvalue(&args[i], false)
@@ -1065,6 +1149,39 @@ impl<'a> Elab<'a> {
     #[allow(dead_code)]
     fn not_bit(&mut self, b: SigBit) -> SigBit {
         self.out.unary(UnaryOp::Not, Sig::bit(b)).0[0]
+    }
+}
+
+/// Decodes a constant holding a Verilog string (8 bits per character, the
+/// last character in the least significant byte; leading NULs are padding).
+fn const_string(v: &LogicVec) -> Option<String> {
+    let mut bytes = Vec::new();
+    for i in (0..v.width().div_ceil(8)).rev() {
+        let mut b = 0u8;
+        for k in 0..8 {
+            let idx = i * 8 + k;
+            if idx < v.width() {
+                match v.get(idx) {
+                    Logic::One => b |= 1 << k,
+                    Logic::Zero => {}
+                    _ => return None,
+                }
+            }
+        }
+        if b != 0 || !bytes.is_empty() {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+impl Elab<'_> {
+    fn hard_error(&mut self, span: Span, msg: impl Into<String>) {
+        let d = Diagnostic::error(span, msg);
+        match self.proc.as_mut() {
+            Some(p) => p.hard_errors.push(d),
+            None => self.diags.push(d),
+        }
     }
 }
 

@@ -70,8 +70,17 @@ impl Module {
         y
     }
 
-    /// `s ? b : a`.
+    /// `s ? b : a`, from procedural code (`if`/`case`).
     pub fn mux(&mut self, s: SigBit, a: Sig, b: Sig) -> Sig {
+        self.mux_impl(s, a, b, false)
+    }
+
+    /// `s ? b : a`, from a `?:` expression (see [`CellKind::Mux`]).
+    pub fn ternary(&mut self, s: SigBit, a: Sig, b: Sig) -> Sig {
+        self.mux_impl(s, a, b, true)
+    }
+
+    fn mux_impl(&mut self, s: SigBit, a: Sig, b: Sig, ternary: bool) -> Sig {
         debug_assert_eq!(a.width(), b.width());
         match s {
             SigBit::Const(Logic::Zero) => return a,
@@ -90,15 +99,18 @@ impl Module {
         if diff.len() < width {
             let sa: Sig = diff.iter().map(|&i| a.0[i]).collect();
             let sb: Sig = diff.iter().map(|&i| b.0[i]).collect();
-            let sy = self.mux(s, sa, sb);
+            let sy = self.mux_impl(s, sa, sb, ternary);
             let mut y = a.clone();
             for (k, &i) in diff.iter().enumerate() {
                 y.0[i] = sy.0[k];
             }
             return y;
         }
-        // 1-bit special cases: s ? 1 : 0 == s, s ? 0 : 1 == !s.
-        if width == 1 {
+        // 1-bit special cases: s ? 1 : 0 == s, s ? 0 : 1 == !s. Only for `?:`:
+        // with an unknown select, `if` would pick `a` where `s` stays unknown,
+        // and the RTL should simulate like its source (synthesis folds these
+        // later anyway).
+        if width == 1 && ternary {
             match (a.0[0], b.0[0]) {
                 (SigBit::Const(Logic::Zero), SigBit::Const(Logic::One)) => return Sig::bit(s),
                 (SigBit::Const(Logic::One), SigBit::Const(Logic::Zero)) => {
@@ -109,7 +121,7 @@ impl Module {
         }
         let y = self.new_sig(width);
         let name = self.fresh_name("mux");
-        self.add_cell(name, CellKind::Mux { a, b, s, y: y.clone() });
+        self.add_cell(name, CellKind::Mux { a, b, s, y: y.clone(), ternary });
         y
     }
 
@@ -209,10 +221,15 @@ mod tests {
         assert!(m.cells.is_empty());
         let s = m.new_sig(1).0[0];
         assert_eq!(m.mux(s, w.clone(), w.clone()), w);
-        let one = m.mux(s, Sig::from_u64(0, 1), Sig::from_u64(1, 1));
+        let one = m.ternary(s, Sig::from_u64(0, 1), Sig::from_u64(1, 1));
         assert_eq!(one.0[0], s);
+        // `if` semantics keep the multiplexer (an unknown select picks `a`).
+        let n = m.cells.len();
+        let one = m.mux(s, Sig::from_u64(0, 1), Sig::from_u64(1, 1));
+        assert_ne!(one.0[0], s);
+        assert_eq!(m.cells.len(), n + 1);
         let y = m.binary(BinaryOp::Add, false, w.clone(), a);
         assert_eq!(y.width(), 4);
-        assert_eq!(m.cells.len(), 1);
+        assert_eq!(m.cells.len(), n + 2);
     }
 }

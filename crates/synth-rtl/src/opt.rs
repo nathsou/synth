@@ -2,7 +2,7 @@
 
 use synth_core::{FxHashMap, FxHashSet};
 
-use crate::{CellKind, Module, PortDir, Sig, SigBit};
+use crate::{CellId, CellKind, MemId, Module, PortDir, Sig, SigBit};
 
 /// Resolves direct connections: every use of a connected wire bit is
 /// replaced by its driver, and the connections are dropped except where an
@@ -79,66 +79,127 @@ pub fn resolve_connections(m: &mut Module) -> Result<usize, String> {
             }
         }
     }
+    // Remember what named internal wires were connected to.
+    let mut aliases = Vec::new();
+    for (w, wire) in m.wires.iter_enumerated() {
+        if wire.port.is_some() || !wire.public || wire.name.starts_with('$') {
+            continue;
+        }
+        let pairs: Vec<(SigBit, SigBit)> = m
+            .wire_sig(w)
+            .iter()
+            .filter(|b| map.contains_key(b))
+            .map(|&b| (b, resolve(b, &map)))
+            .filter(|(l, r)| l != r)
+            .collect();
+        if !pairs.is_empty() {
+            aliases
+                .push((pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect()));
+        }
+    }
     m.connections = keep;
+    m.aliases.extend(aliases);
     Ok(count)
 }
 
 /// Removes cells and memories whose outputs are never used. Instances are
 /// kept (they may have external effects). Returns the number removed.
 pub fn remove_dead(m: &mut Module) -> usize {
-    let mut removed = 0;
-    loop {
-        let mut used: FxHashSet<SigBit> = FxHashSet::default();
-        for c in m.cells.iter().filter(|c| c.alive) {
-            c.for_each_input(|b| {
-                used.insert(b);
-            });
-        }
-        for mem in m.memories.iter().filter(|m| m.alive) {
-            for rd in &mem.reads {
-                used.extend(rd.addr.iter().copied());
-                used.insert(rd.en);
-                if let Some(c) = rd.clk {
-                    used.insert(c.sig);
-                }
+    // Mark everything that can reach an output port or an instance (which
+    // may have external effects), then sweep. Unlike "is any output read",
+    // this also removes registers that only feed themselves.
+    enum Driver {
+        Cell(usize),
+        MemRead(usize, usize),
+    }
+    let mut driver: FxHashMap<SigBit, Driver> = FxHashMap::default();
+    for (ci, c) in m.cells.iter().enumerate().filter(|(_, c)| c.alive) {
+        for o in c.outputs() {
+            for &b in o.iter() {
+                driver.insert(b, Driver::Cell(ci));
             }
-            for wr in &mem.writes {
-                used.extend(wr.addr.iter().chain(wr.data.iter()).chain(wr.en.iter()).copied());
-                used.insert(wr.clk.sig);
-            }
-        }
-        for (_, rhs) in &m.connections {
-            used.extend(rhs.iter().copied());
-        }
-        for w in m.ports() {
-            if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
-                used.extend(m.wire_sig(w).iter().copied());
-            }
-        }
-        let mut changed = false;
-        for c in m.cells.iter_mut().filter(|c| c.alive) {
-            if matches!(c.kind, CellKind::Instance(_)) {
-                continue;
-            }
-            let live = c.outputs().iter().any(|s| s.iter().any(|b| used.contains(b)));
-            if !live {
-                c.alive = false;
-                removed += 1;
-                changed = true;
-            }
-        }
-        for mem in m.memories.iter_mut().filter(|m| m.alive) {
-            mem.reads.retain(|rd| rd.data.iter().any(|b| used.contains(b)));
-            if mem.reads.is_empty() {
-                mem.alive = false;
-                removed += 1;
-                changed = true;
-            }
-        }
-        if !changed {
-            return removed;
         }
     }
+    for (mi, mem) in m.memories.iter().enumerate().filter(|(_, m)| m.alive) {
+        for (ri, rd) in mem.reads.iter().enumerate() {
+            for &b in rd.data.iter() {
+                driver.insert(b, Driver::MemRead(mi, ri));
+            }
+        }
+    }
+    let mut work: Vec<SigBit> = Vec::new();
+    for (_, rhs) in &m.connections {
+        work.extend(rhs.iter().copied());
+    }
+    for w in m.ports() {
+        if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
+            work.extend(m.wire_sig(w).iter().copied());
+        }
+    }
+    let mut live_cell = vec![false; m.cells.len()];
+    let mut live_read: Vec<Vec<bool>> =
+        m.memories.iter().map(|mm| vec![false; mm.reads.len()]).collect();
+    let mut live_mem = vec![false; m.memories.len()];
+    for (ci, c) in m.cells.iter().enumerate() {
+        if c.alive && matches!(c.kind, CellKind::Instance(_)) {
+            live_cell[ci] = true;
+            c.for_each_input(|b| work.push(b));
+        }
+    }
+    let mut seen: FxHashSet<SigBit> = FxHashSet::default();
+    while let Some(b) = work.pop() {
+        if !matches!(b, SigBit::Wire(..)) || !seen.insert(b) {
+            continue;
+        }
+        match driver.get(&b) {
+            Some(&Driver::Cell(ci)) if !live_cell[ci] => {
+                live_cell[ci] = true;
+                m.cells[CellId::new(ci)].for_each_input(|b| work.push(b));
+            }
+            Some(&Driver::MemRead(mi, ri)) if !live_read[mi][ri] => {
+                live_read[mi][ri] = true;
+                let mem = &m.memories[MemId::new(mi)];
+                let rd = &mem.reads[ri];
+                work.extend(rd.addr.iter().copied());
+                work.push(rd.en);
+                if let Some(c) = rd.clk {
+                    work.push(c.sig);
+                }
+                if !live_mem[mi] {
+                    live_mem[mi] = true;
+                    for wr in &mem.writes {
+                        work.extend(
+                            wr.addr.iter().chain(wr.data.iter()).chain(wr.en.iter()).copied(),
+                        );
+                        work.push(wr.clk.sig);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut removed = 0;
+    for (ci, c) in m.cells.iter_mut().enumerate() {
+        if c.alive && !live_cell[ci] {
+            c.alive = false;
+            removed += 1;
+        }
+    }
+    for (mi, mem) in m.memories.iter_mut().enumerate() {
+        if !mem.alive {
+            continue;
+        }
+        let mut ri = 0;
+        mem.reads.retain(|_| {
+            ri += 1;
+            live_read[mi][ri - 1]
+        });
+        if !live_mem[mi] {
+            mem.alive = false;
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Runs the clean-up passes.

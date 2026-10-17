@@ -21,6 +21,10 @@ COMMANDS:
     help       Print this message
     version    Print version information
 
+ELAB OPTIONS:
+    synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
+              [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
+
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
@@ -154,6 +158,27 @@ fn load_verilog(
     Ok((sm, src))
 }
 
+/// Parses a top-level parameter override `NAME=VALUE`, where the value is a
+/// decimal or `0x` hexadecimal integer or a double-quoted string.
+fn parse_param(p: &str) -> Result<(String, synth_core::LogicVec), String> {
+    let (name, v) = p.split_once('=').ok_or_else(|| format!("expected NAME=VALUE, got `{p}`"))?;
+    let bad = || format!("bad parameter value `{v}` (expected an integer or \"string\")");
+    let value = if let Some(s) = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        let bits: Vec<synth_core::Logic> = s
+            .bytes()
+            .rev()
+            .flat_map(|b| (0..8).map(move |i| synth_core::Logic::from_bool(b >> i & 1 == 1)))
+            .collect();
+        synth_core::LogicVec::from_bits(&bits)
+    } else if let Some(h) = v.strip_prefix("0x") {
+        synth_core::LogicVec::parse_radix(h, 16, 32).ok_or_else(bad)?
+    } else {
+        let n: i64 = v.parse().map_err(|_| bad())?;
+        synth_core::LogicVec::from_i64(n, 32)
+    };
+    Ok((name.to_string(), value))
+}
+
 fn cmd_check(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["-I", "-D"], &[])?;
     let (_, src) = load_verilog(&mut a)?;
@@ -162,9 +187,10 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_elab(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D", "--top", "--verilog", "--rename"], &[])?;
+    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
+    let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
     let (sm, src) = load_verilog(&mut a)?;
-    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params: vec![] };
+    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
     let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
     if !diags.items.is_empty() {
         eprint!("{}", diags.render(&sm));

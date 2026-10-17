@@ -158,7 +158,7 @@ pub fn write(m: &Module) -> String {
         };
         let _ = writeln!(o, "  {dir}wire {range}{}; // {}", id(&wire.name), w.index());
     }
-    for (lhs, rhs) in &m.connections {
+    for (lhs, rhs) in m.connections.iter().chain(&m.aliases) {
         let _ = writeln!(o, "  assign {} = {};", sig(m, lhs), sig(m, rhs));
     }
     for (ci, c) in m.cells.iter_enumerated().filter(|(_, c)| c.alive) {
@@ -211,10 +211,20 @@ pub fn write(m: &Module) -> String {
                 };
                 let _ = writeln!(o, "  assign {} = {a} {opstr} {b};", sig(m, y));
             }
-            CellKind::Mux { a, b, s, y } => {
+            CellKind::Mux { a, b, s, y, ternary: true } => {
+                let _ = writeln!(
+                    o,
+                    "  assign {} = {} ? {} : {};",
+                    sig(m, y),
+                    bit(m, *s),
+                    sig(m, b),
+                    sig(m, a)
+                );
+            }
+            CellKind::Mux { a, b, s, y, ternary: false } => {
                 // `if` semantics (an unknown select picks `a`) match the
-                // procedural code muxes usually come from, which keeps
-                // differential simulation free of x-pessimism artefacts.
+                // procedural code the mux came from, which keeps differential
+                // simulation free of x-semantics artefacts.
                 let r = format!("\\$m{} ", ci.index());
                 let _ = writeln!(o, "  reg [{}:0] {r};", y.width() - 1);
                 let _ = writeln!(
@@ -227,11 +237,15 @@ pub fn write(m: &Module) -> String {
                 let _ = writeln!(o, "  assign {} = {r};", sig(m, y));
             }
             CellKind::Pmux { default, cases, s, y } => {
-                let mut e = sig(m, default);
-                for (i, c) in cases.iter().enumerate().rev() {
-                    e = format!("{} ? {} : ({e})", bit(m, s.0[i]), sig(m, c));
+                // Like `case`: unknown selects are skipped.
+                let r = format!("\\$p{} ", ci.index());
+                let _ = writeln!(o, "  reg [{}:0] {r};", y.width() - 1);
+                let mut e = String::new();
+                for (i, c) in cases.iter().enumerate() {
+                    let _ = write!(e, "if ({}) {r} = {}; else ", bit(m, s.0[i]), sig(m, c));
                 }
-                let _ = writeln!(o, "  assign {} = {e};", sig(m, y));
+                let _ = writeln!(o, "  always_comb {e}{r} = {};", sig(m, default));
+                let _ = writeln!(o, "  assign {} = {r};", sig(m, y));
             }
             CellKind::Shiftx { a, b, b_signed, offset, y } => {
                 let tmp = format!("\\$shx{} ", ci.index());

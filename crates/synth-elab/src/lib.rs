@@ -14,10 +14,10 @@
 mod expr;
 mod proc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use synth_core::{Diagnostic, Diagnostics, LogicVec, SourceMap, Span};
-use synth_rtl::{Attr, Instance, MemId, Memory, Module, PortDir, Sig, SigBit, WireId};
+use synth_rtl::{Attr, CellKind, Instance, MemId, Memory, Module, PortDir, Sig, SigBit, WireId};
 use synth_verilog::ast;
 
 pub use proc::read_mem_file;
@@ -98,9 +98,27 @@ impl MemInfo {
     }
 }
 
+/// An array of nets (`wire [7:0] w [0:3]`), or of variables lowered to
+/// registers: one wire per element.
+#[derive(Clone, Debug)]
+pub(crate) struct NetArrayInfo {
+    pub elems: Vec<VarInfo>,
+    /// Declared element range `[first:last]` as written.
+    pub first: i64,
+    pub last: i64,
+}
+
+impl NetArrayInfo {
+    pub fn elem(&self, i: i64) -> Option<&VarInfo> {
+        let pos = if self.first <= self.last { i - self.first } else { self.first - i };
+        usize::try_from(pos).ok().and_then(|p| self.elems.get(p))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Sym<'a> {
     Var(VarInfo),
+    NetArray(NetArrayInfo),
     Param {
         value: LogicVec,
         signed: bool,
@@ -129,6 +147,9 @@ pub(crate) struct Elab<'a> {
     pub scopes: Vec<Scope<'a>>,
     /// Names of generate blocks: prefix -> names declared inside.
     pub blocks: HashMap<String, HashMap<String, Sym<'a>>>,
+    /// Arrays of the current module that are lowered to registers instead
+    /// of memories (see [`mem2reg_names`]).
+    pub mem2reg: HashSet<String>,
     /// Power-on values of variable bits (from `initial` and initializers).
     pub init: HashMap<SigBit, synth_core::Logic>,
     /// Current procedural execution state, when lowering a process.
@@ -155,6 +176,7 @@ pub fn elaborate(
         scopes: Vec::new(),
         blocks: HashMap::new(),
         init: HashMap::new(),
+        mem2reg: HashSet::new(),
         proc: None,
         depth: 0,
         warned: Default::default(),
@@ -189,6 +211,7 @@ pub fn elaborate(
         opts.top_params.iter().map(|(k, v)| (k.clone(), (v.clone(), false))).collect();
     e.module(top, "", &overrides, &[], top.name.span, true);
     let mut m = std::mem::take(&mut e.out);
+    apply_init(&mut m, &e.init);
     if let Err(msg) = synth_rtl::opt::clean(&mut m) {
         e.diags.push(Diagnostic::global_error(msg));
     }
@@ -196,6 +219,128 @@ pub fn elaborate(
         return (None, e.diags);
     }
     (Some(m), e.diags)
+}
+
+/// Names of variable arrays that cannot be memories because they are
+/// written by combinational processes or under an asynchronous reset; they
+/// are lowered to one register per element instead (like Yosys `mem2reg`).
+pub(crate) fn mem2reg_names(items: &[ast::Item]) -> HashSet<String> {
+    fn targets(e: &ast::Expr, out: &mut HashSet<String>) {
+        match e {
+            ast::Expr::Index { base, .. } => {
+                if let ast::Expr::Ident(parts, _) = base.as_ref() {
+                    if parts.len() == 1 {
+                        out.insert(parts[0].0.name.clone());
+                    }
+                } else {
+                    targets(base, out);
+                }
+            }
+            ast::Expr::Range { base, .. } | ast::Expr::IndexedRange { base, .. } => {
+                targets(base, out)
+            }
+            ast::Expr::Concat(parts, _) => parts.iter().for_each(|p| targets(p, out)),
+            _ => {}
+        }
+    }
+    fn stmt(s: &ast::Stmt, out: &mut HashSet<String>) {
+        use ast::Stmt::*;
+        match s {
+            Block { stmts, .. } => stmts.iter().for_each(|s| stmt(s, out)),
+            Assign { lhs, .. } => targets(lhs, out),
+            If { then, otherwise, .. } => {
+                stmt(then, out);
+                if let Some(o) = otherwise {
+                    stmt(o, out);
+                }
+            }
+            Case { items, .. } => items.iter().for_each(|i| stmt(&i.body, out)),
+            For { init, step, body, .. } => {
+                stmt(init, out);
+                stmt(step, out);
+                stmt(body, out);
+            }
+            While { body, .. }
+            | Repeat { body, .. }
+            | Forever { body, .. }
+            | Timing { body, .. }
+            | Delay { body, .. } => stmt(body, out),
+            _ => {}
+        }
+    }
+    fn walk(items: &[ast::Item], out: &mut HashSet<String>) {
+        for it in items {
+            match it {
+                ast::Item::Always { body: ast::Stmt::Timing { control, body, .. }, .. } => {
+                    let edges = match control {
+                        ast::EventControl::Star => 0,
+                        ast::EventControl::List(l) => {
+                            l.iter().filter(|e| e.edge != ast::Edge::Any).count()
+                        }
+                    };
+                    // Combinational (no edges) or with an asynchronous reset.
+                    if edges != 1 {
+                        stmt(body, out);
+                    }
+                }
+                // Conditional generate branches are scanned when chosen (see
+                // `gen_block`), so an untaken branch has no effect.
+                ast::Item::GenFor { body, .. } => walk(&body.items, out),
+                ast::Item::GenBlock(b) => walk(&b.items, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    walk(items, &mut out);
+    out
+}
+
+/// Applies power-on values (declaration initializers and `initial` blocks,
+/// wherever they appear relative to the processes) to registers. Variables
+/// that are initialised but never otherwise driven keep their initial value
+/// forever and become constants.
+fn apply_init(m: &mut Module, init: &HashMap<SigBit, synth_core::Logic>) {
+    if init.is_empty() {
+        return;
+    }
+    let mut driven: HashSet<SigBit> = HashSet::new();
+    for c in m.cells.iter_mut().filter(|c| c.alive) {
+        let (q, iv) = match &mut c.kind {
+            CellKind::Dff(d) => (&d.q, &mut d.init),
+            _ => {
+                for o in c.outputs() {
+                    driven.extend(o.iter().copied());
+                }
+                continue;
+            }
+        };
+        let mut bits: Vec<synth_core::Logic> = iv.bits().collect();
+        for (i, b) in q.iter().enumerate() {
+            driven.insert(*b);
+            if let Some(&v) = init.get(b) {
+                bits[i] = v;
+            }
+        }
+        *iv = LogicVec::from_bits(&bits);
+    }
+    for mem in &m.memories {
+        for rd in &mem.reads {
+            driven.extend(rd.data.iter().copied());
+        }
+    }
+    for (lhs, _) in &m.connections {
+        driven.extend(lhs.iter().copied());
+    }
+    let mut keys: Vec<(&SigBit, &synth_core::Logic)> =
+        init.iter().filter(|(k, _)| !driven.contains(k)).collect();
+    keys.sort();
+    if !keys.is_empty() {
+        m.connections.push((
+            keys.iter().map(|(k, _)| **k).collect(),
+            keys.iter().map(|(_, v)| SigBit::Const(**v)).collect(),
+        ));
+    }
 }
 
 /// The top module: the one marked `(* top *)`, else the single module not
@@ -377,6 +522,7 @@ impl<'a> Elab<'a> {
         }
         self.depth += 1;
         let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_mem2reg = std::mem::replace(&mut self.mem2reg, mem2reg_names(&m.items));
         self.scopes.push(Scope { names: HashMap::new(), prefix: prefix.to_string() });
 
         // Header parameters.
@@ -453,6 +599,7 @@ impl<'a> Elab<'a> {
             // Unconnected inputs float (x); outputs simply stay internal.
         }
         self.scopes = saved_scopes;
+        self.mem2reg = saved_mem2reg;
         self.depth -= 1;
     }
 
@@ -628,7 +775,11 @@ impl<'a> Elab<'a> {
         };
         for d in &v.names {
             if !d.dims.is_empty() {
-                self.memory_decl(v, d, width, signed, msb, lsb);
+                if v.kind.is_variable() && !self.mem2reg.contains(&d.name.name) {
+                    self.memory_decl(v, d, width, signed, msb, lsb);
+                } else {
+                    self.net_array_decl(d, width, signed, msb, lsb, v.kind.is_variable());
+                }
                 continue;
             }
             if let Some(Sym::Var(_)) = self.lookup(&d.name.name)
@@ -686,6 +837,39 @@ impl<'a> Elab<'a> {
         }
     }
 
+    /// Declares an array of nets, or of variables lowered to registers.
+    fn net_array_decl(
+        &mut self,
+        d: &ast::DeclName,
+        width: u32,
+        signed: bool,
+        msb: i64,
+        lsb: i64,
+        is_var: bool,
+    ) {
+        if d.dims.len() > 1 {
+            self.error(d.name.span, "multi-dimensional arrays are not supported");
+            return;
+        }
+        if d.init.is_some() {
+            self.error(d.name.span, "net arrays cannot have an initializer");
+        }
+        let r = Some(d.dims[0].clone());
+        let Some((first, last)) = self.range(&r) else { return };
+        if first.abs_diff(last) >= 1 << 16 {
+            self.error(d.name.span, "net array too large");
+            return;
+        }
+        let step = if first <= last { 1 } else { -1 };
+        let mut elems = Vec::new();
+        for k in 0..=first.abs_diff(last) as i64 {
+            let name = format!("{}{}[{}]", self.prefix(), d.name.name, first + k * step);
+            let wire = self.new_wire(&name, width, signed);
+            elems.push(VarInfo { wire, width, signed, msb, lsb, is_var });
+        }
+        self.declare(&d.name.name, Sym::NetArray(NetArrayInfo { elems, first, last }), d.name.span);
+    }
+
     fn memory_decl(
         &mut self,
         v: &ast::VarDecl,
@@ -733,7 +917,9 @@ impl<'a> Elab<'a> {
         let value = Sig(value.0[..width as usize].to_vec());
         match targets {
             expr::Lvalue::Bits(bits) => self.out.connect(Sig(bits), value),
-            expr::Lvalue::Dynamic { .. } | expr::Lvalue::Mem { .. } => self.error(
+            expr::Lvalue::Dynamic { .. }
+            | expr::Lvalue::Mem { .. }
+            | expr::Lvalue::ArrayDyn { .. } => self.error(
                 lhs.span(),
                 "continuous assignment target must be a net (no variable index or memory)",
             ),
@@ -754,7 +940,10 @@ impl<'a> Elab<'a> {
             },
         };
         self.scopes.push(Scope { names: HashMap::new(), prefix: prefix.clone() });
+        let saved_mem2reg = self.mem2reg.clone();
+        self.mem2reg.extend(mem2reg_names(&b.items));
         self.items(&b.items, &[]);
+        self.mem2reg = saved_mem2reg;
         let scope = self.scopes.pop().unwrap();
         if let Some(n) = name {
             let full = prefix.trim_end_matches('.').to_string();

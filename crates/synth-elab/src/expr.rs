@@ -5,7 +5,7 @@ use synth_core::{Logic, LogicVec, Span};
 use synth_rtl::{BinaryOp, MemRead, Sig, SigBit, UnaryOp};
 use synth_verilog::ast::{self, BinaryOp as B, Expr, UnaryOp as U};
 
-use crate::{Elab, MemInfo, Sym, VarInfo};
+use crate::{Elab, MemInfo, NetArrayInfo, Sym, VarInfo};
 
 /// An assignment target.
 #[derive(Clone, Debug)]
@@ -17,6 +17,10 @@ pub(crate) enum Lvalue {
     Dynamic { base: Vec<SigBit>, index: Sig, index_signed: bool, offset: i64, width: usize },
     /// A memory word (or part of one): `mem[addr][..]`.
     Mem { mem: MemInfo, addr: Sig, lo: u32, width: u32 },
+    /// A variable-indexed element (or fixed part of one) of a register
+    /// array: `elems[k]` (the written bits of element `k`) is assigned when
+    /// `index == indices[k]`.
+    ArrayDyn { elems: Vec<Vec<SigBit>>, indices: Vec<i64>, index: Sig, index_signed: bool },
 }
 
 impl Lvalue {
@@ -25,6 +29,7 @@ impl Lvalue {
             Lvalue::Bits(b) => b.len(),
             Lvalue::Dynamic { width, .. } => *width,
             Lvalue::Mem { width, .. } => *width as usize,
+            Lvalue::ArrayDyn { elems, .. } => elems.first().map_or(0, Vec::len),
         }
     }
 }
@@ -119,6 +124,8 @@ impl<'a> Elab<'a> {
             Expr::Index { base, .. } => {
                 if let Some(m) = self.mem_of(base) {
                     (m.width, m.signed)
+                } else if let Some(a) = self.net_array_of(base) {
+                    (a.elems[0].width, a.elems[0].signed)
                 } else {
                     (1, false)
                 }
@@ -204,6 +211,43 @@ impl<'a> Elab<'a> {
         sig.as_const()?.to_i64(s)
     }
 
+    fn net_array_of(&mut self, e: &Expr) -> Option<NetArrayInfo> {
+        match e {
+            Expr::Ident(parts, _) => match self.lookup_path(parts) {
+                Some(Sym::NetArray(a)) => Some(a),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Reads element `index` of a net array: the element itself for a
+    /// constant index, else a multiplexer over all elements.
+    fn net_array_read(&mut self, a: &NetArrayInfo, index: &Expr) -> Sig {
+        let width = a.elems[0].width as usize;
+        let (idx, is) = self.gen_self(index);
+        if let Some(c) = idx.as_const() {
+            return match c.to_i64(is).and_then(|i| a.elem(i)) {
+                Some(v) => self.var_sig(&v.clone()),
+                None => Sig::xs(width),
+            };
+        }
+        let mut out = Sig::xs(width);
+        let step = if a.first <= a.last { 1 } else { -1 };
+        for (k, v) in a.elems.clone().iter().enumerate() {
+            let i = a.first + k as i64 * step;
+            let iw = idx.width();
+            let tv = LogicVec::from_i64(i, iw.max(64));
+            if tv.resize(iw, is).resize(iw.max(64), is) != tv {
+                continue; // not representable in the index width
+            }
+            let hit = self.out.eq_const(idx.clone(), &tv.resize(iw, false));
+            let val = self.var_sig(v);
+            out = self.out.mux(hit, out, val);
+        }
+        out
+    }
+
     fn mem_of(&mut self, e: &Expr) -> Option<MemInfo> {
         match e {
             Expr::Ident(parts, _) => match self.lookup_path(parts) {
@@ -263,8 +307,8 @@ impl<'a> Elab<'a> {
                 Some(Sym::Param { value, signed: ps }) => {
                     Sig::from_const(&value.resize(w, ps && signed))
                 }
-                Some(Sym::Mem(_)) => {
-                    self.error(*span, "a memory cannot be used as a value; index it");
+                Some(Sym::Mem(_) | Sym::NetArray(_)) => {
+                    self.error(*span, "an array cannot be used as a value; index it");
                     Sig::xs(w)
                 }
                 Some(Sym::Genvar) => {
@@ -286,6 +330,10 @@ impl<'a> Elab<'a> {
                 if let Some(m) = self.mem_of(base) {
                     let word = self.mem_read(&m, index);
                     return word.extend(w, signed && m.signed);
+                }
+                if let Some(a) = self.net_array_of(base) {
+                    let s = a.elems[0].signed;
+                    return self.net_array_read(&a, index).extend(w, signed && s);
                 }
                 let Some(b) = self.sel_base(base) else { return Sig::xs(w) };
                 let bit = self.bit_select(&b, index, *span);
@@ -346,7 +394,7 @@ impl<'a> Elab<'a> {
                 let c = self.out.reduce_bool(c);
                 let t = self.emit(then, width, signed);
                 let f = self.emit(otherwise, width, signed);
-                self.out.mux(c, f, t)
+                self.out.ternary(c, f, t)
             }
             Expr::Concat(parts, _) => {
                 let mut acc = Sig::new();
@@ -421,7 +469,9 @@ impl<'a> Elab<'a> {
                 let (aw, _) = self.expr_type(a);
                 Sig::from_u64(aw as u64, w)
             }
-            "time" | "stime" | "realtime" | "random" | "urandom" => {
+            "time" | "stime" | "realtime" | "random" | "urandom" | "fopen" | "fgetc" | "fgets"
+            | "feof" | "ferror" | "fscanf" | "sscanf" | "fread" | "ftell" | "fseek" | "ungetc"
+            | "test$plusargs" | "value$plusargs" => {
                 self.warn_once(span, format!("${name} is not synthesizable; using x"));
                 Sig::xs(w)
             }
@@ -547,8 +597,8 @@ impl<'a> Elab<'a> {
                     lsb: 0,
                     signed,
                 }),
-                Some(Sym::Mem(_)) => {
-                    self.error(*span, "a memory must be indexed before selecting bits");
+                Some(Sym::Mem(_) | Sym::NetArray(_)) => {
+                    self.error(*span, "an array must be indexed before selecting bits");
                     None
                 }
                 _ => {
@@ -560,6 +610,11 @@ impl<'a> Elab<'a> {
                 if let Some(m) = self.mem_of(inner) {
                     let word = self.mem_read(&m, index);
                     return Some(SelBase { bits: word, msb: m.msb, lsb: m.lsb, signed: m.signed });
+                }
+                if let Some(a) = self.net_array_of(inner) {
+                    let bits = self.net_array_read(&a, index);
+                    let e = &a.elems[0];
+                    return Some(SelBase { bits, msb: e.msb, lsb: e.lsb, signed: e.signed });
                 }
                 // Select of a select: treat the inner result as a plain vector.
                 let (s, sg) = self.gen_self(base);
@@ -705,6 +760,14 @@ impl<'a> Elab<'a> {
                     let (addr, _) = self.gen_self(index);
                     return Some(Lvalue::Mem { width: m.width, mem: m, addr, lo: 0 });
                 }
+                if let Some(a) = self.net_array_of(base) {
+                    if self.try_const_int(index).is_none() {
+                        let w = a.elems[0].width;
+                        return self.array_dyn(&a, index, 0, w, *span);
+                    }
+                    let v = self.lvalue_var(e)?;
+                    return Some(Lvalue::Bits(Sig::wire(v.wire, v.width).0));
+                }
                 let v = self.lvalue_var(base)?;
                 let (idx, is) = self.gen_self(index);
                 if let Some(c) = idx.as_const() {
@@ -744,6 +807,18 @@ impl<'a> Elab<'a> {
                         mem: m,
                         addr,
                     });
+                }
+                if let Expr::Index { base: ab, index, .. } = base.as_ref()
+                    && let Some(a) = self.net_array_of(ab)
+                    && self.try_const_int(index).is_none()
+                {
+                    let (hi, lo) = (self.const_int(msb)?, self.const_int(lsb)?);
+                    let e0 = a.elems[0].clone();
+                    let (Some(ph), Some(pl)) = (e0.bit_of(hi), e0.bit_of(lo)) else {
+                        self.error(*span, "part-select out of range");
+                        return None;
+                    };
+                    return self.array_dyn(&a, index, ph.min(pl), ph.abs_diff(pl) + 1, *span);
                 }
                 let v = self.lvalue_var(base)?;
                 let (hi, lo) = (self.const_int(msb)?, self.const_int(lsb)?);
@@ -841,8 +916,44 @@ impl<'a> Elab<'a> {
         }
     }
 
+    /// A write to bits `lo..lo + width` of the element of register array `a`
+    /// selected by the non-constant `index`.
+    fn array_dyn(
+        &mut self,
+        a: &NetArrayInfo,
+        index: &Expr,
+        lo: u32,
+        width: u32,
+        span: Span,
+    ) -> Option<Lvalue> {
+        if !a.elems[0].is_var {
+            self.error(span, "continuous assignment to a variable element of a net array");
+            return None;
+        }
+        let (idx, is) = self.gen_self(index);
+        let step = if a.first <= a.last { 1 } else { -1 };
+        let indices = (0..a.elems.len() as i64).map(|k| a.first + k * step).collect();
+        let elems = a
+            .elems
+            .iter()
+            .map(|v| (lo..lo + width).map(|b| SigBit::Wire(v.wire, b)).collect())
+            .collect();
+        Some(Lvalue::ArrayDyn { elems, indices, index: idx, index_signed: is })
+    }
+
     fn lvalue_var(&mut self, base: &Expr) -> Option<VarInfo> {
         match base {
+            Expr::Index { base: inner, index, span } if self.net_array_of(inner).is_some() => {
+                let a = self.net_array_of(inner).unwrap();
+                let i = self.const_int(index)?;
+                match a.elem(i) {
+                    Some(v) => Some(v.clone()),
+                    None => {
+                        self.error(*span, "array index out of range");
+                        None
+                    }
+                }
+            }
             Expr::Ident(parts, span) => match self.lookup_path(parts) {
                 Some(Sym::Var(v)) => Some(v),
                 _ => {
