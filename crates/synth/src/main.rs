@@ -27,7 +27,9 @@ BUILD OPTIONS:
     synth build <files.v...> --device <hx1k|hx8k|...> --package <pkg>
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--timing-weight <0..1>]
+              [--timing-weight <0..1>] [--freq <MHz>]
+              Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
+              for the other clocks.
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -37,6 +39,7 @@ ELAB OPTIONS:
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
+              [--freq <MHz>]
 ";
 
 fn main() -> ExitCode {
@@ -109,6 +112,17 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
 }
 
 /// `--timing-weight` (default 0.5).
+/// Clock targets: the PCF's `set_frequency` lines, and `--freq` for the
+/// other clocks.
+fn clocks(
+    a: &mut Args,
+    pcf: &arch_ice40::pcf::Pcf,
+) -> Result<arch_ice40::timing::ClockConstraints, String> {
+    let mut c = pcf.clocks.clone();
+    c.default_mhz = a.value("--freq").map(|s| s.parse().map_err(|_| "bad --freq")).transpose()?;
+    Ok(c)
+}
+
 fn timing_weight(a: &mut Args) -> Result<f64, String> {
     match a.value("--timing-weight") {
         Some(v) => v
@@ -148,15 +162,17 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--seed",
             "--effort",
             "--timing-weight",
+            "--freq",
         ],
         &[],
     )?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
-    let pins = match a.value("--pcf") {
+    let pcf = match a.value("--pcf") {
         Some(p) => arch_ice40::pcf::parse_pcf(&read(&p)?)?,
         None => Default::default(),
     };
+    let clocks = clocks(&mut a, &pcf)?;
     let seed =
         a.value("--seed").map(|s| s.parse().map_err(|_| "bad --seed")).transpose()?.unwrap_or(1);
     let effort = a
@@ -171,8 +187,9 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         seed,
         place_effort: effort,
         timing_weight: timing_weight(&mut a)?,
+        clocks,
     };
-    let res = arch_ice40::flow::implement(nl, &pins, &opts)?;
+    let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
     for l in &res.log {
         eprintln!("info: {l}");
     }
@@ -188,16 +205,27 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
 fn cmd_pnr(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
-        &["--device", "--package", "--pcf", "-o", "--asc", "--seed", "--effort", "--timing-weight"],
+        &[
+            "--device",
+            "--package",
+            "--pcf",
+            "-o",
+            "--asc",
+            "--seed",
+            "--effort",
+            "--timing-weight",
+            "--freq",
+        ],
         &[],
     )?;
     let input = a.positional(0, "netlist")?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
-    let pins = match a.value("--pcf") {
+    let pcf = match a.value("--pcf") {
         Some(p) => arch_ice40::pcf::parse_pcf(&read(&p)?)?,
         None => Default::default(),
     };
+    let clocks = clocks(&mut a, &pcf)?;
     let seed =
         a.value("--seed").map(|s| s.parse().map_err(|_| "bad --seed")).transpose()?.unwrap_or(1);
     let effort = a
@@ -214,8 +242,9 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         seed,
         place_effort: effort,
         timing_weight: timing_weight(&mut a)?,
+        clocks,
     };
-    let res = arch_ice40::flow::implement(nl, &pins, &opts)?;
+    let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
     for l in &res.log {
         eprintln!("info: {l}");
     }

@@ -25,11 +25,18 @@ pub struct PlaceOptions {
     pub effort: f64,
     /// Maximum number of logic cell inputs fed from local tracks per tile.
     pub max_locals: usize,
+    pub clocks: crate::timing::ClockConstraints,
 }
 
 impl Default for PlaceOptions {
     fn default() -> Self {
-        PlaceOptions { timing_weight: 0.5, seed: 1, effort: 1.0, max_locals: 32 }
+        PlaceOptions {
+            timing_weight: 0.5,
+            seed: 1,
+            effort: 1.0,
+            max_locals: 32,
+            clocks: Default::default(),
+        }
     }
 }
 
@@ -72,7 +79,7 @@ enum Unit {
 /// Pin constraints: top-level port name → package pin.
 pub type PinConstraints = OrderedMap<String, String>;
 
-fn port_name(nl: &Netlist, c: CellId) -> Option<String> {
+pub(crate) fn port_name(nl: &Netlist, c: CellId) -> Option<String> {
     nl.cells[c]
         .attrs
         .iter()
@@ -278,8 +285,6 @@ fn net_weight(pins: usize) -> f64 {
 struct Conn {
     drv: CellId,
     sink: CellId,
-    /// Input pin index on the sink.
-    pin: usize,
 }
 
 /// Estimated routed delay (ps) of a connection spanning `d` tiles.
@@ -313,6 +318,10 @@ struct Annealer<'a> {
     fixed: FxHashMap<CellId, (i16, i16)>,
     conns: Vec<Conn>,
     cell_conns: FxHashMap<CellId, Vec<u32>>,
+    timing: crate::timing::TimingGraph,
+    /// The placement connection of each timing graph connection (`u32::MAX`
+    /// for connections that do not depend on placement).
+    conn_of_timing: Vec<u32>,
     /// Timing weight (criticality^8) and current cost of each connection.
     conn_weight: Vec<f64>,
     conn_cost: Vec<f64>,
@@ -334,9 +343,12 @@ impl<'a> Annealer<'a> {
         let logic_cols: Vec<usize> =
             (1..=width).filter(|&x| die.tile_kind(x, 1) == TileKind::Logic).collect();
         let ram_bels: Vec<BelId> = arch.bels_of(BelKind::Ram).collect();
+        let timing = crate::timing::TimingGraph::new(arch, nl, &opts.clocks);
         let mut sa = Annealer {
             arch,
             nl,
+            conn_of_timing: vec![u32::MAX; timing.conns.len()],
+            timing,
             conns: Vec::new(),
             cell_conns: FxHashMap::default(),
             conn_weight: Vec::new(),
@@ -453,7 +465,10 @@ impl<'a> Annealer<'a> {
                     continue;
                 }
                 let id = sa.conns.len() as u32;
-                sa.conns.push(Conn { drv: d.cell, sink: p.cell, pin: p.pin as usize });
+                if let Some(t) = sa.timing.conn_to(p.cell, p.pin as usize) {
+                    sa.conn_of_timing[t] = id;
+                }
+                sa.conns.push(Conn { drv: d.cell, sink: p.cell });
                 sa.cell_conns.entry(d.cell).or_default().push(id);
                 sa.cell_conns.entry(p.cell).or_default().push(id);
             }
@@ -477,17 +492,13 @@ impl<'a> Annealer<'a> {
             return;
         }
         let nl = self.nl;
-        // Delay of the connection to each input pin.
-        let mut idx: FxHashMap<(CellId, usize), usize> = FxHashMap::default();
-        for (k, c) in self.conns.iter().enumerate() {
-            idx.insert((c.sink, c.pin), k);
-        }
-        let delay = |c: CellId, i: usize| -> f64 {
-            match idx.get(&(c, i)) {
-                Some(&k) => self.conn_delay(k),
-                None => {
-                    // Carry chains, globals and unplaced cells.
-                    let n = nl.cells[c].pins[i].net;
+        // Placed connections by distance; carry chains are free, globals a
+        // fixed delay.
+        let delay: Vec<f64> = (0..self.timing.conns.len())
+            .map(|t| match self.conn_of_timing[t] {
+                u32::MAX => {
+                    let c = self.timing.conns[t];
+                    let n = nl.cells[c.sink].pins[c.pin].net;
                     if n.is_some_and(|n| {
                         nl.nets[n].driver.is_some_and(|d| nl.cell_kind(d.cell) == GB)
                     }) {
@@ -496,14 +507,16 @@ impl<'a> Annealer<'a> {
                         0.0
                     }
                 }
+                k => self.conn_delay(k as usize),
+            })
+            .collect();
+        let crit = self.timing.analyse(&delay).criticality;
+        for (t, &k) in self.conn_of_timing.iter().enumerate() {
+            if k != u32::MAX {
+                let k = k as usize;
+                self.conn_weight[k] = crit[t].powi(8);
+                self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
             }
-        };
-        let (_period, crit) = crate::timing::criticalities(self.arch, nl, &delay);
-        for k in 0..self.conns.len() {
-            let c = self.conns[k];
-            let cr = crit.get(&(c.sink, c.pin)).copied().unwrap_or(0.0);
-            self.conn_weight[k] = cr.powi(8);
-            self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
         }
         self.bb_norm = self.net_cost.iter().sum::<f64>().max(1.0);
         self.t_norm = self.conn_cost.iter().sum::<f64>().max(1.0);
@@ -736,20 +749,68 @@ impl<'a> Annealer<'a> {
     }
 
     /// Tries one move; returns whether it was accepted.
+    /// Half of the time: a random point in the median region of the
+    /// bounding boxes of `cells`' nets without them (VPR's median move),
+    /// where moving the cells most shortens their nets.
+    fn median_target(&mut self, cells: &[CellId]) -> Option<(usize, usize)> {
+        if self.rng.below(2) == 0 {
+            return None;
+        }
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for c in cells {
+            for &n in self.cell_nets.get(c).into_iter().flatten() {
+                let net = &self.nets[n as usize];
+                if net.len() > 64 {
+                    continue;
+                }
+                let mut bb: Option<(i16, i16, i16, i16)> = None;
+                for &o in net {
+                    if cells.contains(&o) {
+                        continue;
+                    }
+                    let (ox, oy) = self.cell_xy(o);
+                    bb = Some(match bb {
+                        None => (ox, ox, oy, oy),
+                        Some((x0, x1, y0, y1)) => (x0.min(ox), x1.max(ox), y0.min(oy), y1.max(oy)),
+                    });
+                }
+                if let Some((x0, x1, y0, y1)) = bb {
+                    xs.extend([x0, x1]);
+                    ys.extend([y0, y1]);
+                }
+            }
+        }
+        if xs.is_empty() {
+            return None;
+        }
+        xs.sort_unstable();
+        ys.sort_unstable();
+        let m = xs.len() / 2;
+        let pick = |rng: &mut Rng, v: &[i16], hi: usize| {
+            rng.range_inclusive(v[m - 1] as i64, v[m] as i64).clamp(1, hi as i64) as usize
+        };
+        Some((pick(&mut self.rng, &xs, self.width), pick(&mut self.rng, &ys, self.height)))
+    }
+
     fn try_move(&mut self, temp: f64, rlim: f64, scratch: &mut Vec<(u32, f64)>) -> Option<bool> {
         let u = self.rng.below(self.units.len());
         let r = rlim.max(1.0) as i64;
         match self.units[u].clone() {
             Unit::Lc(c) => {
                 let (x, y, z) = self.pos[&c];
-                let nx = self
-                    .rng
-                    .range_inclusive((x as i64 - r).max(1), (x as i64 + r).min(self.width as i64))
-                    as usize;
-                let ny = self
-                    .rng
-                    .range_inclusive((y as i64 - r).max(1), (y as i64 + r).min(self.height as i64))
-                    as usize;
+                let (nx, ny) = match self.median_target(&[c]) {
+                    Some(t) => t,
+                    None => (
+                        self.rng.range_inclusive(
+                            (x as i64 - r).max(1),
+                            (x as i64 + r).min(self.width as i64),
+                        ) as usize,
+                        self.rng.range_inclusive(
+                            (y as i64 - r).max(1),
+                            (y as i64 + r).min(self.height as i64),
+                        ) as usize,
+                    ),
+                };
                 if self.arch.db.die.tile_kind(nx, ny) != TileKind::Logic {
                     return None;
                 }
@@ -794,63 +855,110 @@ impl<'a> Annealer<'a> {
             Unit::Chain(cells) => {
                 let (x, y, _) = self.pos[&cells[0]];
                 let tiles = cells.len().div_ceil(8);
-                let col = self.rng.below(self.logic_cols.len());
-                let nx = self.logic_cols[col];
-                if (nx as i64 - x as i64).abs() > r {
-                    return None;
-                }
                 let max_y0 = self.height + 1 - tiles;
-                let ny = self
-                    .rng
-                    .range_inclusive((y as i64 - r).max(1), (y as i64 + r).min(max_y0 as i64))
-                    as usize;
+                let (nx, ny) = match self.median_target(&cells) {
+                    // The nearest logic column; the chain centred on the target.
+                    Some((tx, ty)) => {
+                        let &col = self
+                            .logic_cols
+                            .iter()
+                            .min_by_key(|&&c| (c as i64 - tx as i64).abs())
+                            .unwrap();
+                        (col, (ty as i64 - tiles as i64 / 2).clamp(1, max_y0 as i64) as usize)
+                    }
+                    None => {
+                        let col = self.rng.below(self.logic_cols.len());
+                        let nx = self.logic_cols[col];
+                        if (nx as i64 - x as i64).abs() > r {
+                            return None;
+                        }
+                        let ny = self.rng.range_inclusive(
+                            (y as i64 - r).max(1),
+                            (y as i64 + r).min(max_y0 as i64),
+                        ) as usize;
+                        (nx, ny)
+                    }
+                };
                 if (nx, ny) == (x as usize, y as usize) {
                     return None;
                 }
-                // Target slots must be free or belong to this chain.
-                for i in 0..cells.len() {
-                    let s = self.slot(nx, ny + i / 8, i % 8);
+                // Target slots must be free, belong to this chain or hold
+                // single logic cells, which move to the slots the chain leaves.
+                let target: Vec<usize> =
+                    (0..cells.len()).map(|i| self.slot(nx, ny + i / 8, i % 8)).collect();
+                let mut displaced: Vec<(CellId, (i16, i16, u8))> = Vec::new();
+                for &s in &target {
                     if let Some(o) = self.lc_occ[s]
                         && !cells.contains(&o)
                     {
-                        return None;
+                        if !matches!(self.units[self.cell_unit[&o]], Unit::Lc(_)) {
+                            return None;
+                        }
+                        displaced.push((o, self.pos[&o]));
                     }
                 }
                 let old: Vec<(i16, i16, u8)> = cells.iter().map(|c| self.pos[c]).collect();
+                let slot_of = |sa: &Self, p: (i16, i16, u8)| {
+                    sa.slot(p.0 as usize, p.1 as usize, p.2 as usize)
+                };
+                for &(_, p) in &displaced {
+                    let s = slot_of(self, p);
+                    self.lc_occ[s] = None;
+                }
                 for (i, &c) in cells.iter().enumerate() {
-                    let (ox, oy, oz) = old[i];
-                    let s = self.slot(ox as usize, oy as usize, oz as usize);
+                    let s = slot_of(self, old[i]);
                     if self.lc_occ[s] == Some(c) {
                         self.lc_occ[s] = None;
                     }
                 }
                 for (i, &c) in cells.iter().enumerate() {
-                    let (cy, cz) = (ny + i / 8, i % 8);
-                    let s = self.slot(nx, cy, cz);
-                    self.lc_occ[s] = Some(c);
-                    self.pos.insert(c, (nx as i16, cy as i16, cz as u8));
+                    self.lc_occ[target[i]] = Some(c);
+                    self.pos.insert(c, (nx as i16, (ny + i / 8) as i16, (i % 8) as u8));
                 }
-                let mut legal = true;
-                for t in 0..tiles {
-                    legal &= self.tile_ok(nx, ny + t);
+                // Displaced cells fill the chain's old slots that are free now.
+                let vacated: Vec<(i16, i16, u8)> = old
+                    .iter()
+                    .copied()
+                    .filter(|&p| self.lc_occ[slot_of(self, p)].is_none())
+                    .collect();
+                for (k, &(o, _)) in displaced.iter().enumerate() {
+                    let p = vacated[k];
+                    let s = slot_of(self, p);
+                    self.lc_occ[s] = Some(o);
+                    self.pos.insert(o, p);
                 }
+                let mut touched: Vec<(usize, usize)> = (0..tiles).map(|t| (nx, ny + t)).collect();
+                touched.extend(
+                    vacated.iter().take(displaced.len()).map(|p| (p.0 as usize, p.1 as usize)),
+                );
+                touched.sort_unstable();
+                touched.dedup();
+                let legal = touched.iter().all(|&(tx, ty)| self.tile_ok(tx, ty));
+                let moved: Vec<CellId> =
+                    cells.iter().copied().chain(displaced.iter().map(|d| d.0)).collect();
                 let accept = legal && {
-                    let d = self.delta(&cells, scratch);
+                    let d = self.delta(&moved, scratch);
                     d <= 0.0 || self.rng.unit() < (-d / temp).exp()
                 };
                 if accept {
                     self.commit(scratch);
                 } else {
-                    for (i, &c) in cells.iter().enumerate() {
-                        let s = self.slot(nx, ny + i / 8, i % 8);
+                    for p in vacated.iter().take(displaced.len()) {
+                        let s = slot_of(self, *p);
                         self.lc_occ[s] = None;
-                        let _ = c;
+                    }
+                    for &s in &target {
+                        self.lc_occ[s] = None;
                     }
                     for (i, &c) in cells.iter().enumerate() {
-                        let (ox, oy, oz) = old[i];
-                        let s = self.slot(ox as usize, oy as usize, oz as usize);
+                        let s = slot_of(self, old[i]);
                         self.lc_occ[s] = Some(c);
                         self.pos.insert(c, old[i]);
+                    }
+                    for &(o, p) in &displaced {
+                        let s = slot_of(self, p);
+                        self.lc_occ[s] = Some(o);
+                        self.pos.insert(o, p);
                     }
                 }
                 Some(accept)

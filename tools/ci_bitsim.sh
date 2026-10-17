@@ -8,7 +8,7 @@
 # `synth` binary (cargo build --release).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-synth="$root/target/release/synth"
+synth=${SYNTH:-$root/target/release/synth}
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

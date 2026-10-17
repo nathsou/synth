@@ -74,6 +74,9 @@ pub fn generate(
     for edges in routing.net_edges.values() {
         for &e in edges {
             let pip = arch.graph.edge_pip[e as usize];
+            if Arch::permutation(pip).is_some() {
+                continue;
+            }
             let (x, y, t, tp) = arch.pip_info(pip);
             let sw = &t.switches[tp.switch as usize];
             for (k, &b) in sw.bits.iter().enumerate() {

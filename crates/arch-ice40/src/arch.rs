@@ -221,7 +221,18 @@ pub struct Arch {
     pub graph: RoutingGraph,
     /// Per template: delay of each template pip (ps).
     pip_delays: Vec<Vec<f32>>,
+    /// LUT input permutation: per logic cell bel, its physical input pin
+    /// nodes and the virtual nodes standing for the LUT's logical inputs
+    /// (numbered after the device's nodes).
+    lut_perm: Vec<LutPermutation>,
 }
+
+/// A logic cell's physical LUT input pins, the virtual nodes of its logical
+/// inputs, and its position.
+type LutPermutation = ([NodeId; 4], [NodeId; 4], (u8, u8, u8));
+
+/// Graph edges marked with this tile are LUT input permutations, not pips.
+pub const PERMUTATION_TILE: u16 = u16::MAX;
 
 impl Arch {
     pub fn new(part: Part, package: &str) -> Result<Arch, String> {
@@ -259,6 +270,7 @@ impl Arch {
                 node_class: vec![],
             },
             pip_delays,
+            lut_perm: Vec::new(),
         };
         arch.build_bels()?;
         arch.build_graph();
@@ -334,6 +346,16 @@ impl Arch {
                                 name: "SR",
                                 node: self.node(x, y, "lutff_global/s_r")?,
                             });
+                            // Logical LUT inputs, reachable from any physical
+                            // input pin (the LUT's truth table follows).
+                            let physical: [NodeId; 4] = std::array::from_fn(|k| pins[k].node);
+                            let base = db.nodes.len() + 4 * self.lut_perm.len();
+                            let virt: [NodeId; 4] = std::array::from_fn(|k| NodeId::new(base + k));
+                            const PERM: [&str; 4] = ["PERM0", "PERM1", "PERM2", "PERM3"];
+                            for (k, name) in PERM.iter().enumerate() {
+                                pins.push(BelPin { name, node: virt[k] });
+                            }
+                            self.lut_perm.push((physical, virt, (x, y, z)));
                             self.add_bel(BelKind::Lc, x, y, z, pins);
                         }
                     }
@@ -434,13 +456,26 @@ impl Arch {
 
     fn build_graph(&mut self) {
         let db = self.db;
-        let n = db.nodes.len();
+        let n_dev = db.nodes.len();
+        let n = n_dev + 4 * self.lut_perm.len();
         let mut count = vec![0u32; n + 1];
         let mut edges: Vec<(u32, u32, PipRef, f32)> = Vec::new();
         let gw = db.grid_width();
         let mut sum_x = vec![0i32; n];
         let mut sum_y = vec![0i32; n];
         let mut cnt = vec![0i32; n];
+        for (physical, virt, (x, y, _)) in &self.lut_perm {
+            for (k, v) in virt.iter().enumerate() {
+                sum_x[v.index()] = *x as i32;
+                sum_y[v.index()] = *y as i32;
+                cnt[v.index()] = 1;
+                for (j, p) in physical.iter().enumerate() {
+                    count[p.index()] += 1;
+                    let pip = PipRef { tile: PERMUTATION_TILE, tpip: (4 * j + k) as u16 };
+                    edges.push((p.raw(), v.raw(), pip, 0.0));
+                }
+            }
+        }
         for y in 0..db.grid_height() {
             for x in 0..gw {
                 let t = db.tile_template[y * gw + x];
@@ -485,7 +520,15 @@ impl Arch {
             edge_pip[k] = pip;
             edge_delay[k] = d;
         }
-        let node_class = (0..n).map(|i| NodeClass::of(db.node_wire_name(NodeId::new(i)))).collect();
+        let node_class = (0..n)
+            .map(|i| {
+                if i < n_dev {
+                    NodeClass::of(db.node_wire_name(NodeId::new(i)))
+                } else {
+                    NodeClass::LcInput
+                }
+            })
+            .collect();
         self.graph = RoutingGraph {
             offsets,
             edge_dst,
@@ -495,6 +538,24 @@ impl Arch {
             node_y: (0..n).map(|i| (sum_y[i] / cnt[i].max(1)) as i16).collect(),
             node_class,
         };
+    }
+
+    /// The name of a routing graph node (`X<x>/Y<y>/<wire>`; logical LUT
+    /// inputs are `lutff_<z>/in_<k>_lut`).
+    pub fn node_name(&self, node: NodeId) -> String {
+        let n_dev = self.db.nodes.len();
+        if node.index() < n_dev {
+            return self.db.node_name(node);
+        }
+        let i = node.index() - n_dev;
+        let (_, _, (x, y, z)) = self.lut_perm[i / 4];
+        format!("X{x}/Y{y}/lutff_{z}/in_{}_lut", i % 4)
+    }
+
+    /// For a LUT permutation edge: the physical input pin and the logical
+    /// input it feeds.
+    pub fn permutation(pip: PipRef) -> Option<(usize, usize)> {
+        (pip.tile == PERMUTATION_TILE).then_some((pip.tpip as usize / 4, pip.tpip as usize % 4))
     }
 
     /// The template pip behind a routing graph edge.

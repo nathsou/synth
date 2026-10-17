@@ -59,8 +59,11 @@ pub struct RouteOptions {
     pub astar_delay_per_tile: f32,
     /// Scale converting delay units into cost units.
     pub delay_scale: f32,
-    /// Extra tiles around a net's bounding box that searches may use.
+    /// Extra tiles around a net's bounding box that searches may use (it
+    /// grows for nets that stay on congested nodes).
     pub bbox_margin: i16,
+    /// Iterations without a new best (least overuse) before giving up.
+    pub stall_iterations: usize,
 }
 
 impl Default for RouteOptions {
@@ -75,6 +78,7 @@ impl Default for RouteOptions {
             astar_delay_per_tile: 0.0,
             delay_scale: 0.001,
             bbox_margin: 3,
+            stall_iterations: 40,
         }
     }
 }
@@ -158,6 +162,19 @@ pub fn route(
     nets: &[NetRequest],
     opts: &RouteOptions,
 ) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
+    route_with_progress(graph, nets, opts, &[], &mut |_, _, _| {})
+}
+
+/// [`route`] avoiding the `blocked` nodes, calling `progress` after every
+/// iteration with the iteration number, the number of nets routed in it and
+/// the overused nodes.
+pub fn route_with_progress(
+    graph: Graph<'_>,
+    nets: &[NetRequest],
+    opts: &RouteOptions,
+    blocked: &[u32],
+    progress: &mut dyn FnMut(usize, usize, &[usize]),
+) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
     let n = graph.num_nodes();
     let mut edge_src = vec![0u32; graph.edge_dst.len()];
     for node in 0..n {
@@ -182,6 +199,9 @@ pub fn route(
 
     // Sources and sinks of other nets are reserved: never route through them.
     let mut reserved = vec![u32::MAX; n];
+    for &b in blocked {
+        reserved[b as usize] = u32::MAX - 1;
+    }
     for (i, net) in nets.iter().enumerate() {
         reserved[net.source as usize] = i as u32;
         for &s in &net.sinks {
@@ -190,6 +210,10 @@ pub fn route(
     }
 
     let mut best: Option<(Vec<u32>, Vec<usize>)> = None;
+    let mut best_iter = 0;
+    // Search margin of each net: it widens every time the net is ripped up
+    // again for congestion, so that persistent conflicts can detour.
+    let mut margin = vec![opts.bbox_margin; nets.len()];
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
@@ -209,6 +233,7 @@ pub fn route(
                 &reserved,
                 &mut st,
                 opts,
+                margin[i],
                 pres_fac,
                 &mut routes[i],
             )?;
@@ -219,6 +244,7 @@ pub fn route(
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
         stats.overused_history.push(overused.len());
+        progress(iter, to_route.len(), &overused);
         if best.as_ref().is_none_or(|b: &(Vec<u32>, Vec<usize>)| overused.len() < b.0.len()) {
             let set: std::collections::HashSet<usize> = overused.iter().copied().collect();
             let users = (0..nets.len())
@@ -230,10 +256,15 @@ pub fn route(
                 })
                 .collect();
             best = Some((overused.iter().map(|&k| k as u32).collect(), users));
+            best_iter = iter;
         }
         if overused.is_empty() {
             stats.wire_nodes = routes.iter().map(|r| r.edges.len()).sum();
             return Ok((routes, stats));
+        }
+        // No progress for a long while: give up (the caller may place again).
+        if iter >= best_iter + opts.stall_iterations {
+            break;
         }
         for &k in &overused {
             st.history[k] += opts.history_factor * (st.occupancy[k] - 1) as f32;
@@ -250,6 +281,11 @@ pub fn route(
                 routes[i].edges.iter().any(|&e| is_over[graph.edge_dst[e as usize] as usize])
             })
             .collect();
+        if iter >= 2 {
+            for &i in &to_route {
+                margin[i] = margin[i].saturating_add(1);
+            }
+        }
     }
     let (nodes, nets) = best.unwrap_or_default();
     let overused_nodes = nodes.len();
@@ -272,6 +308,7 @@ fn route_net(
     reserved: &[u32],
     st: &mut State,
     opts: &RouteOptions,
+    margin: i16,
     pres_fac: f32,
     out: &mut NetRoute,
 ) -> Result<(), RouteError> {
@@ -289,7 +326,7 @@ fn route_net(
         y0 = y0.min(graph.node_y[s as usize]);
         y1 = y1.max(graph.node_y[s as usize]);
     }
-    let mut margin = opts.bbox_margin;
+    let mut margin = margin;
 
     // Route the farthest sinks first.
     let mut order: Vec<usize> = (0..net.sinks.len()).collect();

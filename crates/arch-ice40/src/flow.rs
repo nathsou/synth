@@ -17,6 +17,8 @@ pub struct FlowOptions {
     pub place_effort: f64,
     /// Weight of timing in the placement cost (0..1, 0 = wirelength only).
     pub timing_weight: f64,
+    /// Requested clock frequencies.
+    pub clocks: crate::timing::ClockConstraints,
 }
 
 /// Result of a successful run.
@@ -86,13 +88,19 @@ fn run(
             seed: opts.seed,
             effort: opts.place_effort,
             timing_weight: w,
+            clocks: opts.clocks.clone(),
             ..PlaceOptions::default()
         };
         let mut placement = fixed.clone();
         crate::place::place_with_fixed(&arch, &nl, &packed, &mut placement, &popts, log)?;
         log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
+        if std::env::var("SYNTH_DEBUG").is_ok() {
+            for l in log.iter().rev().take(2).rev() {
+                eprintln!("debug: {l}");
+            }
+        }
         let t = Instant::now();
-        match crate::route::route(&arch, &nl, &placement, log) {
+        match crate::route::route(&arch, &nl, &placement, &opts.clocks, log) {
             Ok(routing) => {
                 log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
                 result = Some((placement, routing));
@@ -105,11 +113,25 @@ fn run(
         }
     }
     let (placement, routing) = result.expect("the last attempt returns or errors");
+    if !routing.lut_pins.is_empty() {
+        log.push(format!("{} LUTs with permuted inputs", routing.lut_pins.len()));
+    }
+    routing.apply_lut_permutation(&mut nl);
 
     let t = Instant::now();
-    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing);
+    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &opts.clocks);
     for c in &timing.clocks {
-        log.push(format!("clock {}: {:.2} ns, {:.1} MHz", c.clock, c.period_ns, c.fmax_mhz));
+        let target = match c.target_mhz {
+            Some(t) if c.fmax_mhz >= t => format!(" (target {t:.1} MHz met)"),
+            Some(t) => {
+                format!(" (target {t:.1} MHz FAILED, slack {:.2} ns)", 1000.0 / t - c.period_ns)
+            }
+            None => String::new(),
+        };
+        log.push(format!(
+            "clock {}: {:.2} ns, {:.1} MHz{target}",
+            c.clock, c.period_ns, c.fmax_mhz
+        ));
         log.push(format!("  critical path: {}", c.path.join(" -> ")));
     }
     log.push(format!("timing analysed in {:.2}s", t.elapsed().as_secs_f64()));

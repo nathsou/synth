@@ -7,6 +7,12 @@
 # bitstream as icetime computes it (the same timing model for both), and run
 # time of `synth build` and of Yosys + nextpnr-ice40.
 #
+# Both flows get the same device, package, pin constraints and sources.
+# Place and route runs once per seed in SEEDS (default "1 2 3"); the table
+# gives Fmax as min/median/max over the seeds and median times. A failed
+# step shows as FAIL rather than as numbers. Peak memory (MB) is the
+# largest of the runs.
+#
 # Needs yosys, nextpnr-ice40 and icetime on PATH; ICETIME_CHIPDB names
 # icetime's chip database directory if it doesn't find its own.
 # DESIGNS="a b" selects designs; FLOW=synth stops after synthesis;
@@ -27,8 +33,21 @@ mapfile -t hfiles < <(grep '^file' "$h/hazard3.f" | awk -v h="$h" '{print h "/" 
 sfiles=("$s"/servant/servant.v "$s"/servant/servant_mux.v "$s"/servant/servant_ram.v
   "$s"/servant/servant_timer.v "$s"/servant/servant_gpio.v "$s"/servile/*.v "$s"/rtl/*.v)
 
-now() { date +%s.%N; }
-elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
+# measure OUT CMD...: runs CMD and writes "status seconds peak-MB" to OUT.
+measure() {
+  local out=$1
+  shift
+  python3 -c '
+import resource, subprocess, sys, time
+t = time.time()
+rc = subprocess.call(sys.argv[2:])
+mem = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+with open(sys.argv[1], "w") as f:
+    f.write("%d %.1f %.0f\n" % (rc, time.time() - t, mem))
+' "$out" "$@"
+}
+# Fields of a measure result: status, time, memory.
+field() { awk -v k="$2" '{ print $k }' "$1"; }
 
 # Prints "LUT4 CARRY FF RAM" from "N KIND" counts on stdin.
 summarise() {
@@ -46,6 +65,14 @@ fmax() {
   icetime -d "$dev" -P "$pkg" "${db[@]}" -t "$asc" 2>/dev/null |
     sed -n 's/.*Total path delay: .* (\(.*\) MHz).*/\1/p' | tail -1
 }
+
+# "min/median/max" of numbers on stdin ("-" if none).
+spread() {
+  sort -g | awk '{ v[NR] = $1 } END {
+    if (NR == 0) { print "-"; exit }
+    printf "%.1f/%.1f/%.1f", v[1], v[int((NR + 1) / 2)], v[NR] }'
+}
+median() { sort -g | awk '{ v[NR] = $1 } END { if (NR) print v[int((NR + 1) / 2)]; else print "-" }'; }
 
 names=()
 declare -A spec
@@ -92,27 +119,37 @@ load() {
   yread="read_verilog -defer ${incs[*]} $ydefs ${files[*]}; $ycmds hierarchy -top $top;"
 }
 
-printf "Synthesis: iCE40 cells and time (s)\n"
-printf "%-14s %6s %6s %5s %4s %6s   %6s %6s %5s %4s %6s\n" "" LUT4 CARRY FF RAM time LUT4 CARRY FF RAM time
-printf "%-14s %-32s   %s\n" "design" "synth" "yosys"
+printf "Synthesis: iCE40 cells, time (s) and peak memory (MB)\n"
+printf "%-14s %6s %6s %5s %4s %6s %5s   %6s %6s %5s %4s %6s %5s\n" "" LUT4 CARRY FF RAM time mem LUT4 CARRY FF RAM time mem
+printf "%-14s %-38s   %s\n" "design" "synth" "yosys"
+failed() { printf "%27s %6s %5s" FAIL "$(field "$1" 2)" "$(field "$1" 3)"; }
 for n in "${names[@]}"; do
   selected "$n" || continue
   load "$n"
-  t=$(now)
-  ours=$(cd "$dir" && { "$synth" synth "${args[@]}" --top "$top" 2>"$logs/$n.synth.log" || true; } &&
-    tail -1 "$logs/$n.synth.log" | tr ',' '\n' | sed -E 's/^ *(info: )?//' | summarise)
-  ot=$(elapsed "$t")
-  t=$(now)
-  yos=$(cd "$dir" && { yosys -q -p "$yread synth_ice40 -top $top; tee -o /dev/stdout stat" \
-    2>"$logs/$n.yosys.log" || true; } | awk '$1 ~ /^SB_/ { print $2, $1 }' | summarise)
-  yt=$(elapsed "$t")
-  printf "%-14s %s %6s   %s %6s\n" "$n" "$ours" "$ot" "$yos" "$yt"
+  (cd "$dir" && measure "$logs/$n.synth.m" "$synth" synth "${args[@]}" --top "$top" 2>"$logs/$n.synth.log")
+  if [ "$(field "$logs/$n.synth.m" 1)" = 0 ]; then
+    ours=$(tail -1 "$logs/$n.synth.log" | tr ',' '\n' | sed -E 's/^ *(info: )?//' | summarise)
+    ours="$ours $(printf "%6s %5s" "$(field "$logs/$n.synth.m" 2)" "$(field "$logs/$n.synth.m" 3)")"
+  else
+    ours=$(failed "$logs/$n.synth.m")
+  fi
+  (cd "$dir" && measure "$logs/$n.yosys.m" yosys -q -p "$yread synth_ice40 -top $top; tee -o $logs/$n.ystat stat" \
+    >"$logs/$n.yosys.log" 2>&1)
+  if [ "$(field "$logs/$n.yosys.m" 1)" = 0 ]; then
+    yos=$(awk '$1 ~ /^SB_/ { print $2, $1 }' "$logs/$n.ystat" | summarise)
+    yos="$yos $(printf "%6s %5s" "$(field "$logs/$n.yosys.m" 2)" "$(field "$logs/$n.yosys.m" 3)")"
+  else
+    yos=$(failed "$logs/$n.yosys.m")
+  fi
+  printf "%-14s %s   %s\n" "$n" "$ours" "$yos"
 done
 
 [ "${FLOW:-}" = synth ] && exit 0
-printf "\nPlace and route: logic cells, Fmax (MHz, icetime) and time (s)\n"
-printf "%-14s %6s %7s %6s   %6s %7s %6s %6s\n" "" cells Fmax time cells Fmax yosys nextpnr
-printf "%-14s %-22s   %s\n" "design" "synth" "yosys + nextpnr"
+seeds=(${SEEDS:-1 2 3})
+printf "\nPlace and route (%d seeds): logic cells, Fmax min/median/max (MHz, icetime),\n" "${#seeds[@]}"
+printf "median time (s) and peak memory (MB); FAIL counts failed runs\n"
+printf "%-14s %6s %17s %6s %5s   %6s %17s %6s %6s %5s\n" "" cells Fmax time mem cells Fmax yosys nextpnr mem
+printf "%-14s %-38s   %s\n" "design" "synth" "yosys + nextpnr"
 for n in "${names[@]}"; do
   selected "$n" || continue
   load "$n"
@@ -124,21 +161,43 @@ for n in "${names[@]}"; do
   else
     npcf=(--pcf-allow-unconstrained)
   fi
-  t=$(now)
-  (cd "$dir" && "$synth" build "${args[@]}" --top "$top" --device "$dev" --package "$pkg" "${pcfargs[@]}" \
-    -o "$logs/$n.bin" --asc "$logs/$n.asc" >"$logs/$n.build.log" 2>&1) || true
-  ot=$(elapsed "$t")
-  ocells=$(sed -n 's/.* \([0-9]*\) ICESTORM_LC.*/\1/p' "$logs/$n.build.log" | tail -1)
-  ofmax=$( [ -f "$logs/$n.asc" ] && fmax "$dev" "$pkg" "$logs/$n.asc")
-  t=$(now)
-  (cd "$dir" && yosys -q -p "$yread synth_ice40 -top $top -json $logs/$n.json" >"$logs/$n.yflow.log" 2>&1) || true
-  yt=$(elapsed "$t")
-  t=$(now)
-  (cd "$dir" && nextpnr-ice40 "--$dev" --package "$pkg" "${npcf[@]}" --json "$logs/$n.json" \
-    --asc "$logs/$n.nasc" >"$logs/$n.nextpnr.log" 2>&1) || true
-  nt=$(elapsed "$t")
-  ncells=$(sed -n 's/.*ICESTORM_LC: *\([0-9]*\).*/\1/p' "$logs/$n.nextpnr.log" | head -1)
-  nfmax=$( [ -f "$logs/$n.nasc" ] && fmax "$dev" "$pkg" "$logs/$n.nasc")
-  printf "%-14s %6s %7s %6s   %6s %7s %6s %6s\n" "$n" "${ocells:--}" "${ofmax:--}" "$ot" \
-    "${ncells:--}" "${nfmax:--}" "$yt" "$nt"
+  # Yosys once (deterministic), nextpnr per seed.
+  (cd "$dir" && measure "$logs/$n.yflow.m" yosys -q -p "$yread synth_ice40 -top $top -json $logs/$n.json" \
+    >"$logs/$n.yflow.log" 2>&1)
+  ofail=0 nfail=0 ocells="" ncells="" ofm=() nfm=() ot=() nt=() omem=0 nmem=0
+  for seed in "${seeds[@]}"; do
+    b=$logs/$n.s$seed
+    rm -f "$b.asc" "$b.nasc"
+    (cd "$dir" && measure "$b.build.m" "$synth" build "${args[@]}" --top "$top" --device "$dev" \
+      --package "$pkg" "${pcfargs[@]}" --seed "$seed" -o "$b.bin" --asc "$b.asc" >"$b.build.log" 2>&1)
+    ot+=("$(field "$b.build.m" 2)")
+    omem=$(( $(field "$b.build.m" 3) > omem ? $(field "$b.build.m" 3) : omem ))
+    if [ "$(field "$b.build.m" 1)" = 0 ] && [ -f "$b.asc" ]; then
+      ocells=$(sed -n 's/.* \([0-9]*\) ICESTORM_LC.*/\1/p' "$b.build.log" | tail -1)
+      ofm+=("$(fmax "$dev" "$pkg" "$b.asc")")
+    else
+      ofail=$((ofail + 1))
+    fi
+    if [ "$(field "$logs/$n.yflow.m" 1)" = 0 ]; then
+      (cd "$dir" && measure "$b.nextpnr.m" nextpnr-ice40 "--$dev" --package "$pkg" "${npcf[@]}" --seed "$seed" \
+        --json "$logs/$n.json" --asc "$b.nasc" >"$b.nextpnr.log" 2>&1)
+      nt+=("$(field "$b.nextpnr.m" 2)")
+      nmem=$(( $(field "$b.nextpnr.m" 3) > nmem ? $(field "$b.nextpnr.m" 3) : nmem ))
+      if [ "$(field "$b.nextpnr.m" 1)" = 0 ] && [ -f "$b.nasc" ]; then
+        ncells=$(sed -n 's/.*ICESTORM_LC: *\([0-9]*\).*/\1/p' "$b.nextpnr.log" | head -1)
+        nfm+=("$(fmax "$dev" "$pkg" "$b.nasc")")
+      else
+        nfail=$((nfail + 1))
+      fi
+    else
+      nfail=$((nfail + 1))
+    fi
+  done
+  ofmax=$(printf "%s\n" "${ofm[@]}" | grep . | spread)
+  nfmax=$(printf "%s\n" "${nfm[@]}" | grep . | spread)
+  [ "$ofail" -gt 0 ] && ofmax="$ofmax FAIL$ofail"
+  [ "$nfail" -gt 0 ] && nfmax="$nfmax FAIL$nfail"
+  printf "%-14s %6s %17s %6s %5s   %6s %17s %6s %6s %5s\n" "$n" "${ocells:--}" "$ofmax" \
+    "$(printf "%s\n" "${ot[@]}" | median)" "$omem" "${ncells:--}" "$nfmax" \
+    "$(field "$logs/$n.yflow.m" 2)" "$(printf "%s\n" "${nt[@]}" | median)" "$nmem"
 done
