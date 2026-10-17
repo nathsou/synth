@@ -3,9 +3,15 @@
 //! The classic flow (Mishchenko et al., "Combinational and sequential
 //! mapping with priority cuts", ICCAD 2007): every AND node keeps a small
 //! set of its best K-feasible cuts, computed bottom-up from its fanins'
-//! sets. A depth-optimal mapping is selected first; area is then recovered
-//! without exceeding the optimal depth, with area flow and then exact local
-//! area.
+//! sets. A delay-optimal mapping is selected first; area is then recovered
+//! without exceeding the required times, with area flow and then exact
+//! local area.
+//!
+//! Delays are counted in abstract units: every LUT adds
+//! [`MapOptions::lut_delay`], inputs arrive at the times given by
+//! [`Timing`] (0 by default), and outputs are required by the arrival time of
+//! the latest output in a delay-optimal mapping unless [`Timing`] says
+//! otherwise.
 
 use crate::aig::{Aig, Node};
 
@@ -20,8 +26,11 @@ pub struct MapOptions {
     pub area_flow_passes: usize,
     /// Exact-area recovery passes.
     pub exact_area_passes: usize,
-    /// Extra depth allowed over the optimum (in LUT levels).
+    /// Extra delay allowed over the optimum (in LUT delays) for outputs
+    /// without an explicit required time.
     pub depth_relax: u32,
+    /// Delay of a LUT.
+    pub lut_delay: u32,
 }
 
 impl Default for MapOptions {
@@ -32,8 +41,21 @@ impl Default for MapOptions {
             area_flow_passes: 2,
             exact_area_passes: 2,
             depth_relax: 0,
+            lut_delay: 1,
         }
     }
+}
+
+/// Timing constraints of a mapping, in the units of
+/// [`MapOptions::lut_delay`].
+#[derive(Clone, Debug, Default)]
+pub struct Timing {
+    /// Arrival time of each graph input (missing entries: 0).
+    pub input_arrival: Vec<u32>,
+    /// Required time of each output (missing entries or `None`: the arrival
+    /// time of the latest output in a delay-optimal mapping, plus
+    /// `depth_relax` LUT delays).
+    pub output_required: Vec<Option<u32>>,
 }
 
 /// A LUT of the mapping: computes AIG node `node` (positive polarity) from
@@ -50,7 +72,8 @@ pub struct Lut {
 #[derive(Clone, Debug)]
 pub struct Mapping {
     pub luts: Vec<Lut>,
-    /// Depth in LUT levels.
+    /// Arrival time of the latest output (the depth in LUT levels with the
+    /// default delays).
     pub depth: u32,
 }
 
@@ -152,6 +175,7 @@ enum Mode {
 struct Mapper<'a> {
     g: &'a Aig,
     opts: &'a MapOptions,
+    timing: &'a Timing,
     /// Choice members of each node (empty without choices).
     choices: &'a [Vec<(u32, bool)>],
     /// Processing order: fanins and choice members first.
@@ -170,22 +194,38 @@ struct Mapper<'a> {
 /// Maps the outputs of `g` to K-input LUTs.
 pub fn map(g: &Aig, opts: &MapOptions) -> Mapping {
     let order = (0..g.nodes.len() as u32).collect();
-    map_impl(g, &[], order, opts)
+    map_impl(g, &[], order, opts, &Timing::default())
 }
 
 /// Maps a graph with structural choices: each node may be implemented by
 /// any member of its class.
 pub fn map_choices(c: &crate::choice::ChoiceAig, opts: &MapOptions) -> Mapping {
-    map_impl(&c.aig, &c.choices, c.order(), opts)
+    map_choices_timed(c, opts, &Timing::default())
 }
 
-fn map_impl(g: &Aig, choices: &[Vec<(u32, bool)>], order: Vec<u32>, opts: &MapOptions) -> Mapping {
+/// [`map_choices`] under timing constraints.
+pub fn map_choices_timed(
+    c: &crate::choice::ChoiceAig,
+    opts: &MapOptions,
+    timing: &Timing,
+) -> Mapping {
+    map_impl(&c.aig, &c.choices, c.order(), opts, timing)
+}
+
+fn map_impl(
+    g: &Aig,
+    choices: &[Vec<(u32, bool)>],
+    order: Vec<u32>,
+    opts: &MapOptions,
+    timing: &Timing,
+) -> Mapping {
     assert!((2..=6).contains(&opts.k));
     let n = g.nodes.len();
     let fanouts = g.fanout_counts();
     let mut m = Mapper {
         g,
         opts,
+        timing,
         choices,
         order,
         cuts: vec![Vec::new(); n],
@@ -211,7 +251,15 @@ fn map_impl(g: &Aig, choices: &[Vec<(u32, bool)>], order: Vec<u32>, opts: &MapOp
 
 impl Mapper<'_> {
     fn cut_arrival(&self, c: &Cut) -> u32 {
-        1 + c.leaves().iter().map(|&l| self.arrival[l as usize]).max().unwrap_or(0)
+        self.opts.lut_delay
+            + c.leaves().iter().map(|&l| self.arrival[l as usize]).max().unwrap_or(0)
+    }
+
+    fn input_arrival(&self, n: usize) -> u32 {
+        match self.g.nodes[n] {
+            Node::Input(k) => self.timing.input_arrival.get(k as usize).copied().unwrap_or(0),
+            _ => 0,
+        }
     }
 
     fn cut_area_flow(&self, c: &Cut) -> f32 {
@@ -223,7 +271,7 @@ impl Mapper<'_> {
         for oi in 0..self.order.len() {
             let i = self.order[oi] as usize;
             let Node::And(a, b) = self.g.nodes[i] else {
-                self.arrival[i] = 0;
+                self.arrival[i] = self.input_arrival(i);
                 self.area_flow[i] = 0.0;
                 self.cuts[i] = vec![Cut::trivial(i as u32)];
                 continue;
@@ -277,8 +325,10 @@ impl Mapper<'_> {
                 .map(|c| (c, self.cut_arrival(&c), self.cut_area_flow(&c)))
                 .collect();
             match mode {
+                // Smaller cuts merge into more cuts at the fanouts: ranking
+                // them before area keeps the mapping delay-optimal.
                 Mode::Depth => scored.sort_by(|x, y| {
-                    x.1.cmp(&y.1).then(x.2.total_cmp(&y.2)).then(x.0.len.cmp(&y.0.len))
+                    x.1.cmp(&y.1).then(x.0.len.cmp(&y.0.len)).then(x.2.total_cmp(&y.2))
                 }),
                 Mode::AreaFlow => scored.sort_by(|x, y| {
                     // Cuts meeting the required time first, then by area flow.
@@ -301,7 +351,8 @@ impl Mapper<'_> {
     }
 
     /// Marks the current mapping (reference counts) and computes required
-    /// times against the (relaxed) optimal depth.
+    /// times: the constraints of the outputs, by default the latest output's
+    /// arrival (relaxed).
     fn set_required(&mut self) {
         let g = self.g;
         self.map_refs.iter_mut().for_each(|r| *r = 0);
@@ -319,18 +370,20 @@ impl Mapper<'_> {
                 }
             }
         }
-        let depth = g.outputs.iter().map(|o| self.arrival[o.node() as usize]).max().unwrap_or(0)
-            + self.opts.depth_relax;
+        let target = g.outputs.iter().map(|o| self.arrival[o.node() as usize]).max().unwrap_or(0)
+            + self.opts.depth_relax * self.opts.lut_delay;
         self.required.iter_mut().for_each(|r| *r = u32::MAX);
-        for o in &g.outputs {
-            self.required[o.node() as usize] = depth;
+        for (k, o) in g.outputs.iter().enumerate() {
+            let req = self.timing.output_required.get(k).copied().flatten().unwrap_or(target);
+            let r = &mut self.required[o.node() as usize];
+            *r = (*r).min(req);
         }
         for &i in self.order.iter().rev() {
             let i = i as usize;
             if self.map_refs[i] > 0
                 && let Some(c) = self.best[i]
             {
-                let r = self.required[i].saturating_sub(1);
+                let r = self.required[i].saturating_sub(self.opts.lut_delay);
                 for &l in c.leaves() {
                     let lr = &mut self.required[l as usize];
                     *lr = (*lr).min(r);
@@ -429,7 +482,7 @@ impl Mapper<'_> {
             }
         }
         let mut luts = Vec::new();
-        let mut level = vec![0u32; n];
+        let mut level: Vec<u32> = (0..n).map(|i| self.input_arrival(i)).collect();
         for &i in &self.order {
             let i = i as usize;
             if !used[i] {
@@ -437,13 +490,38 @@ impl Mapper<'_> {
             }
             if let Some(c) = self.best[i] {
                 let leaves = c.leaves().to_vec();
-                level[i] = 1 + leaves.iter().map(|&l| level[l as usize]).max().unwrap_or(0);
+                level[i] = self.opts.lut_delay
+                    + leaves.iter().map(|&l| level[l as usize]).max().unwrap_or(0);
                 luts.push(Lut { node: i as u32, leaves, truth: c.truth });
             }
         }
         let depth = g.outputs.iter().map(|o| level[o.node() as usize]).max().unwrap_or(0);
         Mapping { luts, depth }
     }
+}
+
+/// The graph of a mapping: every LUT re-expressed as a small structure
+/// over its leaves (with the inputs and outputs of `g`), a starting point
+/// for restructuring and remapping.
+pub fn lut_graph(g: &Aig, m: &Mapping) -> Aig {
+    let mut out = Aig::new();
+    let mut map = vec![crate::aig::Lit::FALSE; g.nodes.len()];
+    for &i in &g.inputs {
+        map[i as usize] = out.input();
+    }
+    let mut lib = crate::rewrite::Library::default();
+    let mut vars = Vec::new();
+    for l in &m.luts {
+        vars.clear();
+        vars.extend(l.leaves.iter().map(|&x| map[x as usize]));
+        map[l.node as usize] = if vars.len() <= 4 {
+            lib.build(&mut out, l.truth, &vars)
+        } else {
+            crate::refactor::sop(&mut out, l.truth, &vars)
+        };
+    }
+    out.outputs = g.outputs.iter().map(|o| map[o.node() as usize].xor(o.is_compl())).collect();
+    out
 }
 
 #[cfg(test)]
@@ -519,6 +597,23 @@ mod tests {
     }
 
     #[test]
+    fn late_input_goes_last() {
+        // A 16-input AND whose last input arrives two LUT delays late: it
+        // belongs in the final LUT.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..16).map(|_| g.input()).collect();
+        let t = g.and_all(&x[..15]);
+        let y = g.and(x[15], t);
+        g.output(y);
+        let mut timing = Timing { input_arrival: vec![0; 16], output_required: Vec::new() };
+        timing.input_arrival[15] = 2;
+        let c = crate::choice::ChoiceAig::plain(g.clone());
+        let m = map_choices_timed(&c, &MapOptions::default(), &timing);
+        check(&g, &m, 4);
+        assert_eq!(m.depth, 3);
+    }
+
+    #[test]
     fn maps_with_choices() {
         // A wide AND chain with its balanced form as choices, and an adder.
         let mut g = Aig::new();
@@ -536,6 +631,25 @@ mod tests {
         check(&c.aig, &m, 4);
         let plain = map(&g, &MapOptions::default());
         assert!(m.depth <= plain.depth);
+    }
+
+    #[test]
+    fn lut_graph_computes_the_mapping() {
+        let mut g = Aig::new();
+        adder(&mut g, 6);
+        for k in [4, 6] {
+            let opts = MapOptions { k, ..MapOptions::default() };
+            let m = map(&g, &opts);
+            let h = lut_graph(&g, &m);
+            let mut rng = synth_core::rng::Rng::new(3);
+            let pats: Vec<u64> = (0..g.inputs.len()).map(|_| rng.next_u64()).collect();
+            let (s0, s1) = (g.simulate(&pats), h.simulate(&pats));
+            for (a, b) in g.outputs.iter().zip(&h.outputs) {
+                assert_eq!(lit_val(&s0, *a), lit_val(&s1, *b));
+            }
+            // Remapping the LUT graph finds the same number of LUTs or fewer.
+            assert!(map(&h, &opts).luts.len() <= m.luts.len());
+        }
     }
 
     #[test]

@@ -21,6 +21,8 @@ use crate::cells::port_dir;
 pub struct SynthOptions {
     pub lower: LowerOptions,
     pub map: MapOptions,
+    /// Rounds of restructuring and remapping the mapped LUTs.
+    pub remap_rounds: usize,
     /// Memories with fewer bits are built from flip-flops.
     pub bram_min_bits: u64,
 }
@@ -30,6 +32,7 @@ impl Default for SynthOptions {
         SynthOptions {
             lower: LowerOptions::default(),
             map: MapOptions::default(),
+            remap_rounds: 3,
             bram_min_bits: 256,
         }
     }
@@ -176,18 +179,19 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         unfraiged = None;
     }
     // Snapshots for structural choices: the fraiged graph, its balanced
-    // form, and refactored forms (the mapped graph is the third round).
+    // form, rounds of rewriting scripts (the last is the mapped graph) and
+    // rounds of refactoring.
     let fraiged = net.aig.clone();
     let balanced = synth_logic::opt::balance(&fraiged).cleanup();
-    let refactor = |g: &synth_logic::Aig, zero_gain: bool| {
-        let o = synth_logic::refactor::RefactorOptions { zero_gain, ..Default::default() };
-        synth_logic::opt::balance(&synth_logic::refactor::refactor(g, &o)).cleanup()
-    };
-    let mut main = refactor(&fraiged, false);
-    for _ in 0..2 {
-        main = refactor(&main, false);
+    let compressed = synth_logic::opt::compress(&fraiged);
+    let compressed2 = synth_logic::opt::compress2(&compressed);
+    let main = synth_logic::opt::compress2(&compressed2);
+    let mut refactored = fraiged.clone();
+    for _ in 0..3 {
+        let o = synth_logic::refactor::RefactorOptions::default();
+        refactored =
+            synth_logic::opt::balance(&synth_logic::refactor::refactor(&refactored, &o)).cleanup();
     }
-    let reshaped = refactor(&main, true);
     net.aig = main;
     net.cleanup();
     log.push(format!(
@@ -206,7 +210,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let t = Instant::now();
     let mut snapshots = vec![&net.aig, &balanced, &fraiged];
     snapshots.extend(unfraiged.as_ref());
-    snapshots.push(&reshaped);
+    snapshots.extend([&compressed, &compressed2, &refactored]);
     let choices = synth_logic::choice::build(&snapshots, &Default::default());
     log.push(format!(
         "{} structural choices in {:.2}s",
@@ -214,15 +218,39 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         t.elapsed().as_secs_f64()
     ));
     let t = Instant::now();
-    let mapping = lutmap::map_choices(&choices, &opts.map);
-    // The mapping refers to the nodes of the graph with choices.
-    net.aig = choices.aig;
+    let mut mapping = lutmap::map_choices(&choices, &opts.map);
+    let mut graph = choices.aig;
+    let mut luts = netlist_luts(&net, &graph, &mapping)?;
     log.push(format!(
         "mapped in {:.2}s: {} LUTs, depth {}",
         t.elapsed().as_secs_f64(),
         mapping.luts.len(),
         mapping.depth
     ));
+    // Remapping: the mapped LUTs as a graph, restructured, with the previous
+    // structure as choices; kept while the netlist shrinks without getting
+    // deeper.
+    let t = Instant::now();
+    let mut prev = std::mem::take(&mut net.aig);
+    for _ in 0..opts.remap_rounds {
+        let lg = lutmap::lut_graph(&graph, &mapping);
+        let restructured = synth_logic::opt::compress2(&lg);
+        let choices = synth_logic::choice::build(&[&restructured, &lg, &prev], &Default::default());
+        let m = lutmap::map_choices(&choices, &opts.map);
+        let n = netlist_luts(&net, &choices.aig, &m)?;
+        if n >= luts || m.depth > mapping.depth {
+            break;
+        }
+        log.push(format!(
+            "remapped in {:.2}s: {} LUTs, depth {}",
+            t.elapsed().as_secs_f64(),
+            m.luts.len(),
+            m.depth
+        ));
+        (mapping, graph, luts, prev) = (m, choices.aig, n, restructured);
+    }
+    // The mapping refers to the nodes of the graph with choices.
+    net.aig = graph;
     if std::env::var("SYNTH_DEBUG").is_ok() {
         // The deepest sinks after mapping.
         let mut level: FxHashMap<u32, u32> = FxHashMap::default();
@@ -250,6 +278,27 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     }
     let nl = emit(&net, &mapping)?;
     Ok((nl, log))
+}
+
+/// Number of LUTs in the netlist of a mapping of `aig` (the graph of
+/// `net`), counting adder sums folded into their readers and LUTs added for
+/// polarities.
+fn netlist_luts(
+    net: &LogicNet,
+    aig: &synth_logic::Aig,
+    m: &lutmap::Mapping,
+) -> Result<usize, String> {
+    let n = LogicNet {
+        name: net.name.clone(),
+        aig: aig.clone(),
+        ports: net.ports.clone(),
+        ffs: net.ffs.clone(),
+        carries: net.carries.clone(),
+        instances: net.instances.clone(),
+        pads: net.pads,
+    };
+    let nl = emit(&n, m)?;
+    Ok(nl.live_cells().filter(|&c| nl.cell_kind(c) == "SB_LUT4").count())
 }
 
 // ---------------------------------------------------------------- BRAM
