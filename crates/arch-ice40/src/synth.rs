@@ -251,7 +251,12 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
             c.mapping.luts.len(),
             c.mapping.depth
         ));
+        // Rounds saving less than 0.1% are not worth their time.
+        let last = (best.luts - c.luts) * 1024 < best.luts;
         (best, prev) = (c, restructured);
+        if last {
+            break;
+        }
     }
     best = polish(&net, best, &opts.map)?;
     log.push(format!(

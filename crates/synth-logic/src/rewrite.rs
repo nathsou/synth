@@ -111,7 +111,6 @@ struct Structure {
 }
 
 /// Builds structures with functional hashing over 16-minterm tables.
-#[derive(Clone)]
 struct Builder {
     gates: Vec<(u8, u8)>,
     /// Literal computing each table (and its complement).
