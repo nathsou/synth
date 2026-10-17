@@ -137,6 +137,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let before = net.aig.num_ands();
     let mut merged = 0;
     let mut chain_bits = 0;
+    let mut const_ffs = 0;
     // Merging equivalent logic can make carry-chain operands constant;
     // simplifying the chains feeds their sums back into the graph.
     for _ in 0..4 {
@@ -144,21 +145,25 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         net.aig = aig;
         merged += st.proved;
         let removed = synth_logic::carry::simplify_carries(&mut net);
-        net.cleanup();
         chain_bits += removed;
-        if removed == 0 {
+        let ffs = synth_logic::seq::remove_constant_ffs(&mut net)
+            + synth_logic::seq::merge_duplicate_ffs(&mut net);
+        const_ffs += ffs;
+        net.cleanup();
+        if removed + ffs == 0 {
             break;
         }
     }
     net.aig = synth_logic::opt::balance(&net.aig);
     net.cleanup();
     log.push(format!(
-        "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits removed",
+        "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits and {} flip-flops removed",
         t.elapsed().as_secs_f64(),
         before,
         net.aig.num_ands(),
         merged,
-        chain_bits
+        chain_bits,
+        const_ffs
     ));
     if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
         // Debugging aid: the graph about to be mapped, for other tools.

@@ -16,6 +16,7 @@ pub mod lutmap;
 pub mod net;
 pub mod opt;
 pub mod sat;
+pub mod seq;
 
 pub use aig::{Aig, Lit};
 pub use net::LogicNet;
