@@ -571,7 +571,9 @@ pub enum GlobalClass {
 /// Classifies a cell pin as a global-network control input.
 pub fn global_class(kind: &str, pin: &str) -> Option<GlobalClass> {
     match (kind, pin) {
-        (LC, "CLK") | (RAM, "RCLK" | "WCLK") | (IO, "INPUT_CLK" | "OUTPUT_CLK") => Some(GlobalClass::Clock),
+        (LC, "CLK") | (RAM, "RCLK" | "WCLK") | (IO, "INPUT_CLK" | "OUTPUT_CLK") => {
+            Some(GlobalClass::Clock)
+        }
         (LC, "SR") | (RAM, "RE" | "WE") | (IO, "LATCH_INPUT_VALUE") => Some(GlobalClass::Reset),
         (LC, "CEN") | (RAM, "RCLKE" | "WCLKE") | (IO, "CLOCK_ENABLE") => Some(GlobalClass::Enable),
         _ => None,

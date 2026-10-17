@@ -219,7 +219,8 @@ fn assign_globals(
         }
         let fits = |g: usize| (!reset || g.is_multiple_of(2)) && (!enable || !g.is_multiple_of(2));
         // Plain clocks take the networks nobody else can use first.
-        let order: Vec<usize> = if !reset && !enable { vec![0, 2, 4, 6, 1, 3, 5, 7] } else { (0..8).collect() };
+        let order: Vec<usize> =
+            if !reset && !enable { vec![0, 2, 4, 6, 1, 3, 5, 7] } else { (0..8).collect() };
         let g = order
             .iter()
             .copied()

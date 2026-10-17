@@ -17,6 +17,7 @@ synth-dbgen = { path = "crates/synth-dbgen" }
 synth-netlist = { path = "crates/synth-netlist" }
 synth-rtlil = { path = "crates/synth-rtlil" }
 synth-route = { path = "crates/synth-route" }
+synth-verilog = { path = "crates/synth-verilog" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

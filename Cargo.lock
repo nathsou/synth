@@ -19,6 +19,7 @@ dependencies = [
  "synth-core",
  "synth-netlist",
  "synth-rtlil",
+ "synth-verilog",
 ]
 
 [[package]]
@@ -52,4 +53,11 @@ version = "0.1.0"
 dependencies = [
  "synth-core",
  "synth-netlist",
+]
+
+[[package]]
+name = "synth-verilog"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
 ]

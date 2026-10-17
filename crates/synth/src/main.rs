@@ -13,6 +13,7 @@ USAGE:
     synth <COMMAND> [OPTIONS]
 
 COMMANDS:
+    check      Parse Verilog files and report errors
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
             println!("synth {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Some("check") => cmd_check(&argv[1..]),
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
@@ -117,4 +119,34 @@ fn cmd_unpack(argv: &[String]) -> Result<(), String> {
     let data = std::fs::read(&input).map_err(|e| format!("{input}: {e}"))?;
     let cfg = arch_ice40::Config::from_bin(&data).map_err(|e| e.to_string())?;
     write(&output, arch_ice40::asc::write_asc(&cfg).as_bytes())
+}
+
+fn cmd_check(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["-I", "-D"], &[])?;
+    let mut sm = synth_core::SourceMap::new();
+    let mut opts = synth_verilog::PreprocOptions::default();
+    if let Some(i) = a.value("-I") {
+        opts.include_dirs.push(i.into());
+    }
+    if let Some(d) = a.value("-D") {
+        let (k, v) = d.split_once('=').unwrap_or((&d, "1"));
+        opts.defines.push((k.to_string(), v.to_string()));
+    }
+    let mut files = Vec::new();
+    for i in 0.. {
+        let Ok(path) = a.positional(i, "file") else { break };
+        files.push(sm.add(path.clone(), read(&path)?));
+    }
+    if files.is_empty() {
+        return Err("no input files".into());
+    }
+    let (src, diags) = synth_verilog::parse_files(&mut sm, &files, &opts);
+    if !diags.items.is_empty() {
+        eprint!("{}", diags.render(&sm));
+    }
+    if diags.has_errors() {
+        return Err(format!("{} error(s)", diags.error_count()));
+    }
+    eprintln!("info: parsed {} module(s)", src.modules.len());
+    Ok(())
 }
