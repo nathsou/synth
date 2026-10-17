@@ -1,5 +1,6 @@
-//! Sequential optimisations: flip-flops that never change value, and
-//! flip-flops that duplicate others.
+//! Sequential optimisations: flip-flops that never change value,
+//! flip-flops that duplicate others, and synchronous resets folded into
+//! flip-flop inputs.
 
 use synth_core::{FxHashMap, Logic};
 
@@ -115,6 +116,57 @@ pub fn merge_duplicate_ffs(net: &mut LogicNet) -> usize {
     subst.len()
 }
 
+/// Flip-flops that must share a candidate reset for it to be extracted
+/// (the flip-flops of a tile share their set/reset signal).
+const MIN_RESET_SHARING: usize = 4;
+
+/// Drops enables that are always on, and gives flip-flops whose input is
+/// `!r & x` (or `r | x`) the synchronous reset (set) `r` and the input `x`,
+/// when at least a few flip-flops can share `r`. Flip-flops with an
+/// asynchronous reset or a synchronous one already are left alone. Returns
+/// the number of resets extracted.
+pub fn extract_sync_resets(net: &mut LogicNet) -> usize {
+    // The ways each flip-flop's input splits: (reset, value, data).
+    let mut options: Vec<Vec<(Lit, bool, Lit)>> = Vec::with_capacity(net.ffs.len());
+    let mut count: FxHashMap<Lit, usize> = FxHashMap::default();
+    for ff in &mut net.ffs {
+        if ff.en.is_some_and(|e| net.aig.outputs[e] == Lit::TRUE) {
+            ff.en = None;
+        }
+        let d = net.aig.outputs[ff.d];
+        let mut opts = Vec::new();
+        if ff.srst.is_none()
+            && ff.arst.is_none()
+            && let Some((x, y)) = net.aig.fanins(d.node())
+        {
+            // d = x & y: reset to 0 when either operand is 0; !d = x & y:
+            // set to 1 likewise.
+            let v = d.is_compl();
+            opts.push((!x, v, y.xor(v)));
+            opts.push((!y, v, x.xor(v)));
+            for o in &opts {
+                *count.entry(o.0).or_default() += 1;
+            }
+        }
+        options.push(opts);
+    }
+    let mut n = 0;
+    for (i, opts) in options.iter().enumerate() {
+        let Some(&(r, v, data)) = opts.iter().max_by_key(|o| count[&o.0]) else { continue };
+        if count[&r] < MIN_RESET_SHARING {
+            continue;
+        }
+        let g = &mut net.aig;
+        let ff = &mut net.ffs[i];
+        ff.d = g.output(data);
+        ff.srst = Some((g.output(r), v));
+        // With an enable, the reset acts only when enabled, as the input did.
+        ff.en_over_srst = ff.en.is_some();
+        n += 1;
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +213,44 @@ mod tests {
         assert_eq!(net.ffs.len(), 1);
         let last = *net.aig.outputs.last().unwrap();
         assert_eq!(last, q2);
+    }
+
+    #[test]
+    fn extracts_shared_synchronous_resets() {
+        // q_i' = !rst & x_i for four flip-flops (one with an enable always
+        // on), q4' = rst | x0 (a set), and q5' = !rst & x1 with an
+        // asynchronous reset, left alone.
+        let mut net = LogicNet::default();
+        let g = &mut net.aig;
+        let clk = g.input();
+        let rst = g.input();
+        let x: Vec<Lit> = (0..4).map(|_| g.input()).collect();
+        let q: Vec<Lit> = (0..6).map(|_| g.input()).collect();
+        let ck = g.output(clk);
+        let src = |l: Lit| l.node() - 1;
+        let mut ffs = Vec::new();
+        for i in 0..4 {
+            let d = net.aig.and(!rst, x[i]);
+            ffs.push(ff(&mut net, ck, d, src(q[i]), Logic::X));
+        }
+        ffs[3].en = Some(net.aig.output(Lit::TRUE));
+        let d = net.aig.or(rst, x[0]);
+        ffs.push(ff(&mut net, ck, d, src(q[4]), Logic::X));
+        let d = net.aig.and(!rst, x[1]);
+        let mut f5 = ff(&mut net, ck, d, src(q[5]), Logic::X);
+        f5.arst = Some((net.aig.output(rst), false));
+        ffs.push(f5);
+        net.ffs = ffs;
+        assert_eq!(extract_sync_resets(&mut net), 5);
+        let out = |k: usize| net.aig.outputs[k];
+        for (i, f) in net.ffs[..4].iter().enumerate() {
+            assert_eq!(out(f.d), x[i]);
+            assert_eq!(f.srst.map(|(s, v)| (out(s), v)), Some((rst, false)));
+            assert!(f.en.is_none());
+        }
+        let f4 = &net.ffs[4];
+        assert_eq!((out(f4.d), f4.srst.map(|(s, v)| (out(s), v))), (x[0], Some((rst, true))));
+        assert!(net.ffs[5].srst.is_none());
     }
 
     #[test]

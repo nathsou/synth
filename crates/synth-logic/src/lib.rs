@@ -10,13 +10,16 @@
 pub mod aig;
 pub mod carry;
 pub mod choice;
+pub mod edit;
 pub mod ff;
 pub mod fraig;
 pub mod lower;
 pub mod lutmap;
+pub mod mfs;
 pub mod net;
 pub mod opt;
 pub mod refactor;
+pub mod rewrite;
 pub mod sat;
 pub mod seq;
 

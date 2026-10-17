@@ -169,17 +169,41 @@ impl Classes {
     }
 }
 
-/// Equivalence checks by SAT, each on a fresh solver holding only the cones
-/// of the two nodes compared (a solver shared across checks would assign
-/// every variable it ever saw on each satisfiable query).
+/// AND nodes expanded in the window tried by SAT before the whole cones in
+/// an equivalence check.
+const WINDOW: usize = 64;
+
+/// AND nodes expanded in the window simulated exhaustively before any SAT
+/// check, and the most leaves it may have.
+const SIM_WINDOW: usize = 32;
+const SIM_LEAVES: usize = 10;
+
+/// Role of a node in the current window.
+const LEAF: u8 = 0;
+const INNER: u8 = 1;
+const CONST: u8 = 2;
+
+/// Equivalence checks, each on a fresh solver holding only the cones of the
+/// two nodes compared (a solver shared across checks would assign every
+/// variable it ever saw on each satisfiable query). Each check first tries
+/// small windows around the two nodes (their boundary nodes are free
+/// variables, so a window only proves equivalence): exhaustive simulation,
+/// then SAT. Equivalent nodes from local restructuring are proved there.
 struct Encoder {
-    /// Solver variable of each node in the current query (`stamp` says which
-    /// query it belongs to).
+    /// Solver variable (or table slot) of each node in the current query
+    /// (`stamp` says which query it belongs to).
     var: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
+    /// Window nodes, latest first, and their roles.
     cone: Vec<u32>,
-    stack: Vec<u32>,
+    role: Vec<u8>,
+    /// Which of the two compared nodes reach each node (bit 0, bit 1).
+    side: Vec<u8>,
+    touched: Vec<u32>,
+    heap: std::collections::BinaryHeap<u32>,
+    /// Truth tables of the simulated window (`words` per node).
+    tables: Vec<u64>,
 }
 
 impl Encoder {
@@ -189,7 +213,11 @@ impl Encoder {
             stamp: Vec::new(),
             epoch: 0,
             cone: Vec::new(),
-            stack: Vec::new(),
+            role: Vec::new(),
+            side: Vec::new(),
+            touched: Vec::new(),
+            heap: Default::default(),
+            tables: Vec::new(),
         }
     }
 
@@ -206,33 +234,174 @@ impl Encoder {
         limit: u64,
         rng: &mut Rng,
     ) -> Result<bool, Vec<bool>> {
+        if self.simulate_window(g, repr, a, b)
+            || self.check(g, repr, a, b, limit, WINDOW).is_ok_and(|proved| proved)
+        {
+            return Ok(true);
+        }
+        let res = self.check(g, repr, a, b, limit, usize::MAX);
+        res.map_err(|solver| {
+            g.inputs
+                .iter()
+                .map(|&i| {
+                    if self.stamp[i as usize] == self.epoch {
+                        solver.model_value(self.var[i as usize])
+                    } else {
+                        rng.below(2) == 1
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Collects the window of nodes `a` and `b`: nodes are expanded latest
+    /// first, at most `budget` AND nodes, and with a finite budget nodes
+    /// reached from both sides are left unexpanded. Returns the number of
+    /// leaves.
+    fn collect(
+        &mut self,
+        g: &Aig,
+        repr: &[Option<(u32, bool)>],
+        a: u32,
+        b: u32,
+        budget: usize,
+    ) -> usize {
         let res = |l: Lit| match repr.get(l.node() as usize).copied().flatten() {
-            Some((r, c)) => Lit::new(r, c ^ l.is_compl()),
-            None => l,
+            Some((r, _)) => r,
+            None => l.node(),
         };
-        let (a, b) = (res(a), res(b));
         let n = g.nodes.len();
         if self.var.len() < n {
             self.var.resize(n, 0);
             self.stamp.resize(n, 0);
+            self.role.resize(n, 0);
+            self.side.resize(n, 0);
         }
+        for &x in &self.touched {
+            self.side[x as usize] = 0;
+        }
+        self.touched.clear();
         self.epoch += 1;
         let epoch = self.epoch;
-        // The union of both cones, then one variable per node.
         self.cone.clear();
-        self.stack.clear();
-        self.stack.extend([a.node(), b.node()]);
-        while let Some(x) = self.stack.pop() {
+        self.heap.clear();
+        for (x, bit) in [(a, 1), (b, 2)] {
+            self.side[x as usize] |= bit;
+            self.touched.push(x);
+            self.heap.push(x);
+        }
+        let mut expanded = 0;
+        let mut leaves = 0;
+        while let Some(x) = self.heap.pop() {
             if self.stamp[x as usize] == epoch {
                 continue;
             }
             self.stamp[x as usize] = epoch;
             self.cone.push(x);
-            if let Node::And(p, q) = g.nodes[x as usize] {
-                self.stack.push(res(p).node());
-                self.stack.push(res(q).node());
+            // Users of `x` in the window are later nodes, already expanded:
+            // its sides are final.
+            let shared = budget != usize::MAX && self.side[x as usize] == 3 && x != a && x != b;
+            let role = match g.nodes[x as usize] {
+                Node::Const => CONST,
+                Node::And(p, q) if expanded < budget && !shared => {
+                    expanded += 1;
+                    let sd = self.side[x as usize];
+                    for f in [res(p), res(q)] {
+                        self.side[f as usize] |= sd;
+                        self.touched.push(f);
+                        self.heap.push(f);
+                    }
+                    INNER
+                }
+                _ => {
+                    leaves += 1;
+                    LEAF
+                }
+            };
+            self.role[x as usize] = role;
+        }
+        leaves
+    }
+
+    /// Whether `a == b` over a small window of their cones, by exhaustive
+    /// simulation of the window's leaves (a proof when it says yes).
+    fn simulate_window(&mut self, g: &Aig, repr: &[Option<(u32, bool)>], a: Lit, b: Lit) -> bool {
+        const VAR6: [u64; 6] = [
+            0xAAAA_AAAA_AAAA_AAAA,
+            0xCCCC_CCCC_CCCC_CCCC,
+            0xF0F0_F0F0_F0F0_F0F0,
+            0xFF00_FF00_FF00_FF00,
+            0xFFFF_0000_FFFF_0000,
+            0xFFFF_FFFF_0000_0000,
+        ];
+        let res = |l: Lit| match repr.get(l.node() as usize).copied().flatten() {
+            Some((r, c)) => Lit::new(r, c ^ l.is_compl()),
+            None => l,
+        };
+        let (a, b) = (res(a), res(b));
+        let leaves = self.collect(g, repr, a.node(), b.node(), SIM_WINDOW);
+        if leaves > SIM_LEAVES {
+            return false;
+        }
+        // Leaves get the variables' tables; inner nodes are simulated
+        // bottom-up (increasing index is topological).
+        let words = 1usize << leaves.saturating_sub(6);
+        self.tables.clear();
+        self.tables.resize(self.cone.len() * words, 0);
+        let mut k = 0;
+        for i in (0..self.cone.len()).rev() {
+            let x = self.cone[i] as usize;
+            self.var[x] = i as u32;
+            match self.role[x] {
+                LEAF => {
+                    for w in 0..words {
+                        self.tables[i * words + w] = match k {
+                            0..6 => VAR6[k],
+                            _ if (w >> (k - 6)) & 1 == 1 => !0,
+                            _ => 0,
+                        };
+                    }
+                    k += 1;
+                }
+                INNER => {
+                    let Node::And(p, q) = g.nodes[x] else { unreachable!("inner nodes are ANDs") };
+                    let (p, q) = (res(p), res(q));
+                    let sp = self.var[p.node() as usize] as usize;
+                    let sq = self.var[q.node() as usize] as usize;
+                    let cp = if p.is_compl() { !0 } else { 0 };
+                    let cq = if q.is_compl() { !0 } else { 0 };
+                    for w in 0..words {
+                        self.tables[i * words + w] =
+                            (self.tables[sp * words + w] ^ cp) & (self.tables[sq * words + w] ^ cq);
+                    }
+                }
+                _ => {}
             }
         }
+        let sa = self.var[a.node() as usize] as usize;
+        let sb = self.var[b.node() as usize] as usize;
+        let flip = if a.is_compl() != b.is_compl() { !0 } else { 0 };
+        (0..words).all(|w| self.tables[sa * words + w] ^ self.tables[sb * words + w] == flip)
+    }
+
+    /// One SAT check on a window of the two cones (see [`Encoder::collect`];
+    /// the whole cones with an infinite `budget`). Returns the solver
+    /// holding the counterexample on a difference.
+    fn check(
+        &mut self,
+        g: &Aig,
+        repr: &[Option<(u32, bool)>],
+        a: Lit,
+        b: Lit,
+        limit: u64,
+        budget: usize,
+    ) -> Result<bool, Box<Solver>> {
+        let res = |l: Lit| match repr.get(l.node() as usize).copied().flatten() {
+            Some((r, c)) => Lit::new(r, c ^ l.is_compl()),
+            None => l,
+        };
+        let (a, b) = (res(a), res(b));
+        self.collect(g, repr, a.node(), b.node(), budget);
         let mut solver = Solver::new();
         for &x in &self.cone {
             self.var[x as usize] = solver.new_var();
@@ -240,17 +409,20 @@ impl Encoder {
         let lit = |var: &[u32], l: Lit| SLit::new(var[l.node() as usize], l.is_compl());
         for &x in &self.cone {
             let v = SLit::new(self.var[x as usize], false);
-            match g.nodes[x as usize] {
-                Node::Const => {
+            match self.role[x as usize] {
+                CONST => {
                     solver.add_clause(&[!v]);
                 }
-                Node::And(p, q) => {
+                INNER => {
+                    let Node::And(p, q) = g.nodes[x as usize] else {
+                        unreachable!("inner nodes are ANDs")
+                    };
                     let (p, q) = (lit(&self.var, res(p)), lit(&self.var, res(q)));
                     solver.add_clause(&[!v, p]);
                     solver.add_clause(&[!v, q]);
                     solver.add_clause(&[v, !p, !q]);
                 }
-                Node::Input(_) => {}
+                _ => {}
             }
         }
         let (sa, sb) = (lit(&self.var, a), lit(&self.var, b));
@@ -259,20 +431,7 @@ impl Encoder {
             match solver.solve(&assume, limit) {
                 SatResult::Unsat => {}
                 SatResult::Unknown => unknown = true,
-                SatResult::Sat => {
-                    let cex = g
-                        .inputs
-                        .iter()
-                        .map(|&i| {
-                            if self.stamp[i as usize] == epoch {
-                                solver.model_value(self.var[i as usize])
-                            } else {
-                                rng.below(2) == 1
-                            }
-                        })
-                        .collect();
-                    return Err(cex);
-                }
+                SatResult::Sat => return Err(Box::new(solver)),
             }
         }
         Ok(!unknown)

@@ -221,6 +221,32 @@ fn build_and(out: &mut Aig, level: &mut Vec<u32>, leaves: &mut Vec<Lit>) -> Lit 
     leaves[0]
 }
 
+/// Balancing, rewriting and refactoring (after "compress" in ABC).
+pub fn compress(g: &Aig) -> Aig {
+    use crate::refactor::{RefactorOptions, refactor};
+    use crate::rewrite::{RewriteOptions, rewrite};
+    let rw = RewriteOptions::default();
+    let mut h = balance(g).cleanup();
+    h = rewrite(&h, &rw);
+    h = refactor(&h, &RefactorOptions::default());
+    h = balance(&h).cleanup();
+    rewrite(&h, &rw)
+}
+
+/// [`compress`] followed by zero-gain moves that reshape the graph for
+/// further gains (after "compress2" in ABC).
+pub fn compress2(g: &Aig) -> Aig {
+    use crate::refactor::{RefactorOptions, refactor};
+    use crate::rewrite::{RewriteOptions, rewrite};
+    let rwz = RewriteOptions { zero_gain: true, ..Default::default() };
+    let mut h = compress(g);
+    h = rewrite(&h, &rwz);
+    h = balance(&h).cleanup();
+    h = refactor(&h, &RefactorOptions { zero_gain: true, ..Default::default() });
+    h = rewrite(&h, &rwz);
+    balance(&h).cleanup()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

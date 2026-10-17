@@ -145,6 +145,29 @@ fn factor(g: &mut Aig, cubes: &[Cube], vars: &[Lit]) -> Lit {
     g.or(t, r)
 }
 
+/// Builds the function with table `t` over `vars` (at most six) into `g` as
+/// the factored irredundant cover of the cheaper polarity.
+pub fn sop(g: &mut Aig, t: u64, vars: &[Lit]) -> Lit {
+    let n = vars.len();
+    // Replicate the table over the unused variables.
+    let mut full = 0u64;
+    for i in 0..64 {
+        full |= ((t >> (i & ((1 << n) - 1))) & 1) << i;
+    }
+    let mut best: Option<(Vec<Cube>, bool)> = None;
+    for compl in [false, true] {
+        let f = if compl { !full } else { full };
+        let mut cover = Vec::new();
+        isop(f, f, n, &mut cover);
+        let lits: u32 = cover.iter().map(Cube::lits).sum();
+        if best.as_ref().is_none_or(|(c, _)| lits < c.iter().map(Cube::lits).sum()) {
+            best = Some((cover, compl));
+        }
+    }
+    let (cubes, compl) = best.expect("two polarities tried");
+    factor(g, &cubes, vars).xor(compl)
+}
+
 /// Grows a reconvergence-driven cut of `root`: repeatedly expands the leaf
 /// whose fanins add the fewest new leaves.
 fn find_cut(g: &Aig, root: u32, max: usize) -> Vec<u32> {
@@ -247,7 +270,6 @@ pub fn refactor(aig: &Aig, opts: &RefactorOptions) -> Aig {
     for &i in &aig.inputs {
         map[i as usize] = out.input();
     }
-    let mut cover = Vec::new();
     for i in 0..aig.nodes.len() {
         let Node::And(a, b) = aig.nodes[i] else { continue };
         let fa = map[a.node() as usize].xor(a.is_compl());
@@ -267,21 +289,9 @@ pub fn refactor(aig: &Aig, opts: &RefactorOptions) -> Aig {
             continue;
         }
         let vars: Vec<Lit> = leaves.iter().map(|&l| map[l as usize]).collect();
-        // The cheaper polarity's cover.
-        let mut best: Option<(Vec<Cube>, bool)> = None;
-        for compl in [false, true] {
-            let f = if compl { !t } else { t };
-            cover.clear();
-            isop(f, f, leaves.len(), &mut cover);
-            let lits: u32 = cover.iter().map(Cube::lits).sum();
-            if best.as_ref().is_none_or(|(c, _)| lits < c.iter().map(Cube::lits).sum()) {
-                best = Some((cover.clone(), compl));
-            }
-        }
-        let (cubes, compl) = best.unwrap();
         // Build it and keep it if it adds fewer nodes than the cone frees.
         let before = out.nodes.len();
-        let alt = factor(&mut out, &cubes, &vars).xor(compl);
+        let alt = sop(&mut out, t, &vars);
         let gain = saved as i64 - (out.nodes.len() - before) as i64;
         if gain > 0 || (opts.zero_gain && gain == 0 && alt != plain) {
             map[i] = alt;
