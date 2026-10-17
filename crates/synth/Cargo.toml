@@ -13,6 +13,8 @@ synth-core.workspace = true
 synth-netlist.workspace = true
 synth-rtlil.workspace = true
 synth-verilog.workspace = true
+synth-elab.workspace = true
+synth-rtl.workspace = true
 arch-ice40.workspace = true
 
 [lints]

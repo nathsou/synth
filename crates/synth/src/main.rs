@@ -14,6 +14,7 @@ USAGE:
 
 COMMANDS:
     check      Parse Verilog files and report errors
+    elab       Elaborate Verilog into RTL (--verilog <out.v> to write it back)
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some("check") => cmd_check(&argv[1..]),
+        Some("elab") => cmd_elab(&argv[1..]),
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
@@ -121,14 +123,16 @@ fn cmd_unpack(argv: &[String]) -> Result<(), String> {
     write(&output, arch_ice40::asc::write_asc(&cfg).as_bytes())
 }
 
-fn cmd_check(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D"], &[])?;
+/// Parses Verilog sources given on the command line (`-I dir`, `-D name=value`).
+fn load_verilog(
+    a: &mut Args,
+) -> Result<(synth_core::SourceMap, synth_verilog::ast::SourceText), String> {
     let mut sm = synth_core::SourceMap::new();
     let mut opts = synth_verilog::PreprocOptions::default();
-    if let Some(i) = a.value("-I") {
+    for i in a.values("-I") {
         opts.include_dirs.push(i.into());
     }
-    if let Some(d) = a.value("-D") {
+    for d in a.values("-D") {
         let (k, v) = d.split_once('=').unwrap_or((&d, "1"));
         opts.defines.push((k.to_string(), v.to_string()));
     }
@@ -147,6 +151,36 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
     if diags.has_errors() {
         return Err(format!("{} error(s)", diags.error_count()));
     }
+    Ok((sm, src))
+}
+
+fn cmd_check(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["-I", "-D"], &[])?;
+    let (_, src) = load_verilog(&mut a)?;
     eprintln!("info: parsed {} module(s)", src.modules.len());
+    Ok(())
+}
+
+fn cmd_elab(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["-I", "-D", "--top", "--verilog", "--rename"], &[])?;
+    let (sm, src) = load_verilog(&mut a)?;
+    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params: vec![] };
+    let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+    if !diags.items.is_empty() {
+        eprint!("{}", diags.render(&sm));
+    }
+    let mut m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
+    let stats = m.stats();
+    eprintln!(
+        "info: {} wires, cells: {}",
+        m.wires.len(),
+        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
+    );
+    if let Some(r) = a.value("--rename") {
+        m.name = r;
+    }
+    if let Some(out) = a.value("--verilog") {
+        write(&out, synth_rtl::verilog::write(&m).as_bytes())?;
+    }
     Ok(())
 }

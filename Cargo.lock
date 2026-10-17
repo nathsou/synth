@@ -17,7 +17,9 @@ version = "0.1.0"
 dependencies = [
  "arch-ice40",
  "synth-core",
+ "synth-elab",
  "synth-netlist",
+ "synth-rtl",
  "synth-rtlil",
  "synth-verilog",
 ]
@@ -34,6 +36,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "synth-elab"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-rtl",
+ "synth-verilog",
+]
+
+[[package]]
 name = "synth-netlist"
 version = "0.1.0"
 dependencies = [
@@ -42,6 +53,13 @@ dependencies = [
 
 [[package]]
 name = "synth-route"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+]
+
+[[package]]
+name = "synth-rtl"
 version = "0.1.0"
 dependencies = [
  "synth-core",

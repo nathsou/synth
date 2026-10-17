@@ -1,0 +1,17 @@
+[package]
+name = "synth-elab"
+description = "Verilog elaboration: hierarchy, parameters, generate and process lowering into RTL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-verilog.workspace = true
+synth-rtl.workspace = true
+
+[lints]
+workspace = true

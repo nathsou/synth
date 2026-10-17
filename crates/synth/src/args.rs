@@ -5,7 +5,7 @@ use std::collections::HashMap;
 /// Parsed arguments: options with values, flags and positionals.
 #[derive(Debug, Default)]
 pub struct Args {
-    values: HashMap<String, String>,
+    values: HashMap<String, Vec<String>>,
     flags: Vec<String>,
     positionals: Vec<String>,
     consumed: Vec<String>,
@@ -20,10 +20,10 @@ impl Args {
         while i < argv.len() {
             let arg = &argv[i];
             if let Some((k, v)) = arg.split_once('=').filter(|(k, _)| with_value.contains(k)) {
-                a.values.insert(k.to_string(), v.to_string());
+                a.values.entry(k.to_string()).or_default().push(v.to_string());
             } else if with_value.contains(&arg.as_str()) {
                 let v = argv.get(i + 1).ok_or_else(|| format!("option {arg} needs a value"))?;
-                a.values.insert(arg.clone(), v.clone());
+                a.values.entry(arg.clone()).or_default().push(v.clone());
                 i += 1;
             } else if flags.contains(&arg.as_str()) {
                 a.flags.push(arg.clone());
@@ -37,9 +37,16 @@ impl Args {
         Ok(a)
     }
 
+    /// The last value of an option.
     pub fn value(&mut self, name: &str) -> Option<String> {
         self.consumed.push(name.to_string());
-        self.values.get(name).cloned()
+        self.values.get(name).and_then(|v| v.last().cloned())
+    }
+
+    /// All values of a repeatable option.
+    pub fn values(&mut self, name: &str) -> Vec<String> {
+        self.consumed.push(name.to_string());
+        self.values.get(name).cloned().unwrap_or_default()
     }
 
     pub fn required(&mut self, name: &str) -> Result<String, String> {
