@@ -399,16 +399,17 @@ impl Lower<'_> {
                 let v = fit(v, y.width());
                 self.set(y, v);
             }
-            CellKind::Binary { op: BinaryOp::Add, a, b, y, .. }
-                if let Some((ia, ib, c)) = self.carry_in_operand(a, b, y) =>
-            {
-                // `(x + y) + {0, c}`: one chain with carry-in `c`.
-                let yw = y.iter().rposition(|b| self.used.contains(b)).map_or(0, |i| i + 1);
-                let (av, bv, cin) = (self.sig(&ia)?, self.sig(&ib)?, self.get(c)?);
-                let v = self.add(&fit(av, yw), &fit(bv, yw), cin).0;
-                self.set(y, fit(v, y.width()));
-            }
             CellKind::Binary { op, signed, a, b, y } => {
+                if *op == BinaryOp::Add
+                    && let Some((ia, ib, c)) = self.carry_in_operand(a, b, y)
+                {
+                    // `(x + y) + {0, c}`: one chain with carry-in `c`.
+                    let yw = y.iter().rposition(|b| self.used.contains(b)).map_or(0, |i| i + 1);
+                    let (av, bv, cin) = (self.sig(&ia)?, self.sig(&ib)?, self.get(c)?);
+                    let v = self.add(&fit(av, yw), &fit(bv, yw), cin).0;
+                    self.set(y, fit(v, y.width()));
+                    return Ok(());
+                }
                 let (mut av, mut bv) = (self.sig(a)?, self.sig(b)?);
                 let mut yw = y.width();
                 // Arithmetic only up to the highest result bit anyone reads.
