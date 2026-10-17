@@ -82,6 +82,51 @@ pub struct LogicNet {
 impl LogicNet {
     /// Removes logic not reachable from any sink (sources are kept).
     pub fn cleanup(&mut self) {
+        self.compact_sinks();
         self.aig = self.aig.cleanup();
+    }
+
+    /// Calls `f` on every sink reference.
+    fn for_each_sink(&mut self, mut f: impl FnMut(&mut Sink)) {
+        for ff in &mut self.ffs {
+            f(&mut ff.clk);
+            f(&mut ff.d);
+            if let Some(e) = &mut ff.en {
+                f(e);
+            }
+            if let Some((s, _)) = &mut ff.srst {
+                f(s);
+            }
+            if let Some((s, _)) = &mut ff.arst {
+                f(s);
+            }
+        }
+        for c in &mut self.carries {
+            c.a.iter_mut().chain(c.b.iter_mut()).for_each(&mut f);
+            f(&mut c.cin);
+        }
+        let bits = self.ports.iter_mut().flat_map(|p| p.bits.iter_mut()).chain(
+            self.instances.iter_mut().flat_map(|i| i.conns.iter_mut().flat_map(|c| c.2.iter_mut())),
+        );
+        for b in bits {
+            if let Bit::Snk(k) = b {
+                f(k);
+            }
+        }
+    }
+
+    /// Drops graph outputs that nothing consumes.
+    pub fn compact_sinks(&mut self) {
+        let mut new_index = vec![usize::MAX; self.aig.outputs.len()];
+        self.for_each_sink(|k| new_index[*k] = 0);
+        let mut outputs = Vec::new();
+        for (k, idx) in new_index.iter_mut().enumerate() {
+            if *idx == 0 {
+                *idx = outputs.len();
+                outputs.push(self.aig.outputs[k]);
+            }
+        }
+        self.aig.outputs = outputs;
+        self.for_each_sink(|k| *k = new_index[*k]);
     }
 }

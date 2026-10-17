@@ -8,6 +8,7 @@
 //! lookup tables ([`lutmap`]).
 
 pub mod aig;
+pub mod carry;
 pub mod ff;
 pub mod fraig;
 pub mod lower;

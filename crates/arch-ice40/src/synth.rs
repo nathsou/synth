@@ -135,16 +135,30 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     }
     let t = Instant::now();
     let before = net.aig.num_ands();
-    let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
-    net.aig = synth_logic::opt::balance(&aig).cleanup();
+    let mut merged = 0;
+    let mut chain_bits = 0;
+    // Merging equivalent logic can make carry-chain operands constant;
+    // simplifying the chains feeds their sums back into the graph.
+    for _ in 0..4 {
+        let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
+        net.aig = aig;
+        merged += st.proved;
+        let removed = synth_logic::carry::simplify_carries(&mut net);
+        net.cleanup();
+        chain_bits += removed;
+        if removed == 0 {
+            break;
+        }
+    }
+    net.aig = synth_logic::opt::balance(&net.aig);
+    net.cleanup();
     log.push(format!(
-        "fraiged in {:.2}s: {} -> {} AND nodes ({} merged, {} refuted, {} undecided)",
+        "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits removed",
         t.elapsed().as_secs_f64(),
         before,
         net.aig.num_ands(),
-        st.proved,
-        st.refuted,
-        st.unknown
+        merged,
+        chain_bits
     ));
     if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
         // Debugging aid: the graph about to be mapped, for other tools.
@@ -619,7 +633,32 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
             e.nl.set_param(c, k, p);
         }
     }
+    sweep(&mut e.nl);
     Ok(e.nl)
+}
+
+/// Removes LUTs and carry cells whose outputs drive nothing (such as sum
+/// LUTs of adders whose sums are unused), repeatedly.
+fn sweep(nl: &mut Netlist) {
+    loop {
+        let dead: Vec<CellId> = nl
+            .live_cells()
+            .filter(|&c| {
+                let out = match nl.cell_kind(c) {
+                    "SB_LUT4" => "O",
+                    "SB_CARRY" => "CO",
+                    _ => return false,
+                };
+                nl.pin_net(c, out).is_none_or(|n| nl.nets[n].users.is_empty())
+            })
+            .collect();
+        if dead.is_empty() {
+            break;
+        }
+        for c in dead {
+            nl.remove_cell(c);
+        }
+    }
 }
 
 impl Emitter<'_> {
