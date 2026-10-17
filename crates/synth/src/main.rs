@@ -32,7 +32,7 @@ BUILD OPTIONS:
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
-              [--pass <clean|merge|share|trees|fsm|dff|memff|memtrans|memregs|two-state>]...
+              [--pass <clean|merge|share|trees|fsm|wreduce|shiftmul|dff|memff|memtrans|memregs|two-state>]...
 
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
@@ -300,6 +300,14 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             let n = opt::share_arith(m);
             eprintln!("info: share: {n} multiplexed operations shared");
         }
+        "wreduce" => {
+            let n = opt::reduce_widths(m);
+            eprintln!("info: wreduce: {n} result bits constant");
+        }
+        "shiftmul" => {
+            let n = opt::shift_by_multiple(m);
+            eprintln!("info: shiftmul: {n} shifts by multiples as multiplexers");
+        }
         "dff" => {
             let n = synth_rtl::dff::extract_controls(m);
             eprintln!("info: dff: {n} flip-flop bits gained controls");
@@ -328,7 +336,7 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "unknown pass `{name}` (clean, merge, share, trees, fsm, dff, memff, memtrans, memregs, two-state)"
+                "unknown pass `{name}` (clean, merge, share, trees, fsm, wreduce, shiftmul, dff, memff, memtrans, memregs, two-state)"
             ));
         }
     }

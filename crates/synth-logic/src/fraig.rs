@@ -38,34 +38,64 @@ fn mix(h: u64, v: u64) -> u64 {
 
 /// Simulation signatures and the equivalence classes they induce.
 struct Classes {
-    /// Hash of each node's normalised simulation values.
-    key: Vec<u64>,
     /// Complement of each node relative to its normalised signature.
     phase: Vec<bool>,
-    /// Smallest node of each class.
-    head: FxHashMap<u64, u32>,
+    /// Class of each node (`NONE`: alone).
+    class_of: Vec<u32>,
+    /// Members of each class, in increasing order (empty: dissolved).
+    members: Vec<Vec<u32>>,
+    /// Reused simulation buffer.
+    vals: Vec<u64>,
 }
+
+const NONE: u32 = u32::MAX;
 
 impl Classes {
     /// Classes from `words` 64-pattern words of random simulation.
     fn simulate(aig: &Aig, words: usize, rng: &mut Rng) -> Classes {
         let n = aig.nodes.len();
-        let mut cls =
-            Classes { key: vec![0; n], phase: vec![false; n], head: FxHashMap::default() };
+        let mut key = vec![0u64; n];
+        let mut phase = vec![false; n];
         for w in 0..words.max(1) {
             let inputs: Vec<u64> = aig.inputs.iter().map(|_| rng.next_u64()).collect();
             let vals = aig.simulate(&inputs);
             if w == 0 {
-                for (p, v) in cls.phase.iter_mut().zip(&vals) {
+                for (p, v) in phase.iter_mut().zip(&vals) {
                     *p = v & 1 == 1;
                 }
             }
-            for (k, (&v, &p)) in cls.key.iter_mut().zip(vals.iter().zip(&cls.phase)) {
+            for (k, (&v, &p)) in key.iter_mut().zip(vals.iter().zip(&phase)) {
                 *k = mix(*k, if p { !v } else { v });
             }
         }
-        cls.rebuild_heads();
+        let mut by_key: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+        for (i, &k) in key.iter().enumerate() {
+            by_key.entry(k).or_default().push(i as u32);
+        }
+        let mut cls =
+            Classes { phase, class_of: vec![NONE; n], members: Vec::new(), vals: Vec::new() };
+        let mut groups: Vec<Vec<u32>> = by_key.into_values().filter(|g| g.len() > 1).collect();
+        groups.sort_unstable_by_key(|g| g[0]);
+        for g in groups {
+            cls.add_class(g);
+        }
         cls
+    }
+
+    fn add_class(&mut self, members: Vec<u32>) {
+        let c = self.members.len() as u32;
+        for &m in &members {
+            self.class_of[m as usize] = c;
+        }
+        self.members.push(members);
+    }
+
+    /// The first node of `i`'s class.
+    fn head(&self, i: usize) -> usize {
+        match self.class_of[i] {
+            NONE => i,
+            c => self.members[c as usize][0] as usize,
+        }
     }
 
     /// Refines the classes with a counterexample (in bit 0) and patterns at
@@ -78,97 +108,164 @@ impl Classes {
                 *w ^= 1 << bit;
             }
         }
-        self.refine(&aig.simulate(&inputs));
+        let mut vals = std::mem::take(&mut self.vals);
+        aig.simulate_into(&inputs, &mut vals);
+        self.refine(&vals);
+        self.vals = vals;
     }
 
     /// Takes node `i` out of its class.
     fn isolate(&mut self, i: usize) {
-        self.key[i] = mix(self.key[i], 0xD1B5_4A32_D192_ED03 ^ i as u64);
-        self.head.insert(self.key[i], i as u32);
-    }
-
-    fn rebuild_heads(&mut self) {
-        self.head.clear();
-        for (n, &k) in self.key.iter().enumerate() {
-            self.head.entry(k).or_insert(n as u32);
+        let c = self.class_of[i];
+        if c == NONE {
+            return;
+        }
+        self.class_of[i] = NONE;
+        let m = &mut self.members[c as usize];
+        m.retain(|&x| x as usize != i);
+        if m.len() == 1 {
+            self.class_of[m[0] as usize] = NONE;
+            m.clear();
         }
     }
 
+    /// Splits every class by the members' (normalised) simulation values.
     fn refine(&mut self, vals: &[u64]) {
-        for (n, k) in self.key.iter_mut().enumerate() {
-            let v = if self.phase[n] { !vals[n] } else { vals[n] };
-            *k = mix(*k, v);
+        for c in 0..self.members.len() {
+            if self.members[c].is_empty() {
+                continue;
+            }
+            let norm = |n: u32| {
+                let v = vals[n as usize];
+                if self.phase[n as usize] { !v } else { v }
+            };
+            let v0 = norm(self.members[c][0]);
+            if self.members[c].iter().all(|&n| norm(n) == v0) {
+                continue;
+            }
+            let mut ms = std::mem::take(&mut self.members[c]);
+            // Stable sort by value keeps each group in increasing node order.
+            ms.sort_by_key(|&n| norm(n));
+            let mut groups: Vec<Vec<u32>> = Vec::new();
+            for n in ms {
+                match groups.last_mut() {
+                    Some(g) if norm(g[0]) == norm(n) => g.push(n),
+                    _ => groups.push(vec![n]),
+                }
+            }
+            for g in groups {
+                if g.len() == 1 {
+                    self.class_of[g[0] as usize] = NONE;
+                } else if self.members[c].is_empty() {
+                    for &m in &g {
+                        self.class_of[m as usize] = c as u32;
+                    }
+                    self.members[c] = g;
+                } else {
+                    self.add_class(g);
+                }
+            }
         }
-        self.rebuild_heads();
     }
 }
 
-/// The SAT encoding of a growing AIG: one variable per node, Tseitin
-/// clauses added on demand for the cones being compared.
+/// Equivalence checks by SAT, each on a fresh solver holding only the cones
+/// of the two nodes compared (a solver shared across checks would assign
+/// every variable it ever saw on each satisfiable query).
 struct Encoder {
-    solver: Solver,
-    encoded: Vec<bool>,
+    /// Solver variable of each node in the current query (`stamp` says which
+    /// query it belongs to).
+    var: Vec<u32>,
+    stamp: Vec<u32>,
+    epoch: u32,
+    cone: Vec<u32>,
+    stack: Vec<u32>,
 }
 
 impl Encoder {
     fn new() -> Encoder {
-        let mut solver = Solver::new();
-        let v0 = solver.new_var();
-        solver.add_clause(&[SLit::new(v0, true)]);
-        Encoder { solver, encoded: vec![true] }
-    }
-
-    fn slit(l: Lit) -> SLit {
-        SLit::new(l.node(), l.is_compl())
-    }
-
-    fn encode(&mut self, g: &Aig, root: u32) {
-        while self.solver.num_vars() < g.nodes.len() as u32 {
-            self.solver.new_var();
-            self.encoded.push(false);
-        }
-        let mut stack = vec![root];
-        while let Some(n) = stack.pop() {
-            if self.encoded[n as usize] {
-                continue;
-            }
-            self.encoded[n as usize] = true;
-            if let Node::And(a, b) = g.nodes[n as usize] {
-                let (x, a, b) = (SLit::new(n, false), Self::slit(a), Self::slit(b));
-                self.solver.add_clause(&[!x, a]);
-                self.solver.add_clause(&[!x, b]);
-                self.solver.add_clause(&[x, !a, !b]);
-                stack.push(a.var());
-                stack.push(b.var());
-            }
+        Encoder {
+            var: Vec::new(),
+            stamp: Vec::new(),
+            epoch: 0,
+            cone: Vec::new(),
+            stack: Vec::new(),
         }
     }
 
-    /// Checks `a == b`. On a difference, returns the values of the graph's
-    /// inputs in the counterexample (unconstrained inputs from `rng`).
+    /// Checks `a == b`, reading every node through `repr` (nodes already
+    /// proved equal to an earlier one, possibly complemented). On a
+    /// difference, returns the values of the graph's inputs in the
+    /// counterexample (inputs outside both cones from `rng`).
     fn equal(
         &mut self,
         g: &Aig,
+        repr: &[Option<(u32, bool)>],
         a: Lit,
         b: Lit,
         limit: u64,
         rng: &mut Rng,
     ) -> Result<bool, Vec<bool>> {
-        self.encode(g, a.node());
-        self.encode(g, b.node());
-        let (sa, sb) = (Self::slit(a), Self::slit(b));
+        let res = |l: Lit| match repr.get(l.node() as usize).copied().flatten() {
+            Some((r, c)) => Lit::new(r, c ^ l.is_compl()),
+            None => l,
+        };
+        let (a, b) = (res(a), res(b));
+        let n = g.nodes.len();
+        if self.var.len() < n {
+            self.var.resize(n, 0);
+            self.stamp.resize(n, 0);
+        }
+        self.epoch += 1;
+        let epoch = self.epoch;
+        // The union of both cones, then one variable per node.
+        self.cone.clear();
+        self.stack.clear();
+        self.stack.extend([a.node(), b.node()]);
+        while let Some(x) = self.stack.pop() {
+            if self.stamp[x as usize] == epoch {
+                continue;
+            }
+            self.stamp[x as usize] = epoch;
+            self.cone.push(x);
+            if let Node::And(p, q) = g.nodes[x as usize] {
+                self.stack.push(res(p).node());
+                self.stack.push(res(q).node());
+            }
+        }
+        let mut solver = Solver::new();
+        for &x in &self.cone {
+            self.var[x as usize] = solver.new_var();
+        }
+        let lit = |var: &[u32], l: Lit| SLit::new(var[l.node() as usize], l.is_compl());
+        for &x in &self.cone {
+            let v = SLit::new(self.var[x as usize], false);
+            match g.nodes[x as usize] {
+                Node::Const => {
+                    solver.add_clause(&[!v]);
+                }
+                Node::And(p, q) => {
+                    let (p, q) = (lit(&self.var, res(p)), lit(&self.var, res(q)));
+                    solver.add_clause(&[!v, p]);
+                    solver.add_clause(&[!v, q]);
+                    solver.add_clause(&[v, !p, !q]);
+                }
+                Node::Input(_) => {}
+            }
+        }
+        let (sa, sb) = (lit(&self.var, a), lit(&self.var, b));
         let mut unknown = false;
         for assume in [[sa, !sb], [!sa, sb]] {
-            match self.solver.solve(&assume, limit) {
+            match solver.solve(&assume, limit) {
                 SatResult::Unsat => {}
                 SatResult::Unknown => unknown = true,
                 SatResult::Sat => {
                     let cex = g
                         .inputs
                         .iter()
-                        .map(|&n| {
-                            if self.encoded[n as usize] {
-                                self.solver.model_value(n)
+                        .map(|&i| {
+                            if self.stamp[i as usize] == epoch {
+                                solver.model_value(self.var[i as usize])
                             } else {
                                 rng.below(2) == 1
                             }
@@ -178,13 +275,7 @@ impl Encoder {
                 }
             }
         }
-        if unknown {
-            return Ok(false);
-        }
-        // Record the equivalence; it helps later proofs.
-        self.solver.add_clause(&[!sa, sb]);
-        self.solver.add_clause(&[sa, !sb]);
-        Ok(true)
+        Ok(!unknown)
     }
 }
 
@@ -214,7 +305,7 @@ pub fn fraig(aig: &Aig, opts: &FraigOptions) -> (Aig, FraigStats) {
             continue;
         }
         loop {
-            let r = cls.head[&cls.key[i]] as usize;
+            let r = cls.head(i);
             if r == i {
                 break;
             }
@@ -222,7 +313,7 @@ pub fn fraig(aig: &Aig, opts: &FraigOptions) -> (Aig, FraigStats) {
             if target == l {
                 break;
             }
-            match enc.equal(&out, l, target, opts.conflict_limit, &mut rng) {
+            match enc.equal(&out, &[], l, target, opts.conflict_limit, &mut rng) {
                 Ok(true) => {
                     map[i] = target;
                     stats.proved += 1;
@@ -259,13 +350,14 @@ pub fn equivalences(aig: &Aig, opts: &FraigOptions) -> Vec<Option<(u32, bool)>> 
             continue;
         }
         loop {
-            let r = cls.head[&cls.key[i]] as usize;
+            let r = cls.head(i);
             if r == i {
                 break;
             }
             let c = cls.phase[i] ^ cls.phase[r];
             match enc.equal(
                 aig,
+                &repr,
                 Lit::new(i as u32, false),
                 Lit::new(r as u32, c),
                 opts.conflict_limit,

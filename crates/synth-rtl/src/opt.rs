@@ -10,6 +10,7 @@ use crate::{CellId, CellKind, MemId, Module, PortDir, Sig, SigBit};
 pub fn resolve_connections(m: &mut Module) -> Result<usize, String> {
     // Map each connected wire bit to its source, following chains.
     let mut map: FxHashMap<SigBit, SigBit> = FxHashMap::default();
+    let mut twice: Vec<SigBit> = Vec::new();
     for (lhs, rhs) in &m.connections {
         for (l, r) in lhs.iter().zip(rhs.iter()) {
             if l == r {
@@ -19,8 +20,65 @@ pub fn resolve_connections(m: &mut Module) -> Result<usize, String> {
                 && let Some(prev) = map.insert(*l, *r)
                 && prev != *r
             {
-                return Err(format!("{} is driven twice", m.bit_name(*l)));
+                twice.push(*l);
             }
+        }
+    }
+    // Several drivers are an error only for a live bit, one that reaches an
+    // output, an instance or a memory (a loop variable shared by processes
+    // is driven by each and feeds at most its own next value).
+    if !twice.is_empty() {
+        let mut cell_of: FxHashMap<SigBit, usize> = FxHashMap::default();
+        for (ci, c) in m.cells.iter().enumerate().filter(|(_, c)| c.alive) {
+            for o in c.outputs() {
+                for &bit in o.iter() {
+                    cell_of.insert(bit, ci);
+                }
+            }
+        }
+        let mut conn_of: FxHashMap<SigBit, Vec<SigBit>> = FxHashMap::default();
+        for (lhs, rhs) in &m.connections {
+            for (l, r) in lhs.iter().zip(rhs.iter()) {
+                conn_of.entry(*l).or_default().push(*r);
+            }
+        }
+        let mut work: Vec<SigBit> = Vec::new();
+        for c in m.cells.iter().filter(|c| c.alive && matches!(c.kind, CellKind::Instance(_))) {
+            c.for_each_input(|bit| work.push(bit));
+        }
+        for mem in m.memories.iter().filter(|mm| mm.alive) {
+            for rd in &mem.reads {
+                work.extend(rd.addr.iter().copied());
+            }
+            for wr in &mem.writes {
+                work.extend(wr.addr.iter().chain(wr.data.iter()).chain(wr.en.iter()).copied());
+            }
+        }
+        for w in m.ports() {
+            if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
+                work.extend(m.wire_sig(w).iter().copied());
+            }
+        }
+        let mut live: FxHashSet<SigBit> = FxHashSet::default();
+        let mut live_cells: FxHashSet<usize> = FxHashSet::default();
+        while let Some(bit) = work.pop() {
+            if !live.insert(bit) {
+                continue;
+            }
+            if let Some(rs) = conn_of.get(&bit) {
+                work.extend(rs.iter().copied());
+            }
+            if let Some(&ci) = cell_of.get(&bit)
+                && live_cells.insert(ci)
+            {
+                m.cells[CellId::new(ci)].for_each_input(|x| work.push(x));
+            }
+        }
+        if let Some(b) = twice.iter().find(|b| live.contains(b)) {
+            return Err(format!("{} is driven twice", m.bit_name(*b)));
+        }
+        for b in &twice {
+            map.remove(b);
         }
     }
     let resolve = |mut b: SigBit, map: &FxHashMap<SigBit, SigBit>| {
@@ -582,4 +640,183 @@ pub fn chains_to_trees(m: &mut Module) -> usize {
         n += 1;
     }
     n
+}
+
+/// Effective width of an unsigned value: up to its highest bit that is not
+/// constant zero.
+fn eff_width(s: &Sig) -> usize {
+    s.iter().rposition(|b| *b != SigBit::ZERO).map_or(0, |i| i + 1)
+}
+
+/// Width reduction of unsigned arithmetic (after Yosys's `wreduce`): result
+/// bits of additions and multiplications above what the operands can reach
+/// are constant zero; the cells shrink and those bits become constants.
+/// Returns the number of result bits made constant.
+pub fn reduce_widths(m: &mut Module) -> usize {
+    let mut count = 0;
+    for ci in m.live_cells().collect::<Vec<_>>() {
+        let CellKind::Binary { op, signed: false, a, b, y } = &m.cells[ci].kind else { continue };
+        let (ea, eb) = (eff_width(a), eff_width(b));
+        let need = match op {
+            crate::BinaryOp::Add => ea.max(eb) + 1,
+            crate::BinaryOp::Mul => ea + eb,
+            _ => continue,
+        };
+        let w = y.width();
+        if need >= w {
+            continue;
+        }
+        let (op, a, b, y) = (*op, a.clone(), b.clone(), y.clone());
+        let narrow = |s: &Sig| Sig(s.0[..need.min(s.width())].to_vec());
+        let y_lo =
+            m.binary(op, false, narrow(&a).extend(need, false), narrow(&b).extend(need, false));
+        m.cells[ci].alive = false;
+        m.connect(Sig(y.0[..need].to_vec()), y_lo);
+        m.connect(Sig(y.0[need..].to_vec()), Sig::zeros(w - need));
+        count += w - need;
+    }
+    count
+}
+
+/// Shifts by a multiple of a constant (`a[c*i +: w]`: the shift amount is
+/// `i * c`) become multiplexers over `i`, when `i` is narrow (after Yosys's
+/// `peepopt` shiftmul). Returns the number of shifts rewritten.
+pub fn shift_by_multiple(m: &mut Module) -> usize {
+    let mut mul_of: FxHashMap<SigBit, CellId> = FxHashMap::default();
+    for ci in m.live_cells() {
+        if let CellKind::Binary { op: crate::BinaryOp::Mul, signed: false, y, .. } =
+            &m.cells[ci].kind
+        {
+            for &bit in y.iter() {
+                mul_of.insert(bit, ci);
+            }
+        }
+    }
+    let mut count = 0;
+    for ci in m.live_cells().collect::<Vec<_>>() {
+        let CellKind::Shiftx { a, b, b_signed: false, offset, y } = &m.cells[ci].kind else {
+            continue;
+        };
+        let Some(&mc) = b.0.first().and_then(|bit| mul_of.get(bit)) else { continue };
+        let CellKind::Binary { a: p, b: q, y: my, .. } = &m.cells[mc].kind else { continue };
+        // b is the product, possibly truncated or zero-extended.
+        if !b.iter().zip(my.iter()).all(|(x, z)| x == z)
+            || b.iter().skip(my.width()).any(|bit| *bit != SigBit::ZERO)
+        {
+            continue;
+        }
+        let (c, x) =
+            match (p.as_const().and_then(|v| v.to_u64()), q.as_const().and_then(|v| v.to_u64())) {
+                (Some(c), None) => (c, q.clone()),
+                (None, Some(c)) => (c, p.clone()),
+                _ => continue,
+            };
+        let ew = eff_width(&x);
+        // The amount must not wrap: i * c fits in the shift amount.
+        let cbits = 64 - c.leading_zeros() as usize;
+        if ew > 12 || c == 0 || ew + cbits > b.width().min(my.width()) {
+            continue;
+        }
+        let (a, y, offset) = (a.clone(), y.clone(), *offset);
+        let w = y.width();
+        let words: Vec<Sig> = (0..1u64 << ew)
+            .map(|k| {
+                (0..w)
+                    .map(|j| {
+                        let pos = offset + (c * k) as i64 + j as i64;
+                        if pos >= 0 && (pos as usize) < a.width() {
+                            a.0[pos as usize]
+                        } else {
+                            SigBit::Const(synth_core::Logic::X)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let value = index_mux(m, &x.0[..ew], &words);
+        m.cells[ci].alive = false;
+        m.connect(y, value);
+        count += 1;
+    }
+    count
+}
+
+/// `words[index]` as a tree of multiplexers (index bits least significant
+/// first). Constant tables (ROMs) select on the bits in whichever order
+/// gives the smaller decision diagram: the shared subtrees are what LUT
+/// mapping can exploit.
+fn index_mux(m: &mut Module, index: &[SigBit], words: &[Sig]) -> Sig {
+    let constant = words.iter().all(|w| w.as_const().is_some());
+    let msb_first =
+        constant && bdd_size(index.len(), words, true) < bdd_size(index.len(), words, false);
+    index_mux_ordered(m, index, words, msb_first)
+}
+
+fn index_mux_ordered(m: &mut Module, index: &[SigBit], words: &[Sig], msb_first: bool) -> Sig {
+    if words.len() == 1 || index.is_empty() {
+        return words[0].clone();
+    }
+    let n = index.len();
+    let (a, b, s) = if msb_first {
+        // Words past the end are undefined: take the low half for them.
+        let half = 1usize << (n - 1);
+        if words.len() <= half {
+            return index_mux_ordered(m, &index[..n - 1], words, msb_first);
+        }
+        let a = index_mux_ordered(m, &index[..n - 1], &words[..half], msb_first);
+        let b = index_mux_ordered(m, &index[..n - 1], &words[half..], msb_first);
+        (a, b, index[n - 1])
+    } else {
+        let even: Vec<Sig> = words.iter().step_by(2).cloned().collect();
+        let odd: Vec<Sig> = words.iter().skip(1).step_by(2).cloned().collect();
+        let a = index_mux_ordered(m, &index[1..], &even, msb_first);
+        let b = index_mux_ordered(m, &index[1..], &odd, msb_first);
+        (a, b, index[0])
+    };
+    m.mux(s, a, b)
+}
+
+/// Decision nodes of the reduced diagrams of every bit of a constant table
+/// over `n` index bits, splitting on the top bit first or the bottom one.
+fn bdd_size(n: usize, words: &[Sig], msb_first: bool) -> usize {
+    use synth_core::Logic;
+    let w = words[0].width();
+    let mut total = 0;
+    for j in 0..w {
+        let bits: Vec<Logic> = (0..1usize << n)
+            .map(|k| match words.get(k) {
+                Some(word) => match word.0[j] {
+                    SigBit::Const(v) => v,
+                    _ => Logic::X,
+                },
+                None => Logic::X,
+            })
+            .collect();
+        // Index bits in splitting order, as positions in the table index.
+        let order: Vec<usize> = if msb_first { (0..n).rev().collect() } else { (0..n).collect() };
+        let mut nodes: FxHashSet<Vec<Logic>> = FxHashSet::default();
+        // Each level's distinct sub-functions, as tables over the remaining bits.
+        let mut level: Vec<Vec<Logic>> = vec![bits];
+        for &bit in &order {
+            let mut next = Vec::new();
+            for f in level {
+                let (lo, hi) = split(&f, bit);
+                if lo != hi && nodes.insert(f) {
+                    next.push(lo);
+                    next.push(hi);
+                }
+            }
+            level = next;
+        }
+        total += nodes.len();
+    }
+    total
+}
+
+/// Cofactors of a table over index bits (positions in the full index; the
+/// table keeps its length, entries of the other half are duplicated).
+fn split(f: &[synth_core::Logic], bit: usize) -> (Vec<synth_core::Logic>, Vec<synth_core::Logic>) {
+    let lo = (0..f.len()).map(|k| f[k & !(1 << bit)]).collect();
+    let hi = (0..f.len()).map(|k| f[k | (1 << bit)]).collect();
+    (lo, hi)
 }

@@ -156,6 +156,20 @@ impl Module {
         y
     }
 
+    /// `s[i] ? cases[i] : default` for one-hot (or all-zero) `s`.
+    pub fn pmux(&mut self, default: Sig, cases: Vec<Sig>, s: Sig) -> Sig {
+        debug_assert_eq!(cases.len(), s.width());
+        match cases.len() {
+            0 => return default,
+            1 => return self.mux(s.0[0], default, cases[0].clone()),
+            _ => {}
+        }
+        let y = self.new_sig(default.width());
+        let name = self.fresh_name("pmux");
+        self.add_cell(name, CellKind::Pmux { default, cases, s, y: y.clone() });
+        y
+    }
+
     /// Dynamic part select `a[b + offset +: width]`.
     pub fn shiftx(&mut self, a: Sig, b: Sig, b_signed: bool, offset: i64, width: usize) -> Sig {
         if let Some(cb) = b.as_const() {

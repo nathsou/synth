@@ -107,6 +107,10 @@ pub fn pack(nl: &mut Netlist) -> Result<(Packed, PackReport), String> {
     pack_io(nl)?;
     pack_logic(nl)?;
     let chains = pack_carries(nl, &mut report)?;
+    let merged = merge_ffs_into_carry_cells(nl, &chains)?;
+    if merged > 0 {
+        report.messages.push(format!("{merged} flip-flops packed into carry-only logic cells"));
+    }
     pack_ram(nl)?;
     fold_lut_constants(nl);
     drive_constants(nl)?;
@@ -281,6 +285,108 @@ fn pack_logic(nl: &mut Netlist) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Moves flip-flops whose logic cell only passes `I0` through into logic
+/// cells used for a carry alone (whose LUT and flip-flop are free), when the
+/// two share a net: the flip-flop's output feeds that carry, or its input is
+/// one of the carry's operands. A chain fills whole tiles, which share one
+/// control set, so the flip-flops moved into a chain must have the same
+/// controls. Returns the number of cells saved.
+fn merge_ffs_into_carry_cells(nl: &mut Netlist, chains: &[Vec<CellId>]) -> Result<usize, String> {
+    let mut chain_of: FxHashMap<CellId, usize> = FxHashMap::default();
+    for (i, ch) in chains.iter().enumerate() {
+        for &c in ch {
+            chain_of.insert(c, i);
+        }
+    }
+    type Controls = (Option<NetId>, Option<NetId>, Option<NetId>, u64);
+    let controls = |nl: &Netlist, c: CellId| -> Controls {
+        (net_of(nl, c, "CLK"), net_of(nl, c, "CEN"), net_of(nl, c, "SR"), get_int(nl, c, "NEG_CLK"))
+    };
+    // Each chain's control set, from the flip-flops already in it (None:
+    // mixed, no flip-flop may join).
+    let mut chain_ctrl: FxHashMap<usize, Option<Controls>> = FxHashMap::default();
+    for (i, ch) in chains.iter().enumerate() {
+        for &c in ch {
+            if get_int(nl, c, "DFF_ENABLE") == 1 {
+                let k = controls(nl, c);
+                let e = chain_ctrl.entry(i).or_insert(Some(k));
+                if *e != Some(k) {
+                    *e = None;
+                }
+            }
+        }
+    }
+    let mixed = chain_ctrl.values().filter(|c| c.is_none()).count();
+    if mixed > 0 && std::env::var("SYNTH_DEBUG").is_ok() {
+        eprintln!("debug: {mixed} carry chains with mixed flip-flop controls");
+    }
+    let lut_free = |nl: &Netlist, c: CellId| {
+        get_int(nl, c, "CARRY_ENABLE") == 1
+            && get_int(nl, c, "DFF_ENABLE") == 0
+            && net_of(nl, c, "O").is_none_or(|n| nl.nets[n].users.is_empty())
+            && net_of(nl, c, "I0").is_none()
+            && net_of(nl, c, "I3").is_none()
+    };
+    let ff_only = |nl: &Netlist, c: CellId| {
+        get_int(nl, c, "DFF_ENABLE") == 1
+            && get_int(nl, c, "CARRY_ENABLE") == 0
+            && get_int(nl, c, "LUT_INIT") & 0xFFFF == 0xAAAA
+            && ["I1", "I2", "I3", "CIN"].iter().all(|p| net_of(nl, c, p).is_none())
+    };
+    let lcs: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == LC).collect();
+    // Carry-only cells by the nets on their operand inputs.
+    let mut by_operand: FxHashMap<NetId, Vec<CellId>> = FxHashMap::default();
+    for &c in &lcs {
+        if lut_free(nl, c) {
+            for p in ["I1", "I2"] {
+                if let Some(n) = net_of(nl, c, p) {
+                    by_operand.entry(n).or_default().push(c);
+                }
+            }
+        }
+    }
+    let mut hosts_used: FxHashSet<CellId> = FxHashSet::default();
+    let mut merged = 0;
+    for &ff in &lcs {
+        if !ff_only(nl, ff) {
+            continue;
+        }
+        let ctrl = controls(nl, ff);
+        let fits = |h: &CellId| {
+            !hosts_used.contains(h)
+                && chain_of
+                    .get(h)
+                    .is_some_and(|ch| chain_ctrl.get(ch).is_none_or(|c| *c == Some(ctrl)))
+        };
+        let candidates = [net_of(nl, ff, "O"), net_of(nl, ff, "I0")];
+        let host = candidates
+            .iter()
+            .flatten()
+            .filter_map(|n| by_operand.get(n))
+            .flatten()
+            .copied()
+            .find(fits);
+        let Some(host) = host else { continue };
+        hosts_used.insert(host);
+        chain_ctrl.insert(chain_of[&host], Some(ctrl));
+        move_pin(nl, ff, "I0", host, "I0");
+        for p in ["CLK", "CEN", "SR", "O"] {
+            move_pin(nl, ff, p, host, p);
+        }
+        for p in ["LUT_INIT", "DFF_ENABLE", "NEG_CLK", "SET_NORESET", "ASYNC_SR"] {
+            let v = get_int(nl, ff, p);
+            set_int(nl, host, p, v);
+        }
+        let attrs: Vec<_> = nl.cells[ff].attrs.iter().map(|(k, v)| (*k, v.clone())).collect();
+        for (k, v) in attrs {
+            nl.cells[host].attrs.insert(k, v);
+        }
+        nl.remove_cell(ff);
+        merged += 1;
+    }
+    Ok(merged)
 }
 
 /// Merges `SB_CARRY` cells into logic cells and builds carry chains.

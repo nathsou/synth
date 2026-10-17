@@ -363,6 +363,25 @@ pub fn to_registers(m: &mut Module, mi: MemId) -> Result<(), String> {
     Ok(())
 }
 
+/// Replaces the memories that are only ever accessed at constant addresses
+/// (arrays indexed by loop variables, for instance) by registers. Returns
+/// the number of memories replaced.
+pub fn constant_index_to_registers(m: &mut Module) -> Result<usize, String> {
+    let mut n = 0;
+    for mi in (0..m.memories.len()).map(MemId::new) {
+        let mem = &m.memories[mi];
+        if mem.alive
+            && mem.reads.iter().all(|r| r.addr.is_const())
+            && mem.writes.iter().all(|w| w.addr.is_const())
+            && mem.writes.windows(2).all(|w| w[0].clk == w[1].clk)
+        {
+            to_registers(m, mi)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Selects `words[index]` with a binary tree of multiplexers (index bits
 /// least significant first; out-of-range indices read as x).
 fn mux_tree(m: &mut Module, index: &[SigBit], words: &[Sig], width: usize) -> Sig {

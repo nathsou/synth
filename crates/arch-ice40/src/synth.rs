@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use synth_core::{FxHashMap, Logic, LogicVec};
+use synth_core::{FxHashMap, FxHashSet, Logic, LogicVec};
 use synth_logic::aig::{Lit, Node};
 use synth_logic::ff::FfRules;
 use synth_logic::lower::LowerOptions;
@@ -40,6 +40,19 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let mut log = Vec::new();
     let t = Instant::now();
     opt::clean(&mut m)?;
+    if mem::constant_index_to_registers(&mut m)? > 0 {
+        opt::clean(&mut m)?;
+    }
+    // Narrower arithmetic first: shift amounts become recognisably narrow.
+    for _ in 0..8 {
+        if opt::reduce_widths(&mut m) == 0 {
+            break;
+        }
+        opt::clean(&mut m)?;
+    }
+    if opt::shift_by_multiple(&mut m) > 0 {
+        opt::clean(&mut m)?;
+    }
     let merged = opt::merge_identical(&mut m);
     let shared = opt::share_arith(&mut m);
     let trees = opt::chains_to_trees(&mut m);
@@ -602,6 +615,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     }
     // Carry chains.
     let xor3: u64 = (0..16u64).map(|i| (((i >> 1) ^ (i >> 2) ^ (i >> 3)) & 1) << i).sum();
+    let mut sums = Vec::new();
     for (ci, ch) in net.carries.iter().enumerate() {
         let mut carry = e.sink(ch.cin)?;
         let w = ch.a.len();
@@ -616,6 +630,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
                 let out = e.src[s as usize];
                 e.pin(c, "O", Dir::Output, Some(out))?;
                 e.nl.set_param(c, "LUT_INIT", lut_init(xor3, 4));
+                sums.push(SumLut { cell: c, a, b, carry, out });
             }
             let co = if i + 1 == w {
                 match ch.cout {
@@ -671,8 +686,100 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
             e.nl.set_param(c, k, p);
         }
     }
+    absorb_sums(&mut e.nl, &sums);
     sweep(&mut e.nl);
     Ok(e.nl)
+}
+
+/// The LUT computing bit `out = a ^ b ^ carry` of an adder on a carry chain.
+struct SumLut {
+    cell: CellId,
+    a: NetId,
+    b: NetId,
+    carry: NetId,
+    out: NetId,
+}
+
+/// Folds each sum bit read only by one LUT into that LUT, when the LUT's
+/// other inputs leave a pin free besides the adder's operands and carry: the
+/// LUT then computes on `I1 = a`, `I2 = b`, `I3 = carry` and packs with the
+/// carry in place of the sum LUT (as a conditional subtraction's selection
+/// does, `t < 0 ? s : t` beside `t = s - m`). Returns the number folded.
+fn absorb_sums(nl: &mut Netlist, sums: &[SumLut]) -> usize {
+    let is_sum: FxHashSet<CellId> = sums.iter().map(|s| s.cell).collect();
+    let mut taken: FxHashSet<CellId> = FxHashSet::default();
+    let mut folded = 0;
+    for s in sums {
+        let users = &nl.nets[s.out].users;
+        if users.len() != 1 || nl.nets[s.out].driver.map(|d| d.cell) != Some(s.cell) {
+            continue;
+        }
+        let l = users[0].cell;
+        if nl.cell_kind(l) != "SB_LUT4" || is_sum.contains(&l) || taken.contains(&l) {
+            continue;
+        }
+        // The LUT's inputs, and the one net besides a, b, carry and the sum.
+        let ins: Vec<Option<NetId>> = (0..4).map(|j| nl.pin_net(l, &format!("I{j}"))).collect();
+        let mut extra: Option<NetId> = None;
+        let mut fits = true;
+        for n in ins.iter().flatten().copied() {
+            if [s.a, s.b, s.carry, s.out].contains(&n) || nl.nets[n].constant.is_some() {
+                continue;
+            }
+            match extra {
+                None => extra = Some(n),
+                Some(x) if x == n => {}
+                Some(_) => fits = false,
+            }
+        }
+        if !fits {
+            continue;
+        }
+        let init = nl.param(l, "LUT_INIT").and_then(Param::as_u64).unwrap_or(0);
+        let mut truth = 0u64;
+        for idx in 0..16u64 {
+            let (x, a, b, c) = (idx & 1, idx >> 1 & 1, idx >> 2 & 1, idx >> 3 & 1);
+            let value = |n: NetId| -> u64 {
+                if n == s.a {
+                    a
+                } else if n == s.b {
+                    b
+                } else if n == s.carry {
+                    c
+                } else if n == s.out {
+                    a ^ b ^ c
+                } else if let Some(k) = nl.nets[n].constant {
+                    (k == Const::One) as u64
+                } else {
+                    x
+                }
+            };
+            let at: u64 = ins.iter().enumerate().map(|(j, n)| n.map_or(0, value) << j).sum();
+            truth |= (init >> at & 1) << idx;
+        }
+        let pin_of = |nl: &Netlist, j: usize| {
+            let i = nl.cells[l].pin_index(nl.names.get(&format!("I{j}"))?)?;
+            Some(synth_netlist::PinRef { cell: l, pin: i as u32 })
+        };
+        for j in 0..4 {
+            if let Some(p) = pin_of(nl, j) {
+                nl.disconnect(p);
+            }
+        }
+        let conns = [(0, extra), (1, Some(s.a)), (2, Some(s.b)), (3, Some(s.carry))];
+        for (j, n) in conns {
+            let Some(n) = n else { continue };
+            let done = match pin_of(nl, j) {
+                Some(p) => nl.connect(p, n),
+                None => nl.add_pin(l, &format!("I{j}"), Dir::Input, Some(n)).map(|_| ()),
+            };
+            done.expect("LUT input connects");
+        }
+        nl.set_param(l, "LUT_INIT", lut_init(truth, 4));
+        taken.insert(l);
+        folded += 1;
+    }
+    folded
 }
 
 /// Removes LUTs and carry cells whose outputs drive nothing (such as sum

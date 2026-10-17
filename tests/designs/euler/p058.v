@@ -68,13 +68,29 @@ module euler58 (
   reg kv;
   reg [1:0] layers [0:(1<<FB)-1];
 
-  // the filter: corners divisible by a small prime (from s = 11 on)
+  // the filter: corners divisible by a small prime (from s = 11 on), from a
+  // table per prime indexed by s mod p
+  function [3*128-1:0] divides_table(input integer p);
+    integer r;
+    begin
+      for (r = 0; r < 128; r = r + 1)
+        divides_table[3*r +: 3] = divides(p, r);
+    end
+  endfunction
+  wire [2:0] prime_hits [0:NP-1];
+  genvar f;
+  generate
+    for (f = 0; f < NP; f = f + 1) begin : filter
+      localparam [3*128-1:0] TABLE = divides_table(filter_prime(f));
+      assign prime_hits[f] = TABLE[3 * resid[f] +: 3];
+    end
+  endgenerate
   reg [2:0] mask;
   integer i;
   always @* begin
     mask = 0;
     for (i = 0; i < NP; i = i + 1)
-      mask = mask | divides(filter_prime(i), resid[i]);
+      mask = mask | prime_hits[i];
   end
   wire [2:0] hits = filt ? mask : 3'd0;
   wire survives = cj == 3 ? 1'b1 : !hits_r[cj];

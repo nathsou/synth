@@ -272,15 +272,22 @@ impl Aig {
     /// Simulates 64 patterns at once: `inputs[i]` holds the values of input
     /// `i`. Returns the value of every node.
     pub fn simulate(&self, inputs: &[u64]) -> Vec<u64> {
-        let mut v = vec![0u64; self.nodes.len()];
+        let mut v = Vec::new();
+        self.simulate_into(inputs, &mut v);
+        v
+    }
+
+    /// [`Aig::simulate`] into a reused buffer.
+    pub fn simulate_into(&self, inputs: &[u64], v: &mut Vec<u64>) {
+        v.clear();
+        v.resize(self.nodes.len(), 0);
         for (i, n) in self.nodes.iter().enumerate() {
             v[i] = match *n {
                 Node::Const => 0,
                 Node::Input(k) => inputs[k as usize],
-                Node::And(a, b) => lit_val(&v, a) & lit_val(&v, b),
+                Node::And(a, b) => lit_val(v, a) & lit_val(v, b),
             };
         }
-        v
     }
 }
 

@@ -64,12 +64,28 @@ module euler43_lane #(
   localparam M_SEARCH = 2'd0, M_CONV = 2'd1, M_ADD = 2'd2, M_DONE = 2'd3;
 
   // the prime of the window starting at position i (2 ... 8)
-  function [4:0] prime_at(input [3:0] i);
+  function integer prime_of(input integer i);
     case (i)
-      2: prime_at = 2; 3: prime_at = 3; 4: prime_at = 5; 5: prime_at = 7;
-      6: prime_at = 11; 7: prime_at = 13; 8: prime_at = 17; default: prime_at = 1;
+      2: prime_of = 2; 3: prime_of = 3; 4: prime_of = 5; 5: prime_of = 7;
+      6: prime_of = 11; 7: prime_of = 13; 8: prime_of = 17; default: prime_of = 1;
     endcase
   endfunction
+
+  // Read-only tables over {i, x} (position, digit), as in HDLean: the prime,
+  // (10 x) mod p, x mod p and (100 x) mod p for the window at position i.
+  function [5*256-1:0] table_of(input integer k);
+    integer x;
+    begin
+      for (x = 0; x < 256; x = x + 1)
+        case (k)
+          0: table_of[5*x +: 5] = prime_of(x % 16);
+          1: table_of[5*x +: 5] = (10 * (x % 16)) % prime_of(x / 16);
+          2: table_of[5*x +: 5] = (x % 16) % prime_of(x / 16);
+          default: table_of[5*x +: 5] = (100 * (x % 16)) % prime_of(x / 16);
+        endcase
+    end
+  endfunction
+  localparam [5*256-1:0] PRIME = table_of(0), R10 = table_of(1), R1 = table_of(2), R100 = table_of(3);
 
   // the residue 100 c must have modulo the prime of the window at position i
   // for the window c a b to be divisible: -(10a + b) mod p
@@ -77,9 +93,9 @@ module euler43_lane #(
     reg [4:0] p, r10, r1, s1;
     reg [5:0] s;
     begin
-      p = prime_at(i);
-      r10 = (10 * a) % p;
-      r1 = b % p;
+      p = PRIME[5 * i +: 5];
+      r10 = R10[5 * {i, a} +: 5];
+      r1 = R1[5 * {i, b} +: 5];
       s = r10 + r1;
       s1 = s < p ? s : s - p;
       need_of = s1 == 0 ? 5'd0 : p - s1;
@@ -110,8 +126,7 @@ module euler43_lane #(
   wire is_add = mode == M_ADD;
   assign done = mode == M_DONE;
 
-  wire [10:0] rc_full = 11'd100 * cand;
-  wire [4:0] rc = rc_full % prime_at(pos);
+  wire [4:0] rc = R100[5 * {pos, cand} +: 5];
   wire div_ok = !win || rc == need;
   wire cand_bit = cand < 10 ? used[cand] : 1'b0;
   wire exhausted = cand == 10;

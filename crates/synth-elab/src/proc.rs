@@ -767,6 +767,25 @@ impl<'a> Elab<'a> {
         // that can match unconditionally instead of keeping old values (no
         // latch). Items that can never match stay out of the logic.
         let has_default = items.iter().any(|it| it.exprs.is_empty());
+        // Items that can never overlap select in parallel: each output bit
+        // then depends only on the items that set it.
+        let live: Vec<usize> = (0..items.len())
+            .filter(|&k| !items[k].exprs.is_empty() && conds[k] != SigBit::ZERO)
+            .collect();
+        if live.len() >= 3
+            && self.proc.as_ref().is_some_and(|p| !p.initial)
+            && self.items_disjoint(kind, items, &live, w, signed)
+        {
+            let (cases, default) = if has_default {
+                (&live[..], items.iter().position(|it| it.exprs.is_empty()))
+            } else if full_case || self.case_covers_all(kind, w, items) {
+                (&live[..live.len() - 1], live.last().copied())
+            } else {
+                (&live[..], None)
+            };
+            self.case_parallel(items, &conds, cases, default);
+            return;
+        }
         if !has_default
             && (full_case || self.case_covers_all(kind, w, items))
             && let Some(last) = (0..items.len())
@@ -776,6 +795,148 @@ impl<'a> Elab<'a> {
             conds[last] = SigBit::ONE;
         }
         self.case_chain(items, &conds, 0);
+    }
+
+    /// Whether no two of the `live` items can match the same value (all
+    /// item expressions constant; within an item they may overlap).
+    fn items_disjoint(
+        &mut self,
+        kind: ast::CaseKind,
+        items: &'a [ast::CaseItem],
+        live: &[usize],
+        w: u32,
+        signed: bool,
+    ) -> bool {
+        // Each expression as its cared-for bits: (mask, value), up to 128 bits.
+        if w > 128 {
+            return false;
+        }
+        let mut pats: Vec<Vec<(u128, u128)>> = Vec::new();
+        for &k in live {
+            let mut item = Vec::new();
+            for e in &items[k].exprs {
+                let Some(c) = self.emit(e, w, signed).as_const() else { return false };
+                let (mut mask, mut val) = (0u128, 0u128);
+                let mut never = false;
+                for i in 0..w as usize {
+                    let bit = c.get(i);
+                    let wild = match kind {
+                        ast::CaseKind::Case => {
+                            never |= !bit.is_known();
+                            false
+                        }
+                        ast::CaseKind::Casez => bit == Logic::Z,
+                        _ => !bit.is_known(),
+                    };
+                    if !wild {
+                        mask |= 1 << i;
+                        val |= ((bit == Logic::One) as u128) << i;
+                    }
+                }
+                if !never {
+                    item.push((mask, val));
+                }
+            }
+            pats.push(item);
+        }
+        for i in 0..pats.len() {
+            for j in i + 1..pats.len() {
+                for &(ma, va) in &pats[i] {
+                    for &(mb, vb) in &pats[j] {
+                        if (va ^ vb) & ma & mb == 0 {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Runs mutually exclusive items `cases` (selected by `conds`) and, when
+    /// none matches, `default`, each from the same state; every variable bit
+    /// then takes its value from a parallel multiplexer.
+    fn case_parallel(
+        &mut self,
+        items: &'a [ast::CaseItem],
+        conds: &[SigBit],
+        cases: &[usize],
+        default: Option<usize>,
+    ) {
+        let base = self.proc.take().expect("in a process");
+        let sel: Vec<SigBit> = cases.iter().map(|&k| conds[k]).collect();
+        let mut states = Vec::new();
+        for (&k, &c) in cases.iter().zip(&sel) {
+            let mut st = base.clone();
+            st.cond = self.out.and1(base.cond, c);
+            self.proc = Some(st);
+            self.exec(&items[k].body);
+            states.push(self.proc.take().unwrap());
+        }
+        let any = self.or_tree(&sel);
+        let none = self.out.not1(any);
+        let mut st = base.clone();
+        st.cond = self.out.and1(base.cond, none);
+        self.proc = Some(st);
+        if let Some(d) = default {
+            self.exec(&items[d].body);
+        }
+        let dflt = self.proc.take().unwrap();
+        let mut out = base.clone();
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for st in states.iter().chain([&dflt]) {
+            for &k in &st.order {
+                if seen.insert(k) {
+                    keys.push(k);
+                }
+            }
+        }
+        for &k in &keys {
+            out.note(k);
+            for nba in [false, true] {
+                let get =
+                    |st: &ProcState| if nba { st.nba.get(&k) } else { st.vals.get(&k) }.copied();
+                if states.iter().chain([&dflt]).all(|st| get(st).is_none()) {
+                    continue;
+                }
+                let d = get(&dflt).unwrap_or(k);
+                let vs: Vec<SigBit> = states.iter().map(|st| get(st).unwrap_or(k)).collect();
+                let v = self.parallel_merge(k, d, &vs, &sel);
+                if nba {
+                    out.nba.insert(k, v);
+                } else {
+                    out.vals.insert(k, v);
+                }
+            }
+        }
+        for st in states.iter().chain([&dflt]) {
+            out.writes.extend(st.writes[base.writes.len()..].iter().cloned());
+            out.hard_errors.extend(st.hard_errors[base.hard_errors.len()..].iter().cloned());
+        }
+        self.proc = Some(out);
+    }
+
+    /// The value of variable bit `k` after parallel items: `vs[i]` when
+    /// `sel[i]`, else `d`. A bit that keeps its old value somewhere becomes a
+    /// chain of multiplexers instead (whose feedback flip-flop enable
+    /// inference recognises).
+    fn parallel_merge(&mut self, k: SigBit, d: SigBit, vs: &[SigBit], sel: &[SigBit]) -> SigBit {
+        let unknown = |x: SigBit| matches!(x, SigBit::Const(Logic::X | Logic::Z));
+        let differ: Vec<usize> = (0..vs.len()).filter(|&i| vs[i] != d && !unknown(vs[i])).collect();
+        if differ.is_empty() {
+            return d;
+        }
+        if d == k || differ.iter().any(|&i| vs[i] == k) {
+            let mut v = d;
+            for &i in &differ {
+                v = self.out.mux(sel[i], Sig::bit(v), Sig::bit(vs[i])).0[0];
+            }
+            return v;
+        }
+        let cases = differ.iter().map(|&i| Sig::bit(vs[i])).collect();
+        let s = differ.iter().map(|&i| sel[i]).collect();
+        self.out.pmux(Sig::bit(d), cases, s).0[0]
     }
 
     /// Whether constant case items cover all values of a `w`-bit subject.

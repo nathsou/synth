@@ -429,13 +429,23 @@ impl Lower<'_> {
                 self.set(y, v);
             }
             CellKind::Pmux { default, cases, s, y } => {
-                let mut v = self.sig(default)?;
+                // With one select set at most: the OR of the selected cases,
+                // or the default when none is (each bit reads only the
+                // selects of the cases that can set it).
+                let dv = self.sig(default)?;
                 let sv = self.sig(s)?;
-                for (i, c) in cases.iter().enumerate().rev() {
-                    let cv = self.sig(c)?;
-                    let g = &mut self.net.aig;
-                    v = v.iter().zip(&cv).map(|(&e, &t)| g.mux(sv[i], t, e)).collect();
-                }
+                let cvs: Vec<Vec<Lit>> =
+                    cases.iter().map(|c| self.sig(c)).collect::<Result<_, _>>()?;
+                let g = &mut self.net.aig;
+                let none = !g.or_all(&sv);
+                let v = (0..dv.len())
+                    .map(|j| {
+                        let mut terms: Vec<Lit> =
+                            cvs.iter().zip(&sv).map(|(cv, &s)| g.and(s, cv[j])).collect();
+                        terms.push(g.and(none, dv[j]));
+                        g.or_all(&terms)
+                    })
+                    .collect();
                 self.set(y, v);
             }
             CellKind::Shiftx { a, b, b_signed, offset, y } => {
@@ -866,6 +876,92 @@ mod tests {
                 assert_eq!(got, want, "{op:?} signed={signed}: {a} {b}");
             }
         }
+    }
+
+    /// Lowers `m` (input port `a`, output port `y`) and checks `y` against
+    /// `f` for every value of `a`.
+    fn check_function(m: &Module, f: impl Fn(u64) -> u64) {
+        let net = lower(m, &LowerOptions::default()).unwrap();
+        let port = |name: &str| net.ports.iter().find(|p| p.name == name).unwrap().bits.clone();
+        let (a, y) = (port("a"), port("y"));
+        for v in 0..1u64 << a.len() {
+            let mut inputs = vec![0u64; net.aig.inputs.len()];
+            for (i, b) in a.iter().enumerate() {
+                let Bit::Src(s) = b else { unreachable!() };
+                inputs[*s as usize] = 0u64.wrapping_sub((v >> i) & 1);
+            }
+            // Carry chains are outside the graph: evaluate them in order
+            // (each reads only earlier sources), repeating until stable.
+            let mut vals = net.aig.simulate(&inputs);
+            for _ in 0..=net.carries.len() {
+                for ch in &net.carries {
+                    let bit = |k: usize| crate::aig::lit_val(&vals, net.aig.outputs[k]) & 1;
+                    let mut c = bit(ch.cin);
+                    for i in 0..ch.a.len() {
+                        let (x, z) = (bit(ch.a[i]), bit(ch.b[i]));
+                        if let Some(&s) = ch.sum.get(i) {
+                            inputs[s as usize] = 0u64.wrapping_sub(x ^ z ^ c);
+                        }
+                        c = (x & z) | (x & c) | (z & c);
+                    }
+                    if let Some(s) = ch.cout {
+                        inputs[s as usize] = 0u64.wrapping_sub(c);
+                    }
+                }
+                vals = net.aig.simulate(&inputs);
+            }
+            let got: u64 = y
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    let Bit::Snk(k) = b else { unreachable!() };
+                    (crate::aig::lit_val(&vals, net.aig.outputs[*k]) & 1) << i
+                })
+                .sum();
+            assert_eq!(got, f(v), "a = {v}");
+        }
+    }
+
+    fn ports(m: &mut Module, aw: u32, yw: u32) -> (Sig, Sig) {
+        let a = m.add_wire("a", aw);
+        m.wires[a].port = Some((PortDir::Input, 0));
+        let y = m.add_wire("y", yw);
+        m.wires[y].port = Some((PortDir::Output, 1));
+        (m.wire_sig(a), m.wire_sig(y))
+    }
+
+    #[test]
+    fn constant_table_indexed_by_a_multiple() {
+        // y = TABLE[5*a +: 5] over 16 pseudo-random words.
+        let word = |k: u64| ((k * 7 + 3) % 31) ^ (k >> 2);
+        let table = (0..16).fold(Sig::new(), |t, k| t.concat(&Sig::from_u64(word(k), 5)));
+        let mut m = Module::new("t");
+        let (a, y) = ports(&mut m, 4, 5);
+        let five = Sig::from_u64(5, 8);
+        let amount = m.binary(BinaryOp::Mul, false, a.extend(8, false), five);
+        let out = m.new_sig(5);
+        m.add_cell(
+            "rom",
+            CellKind::Shiftx { a: table, b: amount, b_signed: false, offset: 0, y: out.clone() },
+        );
+        m.connect(y, out);
+        assert_eq!(synth_rtl::opt::shift_by_multiple(&mut m), 1);
+        synth_rtl::opt::clean(&mut m).unwrap();
+        check_function(&m, |v| word(v) & 31);
+    }
+
+    #[test]
+    fn narrowed_arithmetic() {
+        // y = (a_hi * a_lo + a_hi) in 16 bits, from 3-bit halves.
+        let mut m = Module::new("t");
+        let (a, y) = ports(&mut m, 6, 16);
+        let (hi, lo) = (a.slice(3, 3).extend(16, false), a.slice(0, 3).extend(16, false));
+        let p = m.binary(BinaryOp::Mul, false, hi.clone(), lo);
+        let s = m.binary(BinaryOp::Add, false, p, hi);
+        m.connect(y, s);
+        assert!(synth_rtl::opt::reduce_widths(&mut m) > 0);
+        synth_rtl::opt::clean(&mut m).unwrap();
+        check_function(&m, |v| (v >> 3) * (v & 7) + (v >> 3));
     }
 
     #[test]
