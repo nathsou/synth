@@ -191,8 +191,12 @@ pub struct RoutingGraph {
     pub offsets: Vec<u32>,
     pub edge_dst: Vec<u32>,
     pub edge_pip: Vec<PipRef>,
-    /// Intrinsic delay of each edge, in picoseconds.
+    /// Intrinsic delay of each edge, in picoseconds: for edges driving span
+    /// wires, the delay of the longest span (the actual one depends on how
+    /// far along the wire the signal is used, see [`Arch::span_delay`]).
     pub edge_delay: Vec<f32>,
+    /// Span wire kind each edge drives ([`SPAN4_H`] ...; 0 for none).
+    pub edge_span: Vec<u8>,
     /// Representative position of each node (centre of its tiles).
     pub node_x: Vec<i16>,
     pub node_y: Vec<i16>,
@@ -219,8 +223,12 @@ pub struct Arch {
     pub bels: Vec<Bel>,
     bel_at: FxHashMap<(u8, u8, u8, BelKind), BelId>,
     pub graph: RoutingGraph,
-    /// Per template: delay of each template pip (ps).
-    pip_delays: Vec<Vec<f32>>,
+    /// Per template: delay of each template pip (ps), and the span kind it
+    /// drives.
+    pip_delays: Vec<Vec<(f32, u8)>>,
+    /// Delay of span drivers by kind and distance (tiles) to the farthest
+    /// use of the wire, as icetime models them.
+    span_delays: [[f32; 13]; 5],
     /// LUT input permutation: per logic cell bel, its physical input pin
     /// nodes and the virtual nodes standing for the LUT's logical inputs
     /// (numbered after the device's nodes).
@@ -230,6 +238,12 @@ pub struct Arch {
 /// A logic cell's physical LUT input pins, the virtual nodes of its logical
 /// inputs, and its position.
 type LutPermutation = ([NodeId; 4], [NodeId; 4], (u8, u8, u8));
+
+/// Kinds of span wire drivers, whose delay depends on distance.
+pub const SPAN4_H: u8 = 1;
+pub const SPAN4_V: u8 = 2;
+pub const SPAN12_H: u8 = 3;
+pub const SPAN12_V: u8 = 4;
 
 /// Graph edges marked with this tile are LUT input permutations, not pips.
 pub const PERMUTATION_TILE: u16 = u16::MAX;
@@ -254,6 +268,19 @@ impl Arch {
             )
         })?;
         let pip_delays = db.templates.iter().map(|t| template_pip_delays(db, t)).collect();
+        let mut span_delays = [[0f32; 13]; 5];
+        for (kind, cell, n) in [
+            (SPAN4_H, "Span4Mux_h", 4),
+            (SPAN4_V, "Span4Mux_v", 4),
+            (SPAN12_H, "Span12Mux_h", 12),
+            (SPAN12_V, "Span12Mux_v", 12),
+        ] {
+            for (d, v) in span_delays[kind as usize].iter_mut().enumerate().take(n + 1) {
+                *v = db
+                    .timing_arc(&format!("{cell}{d}"), crate::chipdb::ArcKind::IoPath, "I", "O")
+                    .unwrap_or(0.0);
+            }
+        }
         let mut arch = Arch {
             part,
             db,
@@ -265,11 +292,13 @@ impl Arch {
                 edge_dst: vec![],
                 edge_pip: vec![],
                 edge_delay: vec![],
+                edge_span: vec![],
                 node_x: vec![],
                 node_y: vec![],
                 node_class: vec![],
             },
             pip_delays,
+            span_delays,
             lut_perm: Vec::new(),
         };
         arch.build_bels()?;
@@ -459,7 +488,7 @@ impl Arch {
         let n_dev = db.nodes.len();
         let n = n_dev + 4 * self.lut_perm.len();
         let mut count = vec![0u32; n + 1];
-        let mut edges: Vec<(u32, u32, PipRef, f32)> = Vec::new();
+        let mut edges: Vec<(u32, u32, PipRef, (f32, u8))> = Vec::new();
         let gw = db.grid_width();
         let mut sum_x = vec![0i32; n];
         let mut sum_y = vec![0i32; n];
@@ -472,7 +501,7 @@ impl Arch {
                 for (j, p) in physical.iter().enumerate() {
                     count[p.index()] += 1;
                     let pip = PipRef { tile: PERMUTATION_TILE, tpip: (4 * j + k) as u16 };
-                    edges.push((p.raw(), v.raw(), pip, 0.0));
+                    edges.push((p.raw(), v.raw(), pip, (0.0, 0)));
                 }
             }
         }
@@ -513,12 +542,14 @@ impl Arch {
         let mut edge_dst = vec![0u32; m];
         let mut edge_pip = vec![PipRef { tile: 0, tpip: 0 }; m];
         let mut edge_delay = vec![0f32; m];
-        for (src, dst, pip, d) in edges {
+        let mut edge_span = vec![0u8; m];
+        for (src, dst, pip, (d, span)) in edges {
             let k = fill[src as usize] as usize;
             fill[src as usize] += 1;
             edge_dst[k] = dst;
             edge_pip[k] = pip;
             edge_delay[k] = d;
+            edge_span[k] = span;
         }
         let node_class = (0..n)
             .map(|i| {
@@ -534,6 +565,7 @@ impl Arch {
             edge_dst,
             edge_pip,
             edge_delay,
+            edge_span,
             node_x: (0..n).map(|i| (sum_x[i] / cnt[i].max(1)) as i16).collect(),
             node_y: (0..n).map(|i| (sum_y[i] / cnt[i].max(1)) as i16).collect(),
             node_class,
@@ -556,6 +588,19 @@ impl Arch {
     /// input it feeds.
     pub fn permutation(pip: PipRef) -> Option<(usize, usize)> {
         (pip.tile == PERMUTATION_TILE).then_some((pip.tpip as usize / 4, pip.tpip as usize % 4))
+    }
+
+    /// Delay of a span wire driver of `kind` whose wire is used up to
+    /// `tiles` away from it.
+    pub fn span_delay(&self, kind: u8, tiles: usize) -> f32 {
+        let max = if kind <= SPAN4_V { 4 } else { 12 };
+        self.span_delays[kind as usize][tiles.min(max)]
+    }
+
+    /// Tile coordinates of a routing graph edge's pip.
+    pub fn pip_xy(&self, pip: PipRef) -> (usize, usize) {
+        let gw = self.db.grid_width();
+        (pip.tile as usize % gw, pip.tile as usize / gw)
     }
 
     /// The template pip behind a routing graph edge.
@@ -656,7 +701,7 @@ pub const RAM_WADDR: [&str; 11] = [
 
 /// Delay of each pip of a template, from the IceStorm timing models of the
 /// routing multiplexers, keyed on the destination (and source) wire names.
-fn template_pip_delays(db: &ChipDb, t: &TileTemplate) -> Vec<f32> {
+fn template_pip_delays(db: &ChipDb, t: &TileTemplate) -> Vec<(f32, u8)> {
     let arc = |cell: &str, from: &str, to: &str| {
         db.timing_arc(cell, crate::chipdb::ArcKind::IoPath, from, to).unwrap_or(0.0)
     };
@@ -666,7 +711,27 @@ fn template_pip_delays(db: &ChipDb, t: &TileTemplate) -> Vec<f32> {
         .map(|p| {
             let dst = t.wires[t.switches[p.switch as usize].dst as usize].as_str();
             let src = t.wires[p.src as usize].as_str();
-            if dst.starts_with("sp4_") || dst.starts_with("span4_") {
+            // Wire to wire: a span multiplexer, as slow as the distance the
+            // signal then travels; from a cell output: an output driver.
+            let wire = |w: &str| w.starts_with("sp") || w.starts_with("span");
+            let span = if !wire(src) || !dst.starts_with("sp") {
+                0
+            } else if dst.starts_with("sp4_h_") && !src.starts_with("sp12_") {
+                SPAN4_H
+            } else if dst.starts_with("sp4_") && !src.starts_with("sp12_") {
+                SPAN4_V
+            } else if dst.starts_with("sp12_h_") {
+                SPAN12_H
+            } else if dst.starts_with("sp12_v_") {
+                SPAN12_V
+            } else {
+                0
+            };
+            let delay = if !wire(src) && (dst.starts_with("sp4_") || dst.starts_with("span4_")) {
+                mux("Odrv4")
+            } else if !wire(src) && (dst.starts_with("sp12_") || dst.starts_with("span12_")) {
+                mux("Odrv12")
+            } else if dst.starts_with("sp4_") || dst.starts_with("span4_") {
                 if src.starts_with("sp12_") || src.starts_with("span12_") {
                     mux("Sp12to4")
                 } else if src.starts_with("span4_") {
@@ -710,7 +775,8 @@ fn template_pip_delays(db: &ChipDb, t: &TileTemplate) -> Vec<f32> {
                 mux("IoInMux")
             } else {
                 0.0
-            }
+            };
+            (delay, span)
         })
         .collect()
 }

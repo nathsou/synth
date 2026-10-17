@@ -287,9 +287,18 @@ struct Conn {
     sink: CellId,
 }
 
-/// Estimated routed delay (ps) of a connection spanning `d` tiles.
+/// Estimated routed delay (ps) of a connection spanning `d` tiles: mean
+/// routed delays of logic cell connections on an HX8K (PicoSoC and Euler 25
+/// routed by this flow), piecewise linear.
 pub(crate) fn est_delay(d: i32) -> f64 {
-    if d == 0 { 590.0 } else { 1200.0 + 120.0 * d as f64 }
+    let d = d as f64;
+    if d <= 4.0 {
+        530.0 + 235.0 * d
+    } else if d <= 12.0 {
+        1470.0 + 110.0 * (d - 4.0)
+    } else {
+        2350.0 + 30.0 * (d - 12.0)
+    }
 }
 
 struct Annealer<'a> {

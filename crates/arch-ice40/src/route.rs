@@ -212,8 +212,10 @@ pub fn route(
             t0.elapsed().as_secs_f64()
         );
     };
+    let hooks =
+        synth_route::RouteHooks { blocked: &blocked, progress: Some(&mut progress), retime: None };
     let (routes, stats): (_, RouteStats) =
-        synth_route::route_with_progress(graph, &requests, &opts, &blocked, &mut progress).map_err(|e| match e {
+        synth_route::route_with(graph, &requests, &opts, hooks).map_err(|e| match e {
             synth_route::RouteError::Unroutable { net, sink } => format!(
                 "net {} cannot reach {}",
                 nl.str(nl.nets[ids[net]].name),

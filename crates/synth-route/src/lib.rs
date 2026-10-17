@@ -64,6 +64,11 @@ pub struct RouteOptions {
     pub bbox_margin: i16,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
+    /// Iterations between criticality updates (0: never).
+    pub retime_every: usize,
+    /// Nets with a sink at least this critical are routed again after an
+    /// update.
+    pub reroute_criticality: f32,
 }
 
 impl Default for RouteOptions {
@@ -79,6 +84,8 @@ impl Default for RouteOptions {
             delay_scale: 0.001,
             bbox_margin: 3,
             stall_iterations: 40,
+            retime_every: 4,
+            reroute_criticality: 0.95,
         }
     }
 }
@@ -162,19 +169,47 @@ pub fn route(
     nets: &[NetRequest],
     opts: &RouteOptions,
 ) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
-    route_with_progress(graph, nets, opts, &[], &mut |_, _, _| {})
+    route_with(graph, nets, opts, RouteHooks::default())
 }
 
-/// [`route`] avoiding the `blocked` nodes, calling `progress` after every
-/// iteration with the iteration number, the number of nets routed in it and
-/// the overused nodes.
-pub fn route_with_progress(
+/// Progress callback: iteration, nets routed in it, overused nodes.
+pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, &[usize]);
+/// Criticality update from the current routes.
+pub type Retime<'a> = &'a mut dyn FnMut(&[NetRoute]) -> Vec<Vec<f32>>;
+
+/// What a caller can add to routing.
+#[derive(Default)]
+pub struct RouteHooks<'a> {
+    /// Nodes no net may use.
+    pub blocked: &'a [u32],
+    /// Called after every iteration with the iteration number, the number of
+    /// nets routed in it and the overused nodes.
+    pub progress: Option<Progress<'a>>,
+    /// Recomputes sink criticalities (per net, like
+    /// [`NetRequest::criticality`]) from the current routes; called every
+    /// [`RouteOptions::retime_every`] iterations. Nets with a critical sink
+    /// are then routed again even if uncongested.
+    pub retime: Option<Retime<'a>>,
+}
+
+impl std::fmt::Debug for RouteHooks<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouteHooks")
+            .field("blocked", &self.blocked.len())
+            .field("progress", &self.progress.is_some())
+            .field("retime", &self.retime.is_some())
+            .finish()
+    }
+}
+
+/// [`route`] with caller hooks.
+pub fn route_with(
     graph: Graph<'_>,
     nets: &[NetRequest],
     opts: &RouteOptions,
-    blocked: &[u32],
-    progress: &mut dyn FnMut(usize, usize, &[usize]),
+    mut hooks: RouteHooks<'_>,
 ) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
+    let mut crit: Vec<Vec<f32>> = nets.iter().map(|n| n.criticality.clone()).collect();
     let n = graph.num_nodes();
     let mut edge_src = vec![0u32; graph.edge_dst.len()];
     for node in 0..n {
@@ -199,7 +234,7 @@ pub fn route_with_progress(
 
     // Sources and sinks of other nets are reserved: never route through them.
     let mut reserved = vec![u32::MAX; n];
-    for &b in blocked {
+    for &b in hooks.blocked {
         reserved[b as usize] = u32::MAX - 1;
     }
     for (i, net) in nets.iter().enumerate() {
@@ -214,6 +249,8 @@ pub fn route_with_progress(
     // Search margin of each net: it widens every time the net is ripped up
     // again for congestion, so that persistent conflicts can detour.
     let mut margin = vec![opts.bbox_margin; nets.len()];
+    let mut timing_rounds = 0;
+    let mut legal: Option<(Vec<NetRoute>, RouteStats)> = None;
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
@@ -229,6 +266,7 @@ pub fn route_with_progress(
             route_net(
                 &graph,
                 &nets[i],
+                &crit[i],
                 i as u32,
                 &reserved,
                 &mut st,
@@ -244,7 +282,9 @@ pub fn route_with_progress(
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
         stats.overused_history.push(overused.len());
-        progress(iter, to_route.len(), &overused);
+        if let Some(p) = hooks.progress.as_mut() {
+            p(iter, to_route.len(), &overused);
+        }
         if best.as_ref().is_none_or(|b: &(Vec<u32>, Vec<usize>)| overused.len() < b.0.len()) {
             let set: std::collections::HashSet<usize> = overused.iter().copied().collect();
             let users = (0..nets.len())
@@ -260,7 +300,23 @@ pub fn route_with_progress(
         }
         if overused.is_empty() {
             stats.wire_nodes = routes.iter().map(|r| r.edges.len()).sum();
-            return Ok((routes, stats));
+            // A legal routing: with routed criticalities, try once or twice
+            // more for faster critical connections, keeping this one should
+            // that not become legal again.
+            let Some(retime) = hooks.retime.as_mut().filter(|_| timing_rounds < 2) else {
+                return Ok((routes, stats));
+            };
+            timing_rounds += 1;
+            legal = Some((routes.clone(), stats.clone()));
+            crit = retime(&routes);
+            to_route = (0..nets.len())
+                .filter(|&i| crit[i].iter().any(|&c| c >= opts.reroute_criticality))
+                .collect();
+            if to_route.is_empty() {
+                return Ok((routes, stats));
+            }
+            best_iter = iter;
+            continue;
         }
         // No progress for a long while: give up (the caller may place again).
         if iter >= best_iter + opts.stall_iterations {
@@ -286,6 +342,23 @@ pub fn route_with_progress(
                 margin[i] = margin[i].saturating_add(1);
             }
         }
+        // Criticalities from the routes so far; critical nets try again.
+        if opts.retime_every > 0
+            && iter % opts.retime_every == 0
+            && let Some(retime) = hooks.retime.as_mut()
+        {
+            crit = retime(&routes);
+            let mut listed = vec![false; nets.len()];
+            to_route.iter().for_each(|&i| listed[i] = true);
+            to_route.extend(
+                (0..nets.len()).filter(|&i| {
+                    !listed[i] && crit[i].iter().any(|&c| c >= opts.reroute_criticality)
+                }),
+            );
+        }
+    }
+    if let Some(l) = legal {
+        return Ok(l);
     }
     let (nodes, nets) = best.unwrap_or_default();
     let overused_nodes = nodes.len();
@@ -304,6 +377,7 @@ pub struct RouteStats {
 fn route_net(
     graph: &Graph<'_>,
     net: &NetRequest,
+    criticality: &[f32],
     net_id: u32,
     reserved: &[u32],
     st: &mut State,
@@ -345,7 +419,7 @@ fn route_net(
         }
         // Never fully ignore congestion, or critical nets cannot be moved
         // off contested wires.
-        let crit = net.criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, opts.max_criticality);
+        let crit = criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, opts.max_criticality);
         let tx = graph.node_x[sink as usize];
         let ty = graph.node_y[sink as usize];
         loop {

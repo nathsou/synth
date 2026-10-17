@@ -67,35 +67,42 @@ impl Arcs<'_> {
     }
 }
 
-/// Routed delay from each net's source to each of its nodes.
+/// Routed delay from each net's source to each of its nodes. A span wire's
+/// driver is as slow as the distance to the farthest point where this net
+/// leaves the wire (as icetime computes it).
 fn net_node_delays(arch: &Arch, routing: &Routing, net: NetId) -> FxHashMap<u32, f64> {
     let g = &arch.graph;
-    let mut incoming: FxHashMap<u32, u32> = FxHashMap::default();
-    if let Some(edges) = routing.net_edges.get(&net) {
-        for &e in edges {
-            incoming.insert(g.edge_dst[e as usize], e);
-        }
+    let edges: &[u32] = routing.net_edges.get(&net).map_or(&[], |v| v.as_slice());
+    let src_of = |e: u32| (g.offsets.partition_point(|&o| o as usize <= e as usize) - 1) as u32;
+    // Where the net leaves each node.
+    let mut exits: FxHashMap<u32, Vec<(usize, usize)>> = FxHashMap::default();
+    for &e in edges {
+        exits.entry(src_of(e)).or_default().push(arch.pip_xy(g.edge_pip[e as usize]));
     }
+    let edge_delay = |e: u32| -> f64 {
+        let kind = g.edge_span[e as usize];
+        if kind == 0 {
+            return g.edge_delay[e as usize] as f64;
+        }
+        let (x, y) = arch.pip_xy(g.edge_pip[e as usize]);
+        let horizontal = kind == crate::arch::SPAN4_H || kind == crate::arch::SPAN12_H;
+        let far = exits
+            .get(&g.edge_dst[e as usize])
+            .into_iter()
+            .flatten()
+            .map(|&(ex, ey)| if horizontal { ex.abs_diff(x) } else { ey.abs_diff(y) })
+            .max()
+            .unwrap_or(0);
+        arch.span_delay(kind, far) as f64
+    };
     let mut delay: FxHashMap<u32, f64> = FxHashMap::default();
     if let Some(src) = routing.net_source.get(&net) {
         delay.insert(src.raw(), 0.0);
     }
-    let src_of = |e: u32| (g.offsets.partition_point(|&o| o as usize <= e as usize) - 1) as u32;
-    let nodes: Vec<u32> = incoming.keys().copied().collect();
-    for n in nodes {
-        // Walk back to a node with a known delay, then fill in forward.
-        let mut chain = Vec::new();
-        let mut cur = n;
-        while !delay.contains_key(&cur) {
-            let Some(&e) = incoming.get(&cur) else { break };
-            chain.push((cur, e));
-            cur = src_of(e);
-        }
-        let mut d = delay.get(&cur).copied().unwrap_or(0.0);
-        for &(node, e) in chain.iter().rev() {
-            d += g.edge_delay[e as usize] as f64;
-            delay.insert(node, d);
-        }
+    // Edges are in tree order: each edge's source is reached earlier.
+    for &e in edges {
+        let d = delay.get(&src_of(e)).copied().unwrap_or(0.0) + edge_delay(e);
+        delay.insert(g.edge_dst[e as usize], d);
     }
     delay
 }
