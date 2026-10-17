@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "arch-ice40"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+]
+
+[[package]]
 name = "synth"
 version = "0.1.0"
 dependencies = [

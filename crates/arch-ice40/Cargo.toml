@@ -1,0 +1,15 @@
+[package]
+name = "arch-ice40"
+description = "Lattice iCE40 support: device geometry, bitstream assembly and disassembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+
+[lints]
+workspace = true
