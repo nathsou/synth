@@ -10,7 +10,7 @@ Initial targets, in order:
 |---|---|---|
 | Lattice iCE40 | LP / HX / UltraPlus | Alchitry Cu (HX8K), Nandland Go Board (HX1K) |
 | Xilinx Artix-7 | XC7A35T – XC7A200T | Nexys A7 (XC7A100T), Alchitry Au (XC7A35T) |
-| Lattice ECP5 | LFE5U / LFE5UM / LFE5UM5G | none yet |
+| Lattice ECP5 | LFE5U / LFE5UM / LFE5UM5G | deferred |
 
 The goal is to match or beat vendor tools (iCEcube2/Radiant, Diamond, Vivado) on
 resource use and Fmax, with deterministic, reproducible results.
@@ -32,6 +32,15 @@ synth prog
 
 Milestone 1: a pipelined RISC-V SoC built only with `synth`, running on the
 Alchitry Cu.
+
+## Licence
+
+`synth` is licensed under the [EUPL-1.2](LICENSE). HDL kept in this repository
+(example designs, test SoCs, soft IP) is licensed under CERN-OHL-W-2.0, as marked
+in those files.
+
+Bitstreams, netlists, reports and other output that `synth` produces from your
+designs are yours. They are not covered by the licence of the toolchain.
 
 ## Acknowledgements
 

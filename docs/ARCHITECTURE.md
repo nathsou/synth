@@ -12,7 +12,8 @@ phased plan for getting there is in [ROADMAP.md](ROADMAP.md).
 1. **One self-contained tool** (`synth`) that goes from HDL to a programmable
    bitstream for:
    - Lattice **iCE40** (LP/HX/UltraPlus),
-   - Lattice **ECP5** (LFE5U / LFE5UM / LFE5UM5G),
+   - Lattice **ECP5** (LFE5U / LFE5UM / LFE5UM5G), deferred: out of scope until
+     there is hardware to validate on (see the roadmap),
    - Xilinx **Artix-7** (XC7A35T/50T/100T/200T; Spartan-7, Kintex-7 and Zynq-7 PL
      come almost for free later because they share the 7-series fabric and database).
 2. **No external tools at runtime.** No Yosys, ABC, nextpnr, Python, Tcl, or vendor
@@ -612,15 +613,16 @@ synth db list|info <device>
   - The Cu and the Go Board are programmed through their SPI flash, with
     openFPGALoader's generic FT2232 cable or `iceprog` (to be verified on the
     boards).
-- **Native programmer.** This is reasonably straightforward **on Linux**, because
-  all four reference boards use the FT2232H:
-  - usbfs ioctls (no libusb), FTDI MPSSE;
+- **Native programmer** (later). All four reference boards use the FT2232H, so
+  one implementation covers them:
+  - FTDI MPSSE over a small USB transport;
   - SPI flash access for iCE40;
   - JTAG SRAM loading for 7-series (UG470).
 
-  That is roughly 2k lines. Writing 7-series flash needs a SPI-over-JTAG bridge
-  bitstream, which `synth` can build itself. macOS (IOKit) and Windows (WinUSB
-  driver setup) are more work and come later.
+  The USB transport needs a backend per OS, with no libusb: usbfs ioctls on Linux,
+  IOKit through FFI on macOS (the main development platform, Apple Silicon).
+  Windows comes last because of WinUSB driver setup. Writing 7-series flash needs
+  a SPI-over-JTAG bridge bitstream, which `synth` can build itself.
 
 ---
 
@@ -641,7 +643,9 @@ synth db list|info <device>
   - iCE40 RISC-V SoC full flow < 10 s.
   - 50k-LUT ECP5/XC7 design < 3–5 min on 8 cores.
   - Peak memory < 4 GB for XC7A200T.
-- **Licensing** (pending confirmation, see the roadmap):
+- **Platforms**: macOS on Apple Silicon and Linux x86-64 are first-class (both in
+  CI). Windows should build but is not tested yet.
+- **Licensing** (decided, ADR 0004):
   - Toolchain code under **EUPL-1.2**.
   - HDL in the repository (example designs, test SoCs, soft IP) under
     **CERN-OHL-W-2.0**.

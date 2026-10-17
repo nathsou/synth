@@ -29,7 +29,7 @@ stated), not when its features merely exist.
 | Alchitry Cu (v1) | iCE40HX8K-CB132 | 7,680 LCs, 32 × 4 Kbit BRAM (16 KB), PLL, no DSP | 100 MHz | Phase 1 primary (Milestone 1) |
 | Nexys A7 | XC7A100T-1CSG324C | 63,400 LUT6, 135 × 36 Kbit BRAM, 240 DSP48E1, 128 MB DDR2, Ethernet | 100 MHz | Phase 2 primary |
 | Alchitry Au (v1) | XC7A35T-1FTG256C | 20,800 LUT6, 50 × 36 Kbit BRAM, 90 DSP48E1, 256 MB DDR3 | 100 MHz | Phase 2 secondary |
-| None yet | ECP5 | | | Phase 3: verified without hardware until a board is added |
+| None | ECP5 | | | Deferred (out of scope for now) |
 
 All four boards use an FT2232H for programming and a USB UART.
 
@@ -161,9 +161,11 @@ Primary board: **Nexys A7** (XC7A100T). Secondary: **Alchitry Au** (XC7A35T).
 
 ---
 
-## Phase 3: ECP5
+## Phase 3: ECP5 (deferred)
 
-There is no board yet, so this phase has two modes:
+ECP5 is **out of scope for now**. The architecture keeps room for it, and this
+phase is kept as the plan for when it comes back. There is no board yet, so it
+would have two modes:
 
 - **Without hardware**:
   - Trellis importer; slice and PFU legality (`PFUMX`/`L6MUX21`, `CCU2C`,
@@ -213,7 +215,7 @@ roughly in order:
   and VHDL based on demand.
 - More parts: Spartan-7, Kintex-7 and Zynq-7 PL (same X-Ray infrastructure);
   iCE40 UltraPlus (`SB_MAC16`, SPRAM); ECP5-5G.
-- Native programmer: Linux first (see Architecture §14), then macOS and Windows.
+- Native programmer: macOS and Linux backends (see Architecture §14), Windows later.
 - Incremental compilation; HTML reports; floorplan viewer; LSP for diagnostics.
 - WASM build: an in-browser iCE40 playground.
 - Possibly other families (Gowin via Apicula, MachXO2 via Trellis).
@@ -274,7 +276,6 @@ The two tracks parallelize well across two people.
 | Database gaps (X-Ray: some IO, clocking and DSP/BRAM modes) | Some designs unsupported | Clear "unsupported feature" diagnostics; prioritize by benchmark demand; contribute fuzzers upstream |
 | Verilog semantics edge cases (sizing, signedness, X) | Silent mis-synthesis | Dedicated sizing corpus; differential simulation versus Icarus/Verilator; random fuzzing; `--check` in CI |
 | RTLIL has no formal spec and changes between Yosys/Amaranth versions | Reader breaks on new producer versions | Pin tested versions; corpus per version; precise diagnostics for unknown cells |
-| No ECP5 board | ECP5 support unproven on silicon | Round-trip verification and bit-exact checks against Trellis tools; add a board before Phase 3 ends, or drop ECP5 |
 | iCE40 boards may be flash-only | Slower iteration, flash wear | Read back after write; `synth bram-patch` for firmware-only changes; images are small (~32 KB for HX1K, ~135 KB for HX8K) |
 | Scale and memory on XC7A100T/200T | Unusable on big parts | Node deduplication validated in Phase 0; paged router state; memory budget in CI |
 | Scope creep (SV, VHDL, FIRRTL, more families) | Milestone slip | Strict phase exit criteria; later items gated by ADR |
@@ -294,14 +295,13 @@ The two tracks parallelize well across two people.
 3. **Inputs**: Verilog-2005, RTLIL and SRTL. SystemVerilog, FIRRTL and VHDL are
    deferred (Architecture §6.1).
 4. **Hardware**: Go Board, Alchitry Cu, Alchitry Au and Nexys A7. Family order:
-   **iCE40 → Artix-7 → ECP5**.
-5. **Programming**: openFPGALoader for now. A native Linux programmer for the
-   FT2232H boards is a bounded task (~2k lines) to schedule after Milestone 1.
+   **iCE40 → Artix-7**. ECP5 is out of scope for now.
+5. **Programming**: openFPGALoader for now (Homebrew on macOS, packages on
+   Linux). A native programmer for the FT2232H boards comes later, with macOS
+   (IOKit) and Linux (usbfs) backends.
+6. **Licence**: EUPL-1.2 for code; CERN-OHL-W-2.0 for HDL kept in the
+   repository; tool output is not covered by either.
+7. **Platforms**: macOS on Apple Silicon (main development machine) and Linux
+   x86-64, both tested in CI.
 
-### Open
-
-6. **Licence**: the recommendation is EUPL-1.2 for code and CERN-OHL-W-2.0 for
-   HDL, with an explicit statement that tool output is not covered. The
-   alternative is permissive (Apache-2.0 / MIT). This must be settled before the
-   first code PR.
-7. **ECP5**: add a board (and which one), or drop ECP5 from the initial scope.
+Each decision is recorded in [`docs/decisions/`](decisions/).

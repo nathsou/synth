@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "EUPL-1.2"
+repository = "https://github.com/nathsou/synth"
+publish = false
+
+[workspace.dependencies]
+synth-core = { path = "crates/synth-core" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+# Place-and-route tests are far too slow unoptimized.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
