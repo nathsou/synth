@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use synth_core::{FxHashMap, FxHashSet, Logic, LogicVec};
 use synth_logic::aig::{Lit, Node};
+use synth_logic::choice::ChoiceAig;
 use synth_logic::ff::FfRules;
 use synth_logic::lower::LowerOptions;
-use synth_logic::lutmap::{self, MapOptions};
+use synth_logic::lutmap::{self, MapOptions, Tiebreak};
 use synth_logic::net::{Bit, LogicNet};
 use synth_netlist::{Bit as PBit, CellId, Const, Dir, NetId, Netlist, Param};
 use synth_rtl::{
@@ -32,7 +33,7 @@ impl Default for SynthOptions {
         SynthOptions {
             lower: LowerOptions::default(),
             map: MapOptions::default(),
-            remap_rounds: 3,
+            remap_rounds: 6,
             bram_min_bits: 256,
         }
     }
@@ -217,40 +218,48 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         choices.num_choices(),
         t.elapsed().as_secs_f64()
     ));
+    // Candidate mappings are compared on their netlists: shallower, then
+    // fewer LUTs. Choices usually help, but not always.
     let t = Instant::now();
-    let mut mapping = lutmap::map_choices(&choices, &opts.map);
-    let mut graph = choices.aig;
-    let mut luts = netlist_luts(&net, &graph, &mapping)?;
+    let main = std::mem::take(&mut net.aig);
+    let mut best = map_best(&net, choices, &opts.map)?;
+    let plain = map_best(&net, ChoiceAig::plain(main.clone()), &opts.map)?;
+    if (plain.mapping.depth, plain.luts) < (best.mapping.depth, best.luts) {
+        best = plain;
+    }
     log.push(format!(
-        "mapped in {:.2}s: {} LUTs, depth {}",
-        t.elapsed().as_secs_f64(),
-        mapping.luts.len(),
-        mapping.depth
+        "first mapping: {} LUTs, depth {}",
+        best.mapping.luts.len(),
+        best.mapping.depth
     ));
     // Remapping: the mapped LUTs as a graph, restructured, with the previous
     // structure as choices; kept while the netlist shrinks without getting
     // deeper.
-    let t = Instant::now();
-    let mut prev = std::mem::take(&mut net.aig);
-    for _ in 0..opts.remap_rounds {
-        let lg = lutmap::lut_graph(&graph, &mapping);
+    let mut prev = main;
+    for round in 1..=opts.remap_rounds {
+        let lg = lutmap::lut_graph(&best.graph, &best.mapping);
         let restructured = synth_logic::opt::compress2(&lg);
         let choices = synth_logic::choice::build(&[&restructured, &lg, &prev], &Default::default());
-        let m = lutmap::map_choices(&choices, &opts.map);
-        let n = netlist_luts(&net, &choices.aig, &m)?;
-        if n >= luts || m.depth > mapping.depth {
+        let c = map_best(&net, choices, &opts.map)?;
+        if c.luts >= best.luts || c.mapping.depth > best.mapping.depth {
             break;
         }
         log.push(format!(
-            "remapped in {:.2}s: {} LUTs, depth {}",
-            t.elapsed().as_secs_f64(),
-            m.luts.len(),
-            m.depth
+            "remapping round {round}: {} LUTs, depth {}",
+            c.mapping.luts.len(),
+            c.mapping.depth
         ));
-        (mapping, graph, luts, prev) = (m, choices.aig, n, restructured);
+        (best, prev) = (c, restructured);
     }
+    log.push(format!(
+        "mapped in {:.2}s: {} LUTs, depth {}",
+        t.elapsed().as_secs_f64(),
+        best.mapping.luts.len(),
+        best.mapping.depth
+    ));
+    let mapping = best.mapping;
     // The mapping refers to the nodes of the graph with choices.
-    net.aig = graph;
+    net.aig = best.graph;
     if std::env::var("SYNTH_DEBUG").is_ok() {
         // The deepest sinks after mapping.
         let mut level: FxHashMap<u32, u32> = FxHashMap::default();
@@ -278,6 +287,27 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     }
     let nl = emit(&net, &mapping)?;
     Ok((nl, log))
+}
+
+/// A mapping, the graph it maps and the LUTs of its netlist.
+struct Candidate {
+    graph: synth_logic::Aig,
+    mapping: lutmap::Mapping,
+    luts: usize,
+}
+
+/// The best mapping of `c` for `net` with either delay tie-break.
+fn map_best(net: &LogicNet, c: ChoiceAig, opts: &MapOptions) -> Result<Candidate, String> {
+    let mut best: Option<(lutmap::Mapping, usize)> = None;
+    for delay_tiebreak in [Tiebreak::Size, Tiebreak::AreaFlow] {
+        let m = lutmap::map_choices(&c, &MapOptions { delay_tiebreak, ..opts.clone() });
+        let luts = netlist_luts(net, &c.aig, &m)?;
+        if best.as_ref().is_none_or(|(b, l)| (m.depth, luts) < (b.depth, *l)) {
+            best = Some((m, luts));
+        }
+    }
+    let (mapping, luts) = best.expect("two mappings tried");
+    Ok(Candidate { graph: c.aig, mapping, luts })
 }
 
 /// Number of LUTs in the netlist of a mapping of `aig` (the graph of

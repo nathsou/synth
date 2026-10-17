@@ -31,6 +31,19 @@ pub struct MapOptions {
     pub depth_relax: u32,
     /// Delay of a LUT.
     pub lut_delay: u32,
+    /// How the delay pass picks among cuts of equal arrival.
+    pub delay_tiebreak: Tiebreak,
+}
+
+/// Preference among cuts of equal arrival in the delay pass. Either way the
+/// delay pass keeps the best cuts by both criteria; this picks the one
+/// selected, which steers area recovery to different local optima.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Tiebreak {
+    /// Fewer leaves (smaller cuts merge into more cuts at the fanouts).
+    Size,
+    /// Lower area flow.
+    AreaFlow,
 }
 
 impl Default for MapOptions {
@@ -42,6 +55,7 @@ impl Default for MapOptions {
             exact_area_passes: 2,
             depth_relax: 0,
             lut_delay: 1,
+            delay_tiebreak: Tiebreak::Size,
         }
     }
 }
@@ -165,6 +179,9 @@ impl Cut {
         self.leaves().iter().all(|l| other.leaves().contains(l))
     }
 }
+
+/// A cut with its arrival time and area flow.
+type Scored = (Cut, u32, f32);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
@@ -320,16 +337,28 @@ impl Mapper<'_> {
                 }
             }
             let req = self.required[i];
-            let mut scored: Vec<(Cut, u32, f32)> = cand
+            let mut scored: Vec<Scored> = cand
                 .into_iter()
                 .map(|c| (c, self.cut_arrival(&c), self.cut_area_flow(&c)))
                 .collect();
+            type Rank = fn(&Scored, &Scored) -> std::cmp::Ordering;
+            let by_size: Rank =
+                |x, y| x.1.cmp(&y.1).then(x.0.len.cmp(&y.0.len)).then(x.2.total_cmp(&y.2));
+            let by_area: Rank =
+                |x, y| x.1.cmp(&y.1).then(x.2.total_cmp(&y.2)).then(x.0.len.cmp(&y.0.len));
             match mode {
-                // Smaller cuts merge into more cuts at the fanouts: ranking
-                // them before area keeps the mapping delay-optimal.
-                Mode::Depth => scored.sort_by(|x, y| {
-                    x.1.cmp(&y.1).then(x.0.len.cmp(&y.0.len)).then(x.2.total_cmp(&y.2))
-                }),
+                // Half the cuts by size (smaller cuts merge into more cuts at
+                // the fanouts, which keeps the mapping delay-optimal), half by
+                // area flow.
+                Mode::Depth => {
+                    let (first, second) = match self.opts.delay_tiebreak {
+                        Tiebreak::Size => (by_size, by_area),
+                        Tiebreak::AreaFlow => (by_area, by_size),
+                    };
+                    scored.sort_by(first);
+                    let half = self.opts.cuts_per_node.div_ceil(2).min(scored.len());
+                    scored[half..].sort_by(second);
+                }
                 Mode::AreaFlow => scored.sort_by(|x, y| {
                     // Cuts meeting the required time first, then by area flow.
                     (x.1 > req)
