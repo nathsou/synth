@@ -33,6 +33,8 @@ struct Lower<'a> {
     origin: Vec<u32>,
     /// Signal bits that something reads (after resolving connections).
     used: synth_core::FxHashSet<SigBit>,
+    /// Number of reads of each signal bit.
+    uses: FxHashMap<SigBit, u32>,
     /// AND nodes created per cell kind (`SYNTH_DEBUG`).
     profile: Option<FxHashMap<String, usize>>,
 }
@@ -50,6 +52,7 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
         pads: FxHashMap::default(),
         profile: std::env::var("SYNTH_DEBUG").ok().map(|_| FxHashMap::default()),
         used: Default::default(),
+        uses: Default::default(),
         origin: Vec::new(),
     };
     if let Some(mem) = m.memories.iter().find(|m| m.alive) {
@@ -71,6 +74,9 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
         if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
             used.extend(m.wire_sig(w).iter().copied());
         }
+    }
+    for &b in &used {
+        *l.uses.entry(l.resolve(b)).or_default() += 1;
     }
     l.used = used.into_iter().map(|b| l.resolve(b)).collect();
     // Sources: input ports, flip-flop outputs, instance outputs.
@@ -393,6 +399,15 @@ impl Lower<'_> {
                 let v = fit(v, y.width());
                 self.set(y, v);
             }
+            CellKind::Binary { op: BinaryOp::Add, a, b, y, .. }
+                if let Some((ia, ib, c)) = self.carry_in_operand(a, b, y) =>
+            {
+                // `(x + y) + {0, c}`: one chain with carry-in `c`.
+                let yw = y.iter().rposition(|b| self.used.contains(b)).map_or(0, |i| i + 1);
+                let (av, bv, cin) = (self.sig(&ia)?, self.sig(&ib)?, self.get(c)?);
+                let v = self.add(&fit(av, yw), &fit(bv, yw), cin).0;
+                self.set(y, fit(v, y.width()));
+            }
             CellKind::Binary { op, signed, a, b, y } => {
                 let (mut av, mut bv) = (self.sig(a)?, self.sig(b)?);
                 let mut yw = y.width();
@@ -445,6 +460,39 @@ impl Lower<'_> {
             _ => unreachable!("not a combinational cell"),
         }
         Ok(())
+    }
+
+    /// For `a + b` (result `y`) where one operand is a single zero-extended
+    /// bit `c` and the other is the whole result of another addition read
+    /// nowhere else, returns that addition's operands and `c`.
+    fn carry_in_operand(&self, a: &Sig, b: &Sig, y: &Sig) -> Option<(Sig, Sig, SigBit)> {
+        let w = y.width();
+        for (x, z) in [(a, b), (b, a)] {
+            let c = self.resolve(*z.0.first()?);
+            if !matches!(c, SigBit::Wire(..))
+                || z.iter()
+                    .skip(1)
+                    .take(w.saturating_sub(1))
+                    .any(|&b| !matches!(self.resolve(b), SigBit::Const(Logic::Zero)))
+            {
+                continue;
+            }
+            let Some(&inner) = self.driver.get(&self.resolve(*x.0.first()?)) else { continue };
+            let CellKind::Binary { op: BinaryOp::Add, a: ia, b: ib, y: iy, .. } =
+                &self.m.cells[inner].kind
+            else {
+                continue;
+            };
+            if iy.width() < w.min(x.width())
+                || x.width() < w
+                || (0..w).any(|i| self.resolve(x.0[i]) != iy.0[i])
+                || iy.iter().any(|b| self.uses.get(b).copied().unwrap_or(0) > 1)
+            {
+                continue;
+            }
+            return Some((ia.clone(), ib.clone(), c));
+        }
+        None
     }
 
     fn binary(

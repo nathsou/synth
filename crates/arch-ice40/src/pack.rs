@@ -368,6 +368,7 @@ fn pack_carries(nl: &mut Netlist, report: &mut PackReport) -> Result<Vec<Vec<Cel
     let mut chains = Vec::new();
     let mut feed_ins = 0;
     let mut feed_outs = 0;
+    let mut tails: FxHashSet<CellId> = FxHashSet::default();
     for &start in &lcs {
         if is_successor.contains(&start) {
             continue;
@@ -409,6 +410,20 @@ fn pack_carries(nl: &mut Netlist, report: &mut PackReport) -> Result<Vec<Vec<Cel
                         !(Some(p.cell) == next && (pin == "CIN" || pin == "I3"))
                     })
                     .collect();
+                // At the end of a chain, a single plain cell reading the carry
+                // on I3 (the top sum LUT of an adder without carry out) goes
+                // in the next position instead of behind a feed-out cell.
+                if next.is_none()
+                    && let [p] = external[..]
+                    && nl.str(nl.cells[p.cell].pins[p.pin as usize].name) == "I3"
+                    && get_int(nl, p.cell, "CARRY_ENABLE") != 1
+                    && net_of(nl, p.cell, "CIN").is_none()
+                    && net_of(nl, p.cell, "COUT").is_none()
+                    && tails.insert(p.cell)
+                {
+                    chain.push(p.cell);
+                    break;
+                }
                 if !external.is_empty() {
                     let name = nl.str(nl.cells[c].name).to_string();
                     let feed = new_lc(nl, &format!("{name}$feedout"));

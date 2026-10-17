@@ -9,6 +9,7 @@
 
 pub mod aig;
 pub mod carry;
+pub mod choice;
 pub mod ff;
 pub mod fraig;
 pub mod lower;

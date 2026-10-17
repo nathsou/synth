@@ -47,6 +47,46 @@ struct Classes {
 }
 
 impl Classes {
+    /// Classes from `words` 64-pattern words of random simulation.
+    fn simulate(aig: &Aig, words: usize, rng: &mut Rng) -> Classes {
+        let n = aig.nodes.len();
+        let mut cls =
+            Classes { key: vec![0; n], phase: vec![false; n], head: FxHashMap::default() };
+        for w in 0..words.max(1) {
+            let inputs: Vec<u64> = aig.inputs.iter().map(|_| rng.next_u64()).collect();
+            let vals = aig.simulate(&inputs);
+            if w == 0 {
+                for (p, v) in cls.phase.iter_mut().zip(&vals) {
+                    *p = v & 1 == 1;
+                }
+            }
+            for (k, (&v, &p)) in cls.key.iter_mut().zip(vals.iter().zip(&cls.phase)) {
+                *k = mix(*k, if p { !v } else { v });
+            }
+        }
+        cls.rebuild_heads();
+        cls
+    }
+
+    /// Refines the classes with a counterexample (in bit 0) and patterns at
+    /// distance one from it (in the other bits).
+    fn refine_with(&mut self, aig: &Aig, cex: &[bool], rng: &mut Rng) {
+        let mut inputs: Vec<u64> = cex.iter().map(|&b| if b { !0 } else { 0 }).collect();
+        for bit in 1..64 {
+            let k = rng.below(inputs.len().max(1));
+            if let Some(w) = inputs.get_mut(k) {
+                *w ^= 1 << bit;
+            }
+        }
+        self.refine(&aig.simulate(&inputs));
+    }
+
+    /// Takes node `i` out of its class.
+    fn isolate(&mut self, i: usize) {
+        self.key[i] = mix(self.key[i], 0xD1B5_4A32_D192_ED03 ^ i as u64);
+        self.head.insert(self.key[i], i as u32);
+    }
+
     fn rebuild_heads(&mut self) {
         self.head.clear();
         for (n, &k) in self.key.iter().enumerate() {
@@ -154,20 +194,7 @@ impl Encoder {
 pub fn fraig(aig: &Aig, opts: &FraigOptions) -> (Aig, FraigStats) {
     let mut rng = Rng::new(opts.seed);
     let n = aig.nodes.len();
-    let mut cls = Classes { key: vec![0; n], phase: vec![false; n], head: FxHashMap::default() };
-    for w in 0..opts.words.max(1) {
-        let inputs: Vec<u64> = aig.inputs.iter().map(|_| rng.next_u64()).collect();
-        let vals = aig.simulate(&inputs);
-        if w == 0 {
-            for (p, v) in cls.phase.iter_mut().zip(&vals) {
-                *p = v & 1 == 1;
-            }
-        }
-        for (k, (&v, &p)) in cls.key.iter_mut().zip(vals.iter().zip(&cls.phase)) {
-            *k = mix(*k, if p { !v } else { v });
-        }
-    }
-    cls.rebuild_heads();
+    let mut cls = Classes::simulate(aig, opts.words, &mut rng);
 
     let mut out = Aig::new();
     let mut map = vec![Lit::FALSE; n];
@@ -204,29 +231,63 @@ pub fn fraig(aig: &Aig, opts: &FraigOptions) -> (Aig, FraigStats) {
                 Ok(false) => {
                     // Undecided: take the node out of its class.
                     stats.unknown += 1;
-                    cls.key[i] = mix(cls.key[i], 0xD1B5_4A32_D192_ED03 ^ i as u64);
-                    cls.head.insert(cls.key[i], i as u32);
+                    cls.isolate(i);
                     break;
                 }
                 Err(cex) => {
                     stats.refuted += 1;
-                    // The counterexample in bit 0, and patterns at distance
-                    // one from it in the other bits.
-                    let mut inputs: Vec<u64> =
-                        cex.iter().map(|&b| if b { !0 } else { 0 }).collect();
-                    for bit in 1..64 {
-                        let k = rng.below(inputs.len().max(1));
-                        if let Some(w) = inputs.get_mut(k) {
-                            *w ^= 1 << bit;
-                        }
-                    }
-                    cls.refine(&aig.simulate(&inputs));
+                    cls.refine_with(aig, &cex, &mut rng);
                 }
             }
         }
     }
     out.outputs = aig.outputs.iter().map(|o| map[o.node() as usize].xor(o.is_compl())).collect();
     (out, stats)
+}
+
+/// Proves which nodes of `aig` are equivalent to an earlier node: entry
+/// `i` is `Some((r, c))` when node `i` equals node `r < i`, complemented if
+/// `c`. Each node points at the first node of its class.
+pub fn equivalences(aig: &Aig, opts: &FraigOptions) -> Vec<Option<(u32, bool)>> {
+    let mut rng = Rng::new(opts.seed);
+    let n = aig.nodes.len();
+    let mut cls = Classes::simulate(aig, opts.words, &mut rng);
+    let mut enc = Encoder::new();
+    let mut repr: Vec<Option<(u32, bool)>> = vec![None; n];
+    for i in 0..n {
+        if !matches!(aig.nodes[i], Node::And(..)) {
+            continue;
+        }
+        loop {
+            let r = cls.head[&cls.key[i]] as usize;
+            if r == i {
+                break;
+            }
+            let c = cls.phase[i] ^ cls.phase[r];
+            match enc.equal(
+                aig,
+                Lit::new(i as u32, false),
+                Lit::new(r as u32, c),
+                opts.conflict_limit,
+                &mut rng,
+            ) {
+                Ok(true) => {
+                    // Point at the class's first node.
+                    repr[i] = Some(match repr[r] {
+                        Some((r0, c0)) => (r0, c0 ^ c),
+                        None => (r as u32, c),
+                    });
+                    break;
+                }
+                Ok(false) => {
+                    cls.isolate(i);
+                    break;
+                }
+                Err(cex) => cls.refine_with(aig, &cex, &mut rng),
+            }
+        }
+    }
+    repr
 }
 
 #[cfg(test)]

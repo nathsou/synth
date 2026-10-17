@@ -7,7 +7,7 @@
 //! without exceeding the optimal depth, with area flow and then exact local
 //! area.
 
-use crate::aig::{Aig, Lit, Node};
+use crate::aig::{Aig, Node};
 
 /// Mapping parameters.
 #[derive(Clone, Debug)]
@@ -54,18 +54,51 @@ pub struct Mapping {
     pub depth: u32,
 }
 
+/// A cut and the function of its node over the cut's leaves (bit `i` of
+/// `truth` is the value when leaf `j` has the value of bit `j` of `i`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Cut {
     leaves: [u32; 6],
     len: u8,
     sig: u64,
+    truth: u64,
+}
+
+/// All-ones over the truth table of `len` variables.
+fn truth_mask(len: usize) -> u64 {
+    if len >= 6 { !0 } else { (1u64 << (1 << len)) - 1 }
+}
+
+/// Re-expresses truth table `t` over leaves `from` as a table over `to`
+/// (a superset, both sorted).
+fn expand(t: u64, from: &[u32], to: &[u32]) -> u64 {
+    if from == to {
+        return t;
+    }
+    let mut pos = [0usize; 6];
+    for (j, l) in from.iter().enumerate() {
+        pos[j] = to.iter().position(|x| x == l).expect("leaf in merged cut");
+    }
+    let mut out = 0u64;
+    for idx in 0..(1usize << to.len()) {
+        let mut src = 0;
+        for (j, &p) in pos[..from.len()].iter().enumerate() {
+            src |= ((idx >> p) & 1) << j;
+        }
+        out |= ((t >> src) & 1) << idx;
+    }
+    out
 }
 
 impl Cut {
     fn trivial(n: u32) -> Cut {
         let mut leaves = [0; 6];
         leaves[0] = n;
-        Cut { leaves, len: 1, sig: 1 << (n % 64) }
+        Cut { leaves, len: 1, sig: 1 << (n % 64), truth: 0b10 }
+    }
+
+    fn is_trivial_of(&self, n: u32) -> bool {
+        self.len == 1 && self.leaves[0] == n
     }
 
     fn leaves(&self) -> &[u32] {
@@ -98,7 +131,7 @@ impl Cut {
             out[n] = v;
             n += 1;
         }
-        Some(Cut { leaves: out, len: n as u8, sig: a.sig | b.sig })
+        Some(Cut { leaves: out, len: n as u8, sig: a.sig | b.sig, truth: 0 })
     }
 
     /// Whether every leaf of `self` is a leaf of `other`.
@@ -119,6 +152,10 @@ enum Mode {
 struct Mapper<'a> {
     g: &'a Aig,
     opts: &'a MapOptions,
+    /// Choice members of each node (empty without choices).
+    choices: &'a [Vec<(u32, bool)>],
+    /// Processing order: fanins and choice members first.
+    order: Vec<u32>,
     cuts: Vec<Vec<Cut>>,
     best: Vec<Option<Cut>>,
     arrival: Vec<u32>,
@@ -132,12 +169,25 @@ struct Mapper<'a> {
 
 /// Maps the outputs of `g` to K-input LUTs.
 pub fn map(g: &Aig, opts: &MapOptions) -> Mapping {
+    let order = (0..g.nodes.len() as u32).collect();
+    map_impl(g, &[], order, opts)
+}
+
+/// Maps a graph with structural choices: each node may be implemented by
+/// any member of its class.
+pub fn map_choices(c: &crate::choice::ChoiceAig, opts: &MapOptions) -> Mapping {
+    map_impl(&c.aig, &c.choices, c.order(), opts)
+}
+
+fn map_impl(g: &Aig, choices: &[Vec<(u32, bool)>], order: Vec<u32>, opts: &MapOptions) -> Mapping {
     assert!((2..=6).contains(&opts.k));
     let n = g.nodes.len();
     let fanouts = g.fanout_counts();
     let mut m = Mapper {
         g,
         opts,
+        choices,
+        order,
         cuts: vec![Vec::new(); n],
         best: vec![None; n],
         arrival: vec![0; n],
@@ -170,7 +220,8 @@ impl Mapper<'_> {
 
     fn compute_cuts(&mut self, mode: Mode) {
         let k = self.opts.k;
-        for i in 0..self.g.nodes.len() {
+        for oi in 0..self.order.len() {
+            let i = self.order[oi] as usize;
             let Node::And(a, b) = self.g.nodes[i] else {
                 self.arrival[i] = 0;
                 self.area_flow[i] = 0.0;
@@ -183,14 +234,41 @@ impl Mapper<'_> {
             if let Some(c) = self.best[i] {
                 cand.push(c);
             }
+            let add = |cand: &mut Vec<Cut>, c: Cut| {
+                if cand.iter().any(|d| d.dominates(&c)) {
+                    return;
+                }
+                cand.retain(|d| !c.dominates(d));
+                cand.push(c);
+            };
             for ca in &self.cuts[na] {
                 for cb in &self.cuts[nb] {
-                    let Some(c) = Cut::merge(ca, cb, k) else { continue };
+                    let Some(mut c) = Cut::merge(ca, cb, k) else { continue };
                     if cand.iter().any(|d| d.dominates(&c)) {
                         continue;
                     }
-                    cand.retain(|d| !c.dominates(d));
-                    cand.push(c);
+                    let mask = truth_mask(c.len as usize);
+                    let ta = expand(ca.truth, ca.leaves(), c.leaves())
+                        ^ if a.is_compl() { mask } else { 0 };
+                    let tb = expand(cb.truth, cb.leaves(), c.leaves())
+                        ^ if b.is_compl() { mask } else { 0 };
+                    c.truth = ta & tb & mask;
+                    add(&mut cand, c);
+                }
+            }
+            // Cuts of the other implementations in the node's class.
+            if let Some(ms) = self.choices.get(i) {
+                for &(m, phase) in ms {
+                    for c in &self.cuts[m as usize] {
+                        if c.is_trivial_of(m) {
+                            continue;
+                        }
+                        let mut c = *c;
+                        if phase {
+                            c.truth ^= truth_mask(c.len as usize);
+                        }
+                        add(&mut cand, c);
+                    }
                 }
             }
             let req = self.required[i];
@@ -231,7 +309,8 @@ impl Mapper<'_> {
             self.map_refs[o.node() as usize] += 1;
         }
         let n = g.nodes.len();
-        for i in (0..n).rev() {
+        for &i in self.order.iter().rev() {
+            let i = i as usize;
             if self.map_refs[i] > 0
                 && let Some(c) = self.best[i]
             {
@@ -246,7 +325,8 @@ impl Mapper<'_> {
         for o in &g.outputs {
             self.required[o.node() as usize] = depth;
         }
-        for i in (0..n).rev() {
+        for &i in self.order.iter().rev() {
+            let i = i as usize;
             if self.map_refs[i] > 0
                 && let Some(c) = self.best[i]
             {
@@ -295,7 +375,8 @@ impl Mapper<'_> {
     }
 
     fn exact_area(&mut self) {
-        for i in 0..self.g.nodes.len() {
+        for oi in 0..self.order.len() {
+            let i = self.order[oi] as usize;
             let Some(cur) = self.best[i] else { continue };
             let req = self.required[i];
             let mapped = self.map_refs[i] > 0;
@@ -337,7 +418,8 @@ impl Mapper<'_> {
         for o in &g.outputs {
             used[o.node() as usize] = true;
         }
-        for i in (0..n).rev() {
+        for &i in self.order.iter().rev() {
+            let i = i as usize;
             if used[i]
                 && let Some(c) = self.best[i]
             {
@@ -348,15 +430,15 @@ impl Mapper<'_> {
         }
         let mut luts = Vec::new();
         let mut level = vec![0u32; n];
-        for i in 0..n {
+        for &i in &self.order {
+            let i = i as usize;
             if !used[i] {
                 continue;
             }
             if let Some(c) = self.best[i] {
                 let leaves = c.leaves().to_vec();
                 level[i] = 1 + leaves.iter().map(|&l| level[l as usize]).max().unwrap_or(0);
-                let truth = cone_truth(g, i as u32, &leaves);
-                luts.push(Lut { node: i as u32, leaves, truth });
+                luts.push(Lut { node: i as u32, leaves, truth: c.truth });
             }
         }
         let depth = g.outputs.iter().map(|o| level[o.node() as usize]).max().unwrap_or(0);
@@ -364,44 +446,10 @@ impl Mapper<'_> {
     }
 }
 
-/// Truth table of node `root` over `leaves` (at most 6).
-pub fn cone_truth(g: &Aig, root: u32, leaves: &[u32]) -> u64 {
-    const VARS: [u64; 6] = [
-        0xAAAA_AAAA_AAAA_AAAA,
-        0xCCCC_CCCC_CCCC_CCCC,
-        0xF0F0_F0F0_F0F0_F0F0,
-        0xFF00_FF00_FF00_FF00,
-        0xFFFF_0000_FFFF_0000,
-        0xFFFF_FFFF_0000_0000,
-    ];
-    let mut val: synth_core::FxHashMap<u32, u64> = Default::default();
-    val.insert(0, 0);
-    for (j, &l) in leaves.iter().enumerate() {
-        val.insert(l, VARS[j]);
-    }
-    fn eval(g: &Aig, n: u32, val: &mut synth_core::FxHashMap<u32, u64>) -> u64 {
-        if let Some(&v) = val.get(&n) {
-            return v;
-        }
-        let Node::And(a, b) = g.nodes[n as usize] else {
-            panic!("cut does not cover node {n}");
-        };
-        let lit = |l: Lit, v: u64| if l.is_compl() { !v } else { v };
-        let va = eval(g, a.node(), val);
-        let vb = eval(g, b.node(), val);
-        let r = lit(a, va) & lit(b, vb);
-        val.insert(n, r);
-        r
-    }
-    let t = eval(g, root, &mut val);
-    let bits = 1u32 << leaves.len();
-    if bits == 64 { t } else { t & ((1u64 << bits) - 1) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aig::lit_val;
+    use crate::aig::{Lit, lit_val};
 
     /// Evaluates a mapping on simulation patterns and compares every output
     /// with the AIG.
@@ -468,6 +516,26 @@ mod tests {
         check(&g, &m, 4);
         assert_eq!(m.depth, 2);
         assert_eq!(m.luts.len(), 5);
+    }
+
+    #[test]
+    fn maps_with_choices() {
+        // A wide AND chain with its balanced form as choices, and an adder.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..9).map(|_| g.input()).collect();
+        let mut acc = x[0];
+        for &l in &x[1..] {
+            acc = g.and(acc, !l);
+        }
+        g.output(acc);
+        adder(&mut g, 4);
+        let b = crate::opt::balance(&g);
+        let c = crate::choice::build(&[&g, &b], &Default::default());
+        assert!(c.num_choices() > 0);
+        let m = map_choices(&c, &MapOptions::default());
+        check(&c.aig, &m, 4);
+        let plain = map(&g, &MapOptions::default());
+        assert!(m.depth <= plain.depth);
     }
 
     #[test]

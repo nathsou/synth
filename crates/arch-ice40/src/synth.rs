@@ -140,7 +140,11 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let mut const_ffs = 0;
     // Merging equivalent logic can make carry-chain operands constant;
     // simplifying the chains feeds their sums back into the graph.
+    // The graph before the last fraiging: alternative structures for
+    // choices, if nothing outside the graph changed after it.
+    let mut unfraiged = None;
     for _ in 0..4 {
+        unfraiged = Some(net.aig.clone());
         let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
         net.aig = aig;
         merged += st.proved;
@@ -153,7 +157,9 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         if removed + ffs == 0 {
             break;
         }
+        unfraiged = None;
     }
+    let fraiged = net.aig.clone();
     net.aig = synth_logic::opt::balance(&net.aig);
     net.cleanup();
     log.push(format!(
@@ -170,7 +176,18 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         let _ = std::fs::write(path, net.aig.to_aiger());
     }
     let t = Instant::now();
-    let mapping = lutmap::map(&net.aig, &opts.map);
+    let mut snapshots = vec![&net.aig, &fraiged];
+    snapshots.extend(unfraiged.as_ref());
+    let choices = synth_logic::choice::build(&snapshots, &Default::default());
+    log.push(format!(
+        "{} structural choices in {:.2}s",
+        choices.num_choices(),
+        t.elapsed().as_secs_f64()
+    ));
+    let t = Instant::now();
+    let mapping = lutmap::map_choices(&choices, &opts.map);
+    // The mapping refers to the nodes of the graph with choices.
+    net.aig = choices.aig;
     log.push(format!(
         "mapped in {:.2}s: {} LUTs, depth {}",
         t.elapsed().as_secs_f64(),
