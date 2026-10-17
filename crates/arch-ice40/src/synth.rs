@@ -159,8 +159,20 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         }
         unfraiged = None;
     }
+    // Snapshots for structural choices: the fraiged graph, its balanced
+    // form, and refactored forms (the mapped graph is the third round).
     let fraiged = net.aig.clone();
-    net.aig = synth_logic::opt::balance(&net.aig);
+    let balanced = synth_logic::opt::balance(&fraiged).cleanup();
+    let refactor = |g: &synth_logic::Aig, zero_gain: bool| {
+        let o = synth_logic::refactor::RefactorOptions { zero_gain, ..Default::default() };
+        synth_logic::opt::balance(&synth_logic::refactor::refactor(g, &o)).cleanup()
+    };
+    let mut main = refactor(&fraiged, false);
+    for _ in 0..2 {
+        main = refactor(&main, false);
+    }
+    let reshaped = refactor(&main, true);
+    net.aig = main;
     net.cleanup();
     log.push(format!(
         "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits and {} flip-flops removed",
@@ -176,8 +188,9 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         let _ = std::fs::write(path, net.aig.to_aiger());
     }
     let t = Instant::now();
-    let mut snapshots = vec![&net.aig, &fraiged];
+    let mut snapshots = vec![&net.aig, &balanced, &fraiged];
     snapshots.extend(unfraiged.as_ref());
+    snapshots.push(&reshaped);
     let choices = synth_logic::choice::build(&snapshots, &Default::default());
     log.push(format!(
         "{} structural choices in {:.2}s",

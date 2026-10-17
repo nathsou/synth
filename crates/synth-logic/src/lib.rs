@@ -16,6 +16,7 @@ pub mod lower;
 pub mod lutmap;
 pub mod net;
 pub mod opt;
+pub mod refactor;
 pub mod sat;
 pub mod seq;
 
