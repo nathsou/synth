@@ -103,12 +103,14 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         &mut net,
         &FfRules { init_one: false, srst_with_arst: false, srst_over_en: false },
     );
+    let resets = synth_logic::seq::extract_sync_resets(&mut net);
     net.cleanup();
     log.push(format!(
-        "lowered in {:.2}s: {} AND nodes, {} flip-flops, {} carry chains",
+        "lowered in {:.2}s: {} AND nodes, {} flip-flops ({} synchronous resets extracted), {} carry chains",
         t.elapsed().as_secs_f64(),
         net.aig.num_ands(),
         net.ffs.len(),
+        resets,
         net.carries.len()
     ));
     if std::env::var("SYNTH_DEBUG").is_ok() {
