@@ -17,6 +17,9 @@ use crate::pack::{GB, GlobalClass, IO, LC, Packed, RAM, global_class};
 /// Placement options.
 #[derive(Clone, Debug)]
 pub struct PlaceOptions {
+    /// Weight of timing against wirelength in the placement cost (0..1);
+    /// 0 places for wirelength only.
+    pub timing_weight: f64,
     pub seed: u64,
     /// Moves per temperature step, as a multiple of `cells^(4/3)`.
     pub effort: f64,
@@ -26,7 +29,7 @@ pub struct PlaceOptions {
 
 impl Default for PlaceOptions {
     fn default() -> Self {
-        PlaceOptions { seed: 1, effort: 1.0, max_locals: 32 }
+        PlaceOptions { timing_weight: 0.5, seed: 1, effort: 1.0, max_locals: 32 }
     }
 }
 
@@ -93,7 +96,7 @@ pub fn place(
     Ok((placement, log))
 }
 
-fn place_ios(
+pub(crate) fn place_ios(
     arch: &Arch,
     nl: &Netlist,
     pins: &PinConstraints,
@@ -153,7 +156,7 @@ fn place_ios(
 /// uses the pad's dedicated connection; the others take a free network,
 /// preferring even networks for set/reset users and odd ones for clock
 /// enables (those reach the logic tiles' control pins directly).
-fn assign_globals(
+pub(crate) fn assign_globals(
     arch: &Arch,
     nl: &mut Netlist,
     placement: &mut Placement,
@@ -270,8 +273,23 @@ fn net_weight(pins: usize) -> f64 {
     if pins <= 10 { Q[pins] } else { 1.4974 + 0.0272 * (pins as f64 - 10.0) }
 }
 
+/// A driver-to-sink connection, for the timing cost.
+#[derive(Clone, Copy, Debug)]
+struct Conn {
+    drv: CellId,
+    sink: CellId,
+    /// Input pin index on the sink.
+    pin: usize,
+}
+
+/// Estimated routed delay (ps) of a connection spanning `d` tiles.
+pub(crate) fn est_delay(d: i32) -> f64 {
+    if d == 0 { 590.0 } else { 1200.0 + 120.0 * d as f64 }
+}
+
 struct Annealer<'a> {
     arch: &'a Arch,
+    nl: &'a Netlist,
     rng: Rng,
     opts: PlaceOptions,
     width: usize,
@@ -293,12 +311,21 @@ struct Annealer<'a> {
     net_cost: Vec<f64>,
     cell_nets: FxHashMap<CellId, Vec<u32>>,
     fixed: FxHashMap<CellId, (i16, i16)>,
+    conns: Vec<Conn>,
+    cell_conns: FxHashMap<CellId, Vec<u32>>,
+    /// Timing weight (criticality^8) and current cost of each connection.
+    conn_weight: Vec<f64>,
+    conn_cost: Vec<f64>,
+    /// Normalisation of the two cost terms (their totals at the last update).
+    bb_norm: f64,
+    t_norm: f64,
+    conn_scratch: Vec<(u32, f64)>,
 }
 
 impl<'a> Annealer<'a> {
     fn new(
         arch: &'a Arch,
-        nl: &Netlist,
+        nl: &'a Netlist,
         packed: &Packed,
         opts: &PlaceOptions,
     ) -> Result<Self, String> {
@@ -309,6 +336,14 @@ impl<'a> Annealer<'a> {
         let ram_bels: Vec<BelId> = arch.bels_of(BelKind::Ram).collect();
         let mut sa = Annealer {
             arch,
+            nl,
+            conns: Vec::new(),
+            cell_conns: FxHashMap::default(),
+            conn_weight: Vec::new(),
+            conn_cost: Vec::new(),
+            bb_norm: 1.0,
+            t_norm: 1.0,
+            conn_scratch: Vec::new(),
             rng: Rng::new(opts.seed),
             opts: opts.clone(),
             width,
@@ -403,7 +438,82 @@ impl<'a> Annealer<'a> {
             sa.nets.push(cells);
         }
         sa.net_cost = vec![0.0; sa.nets.len()];
+        // Connections for the timing cost (not on globals, not inside carry
+        // chains, whose cells move together).
+        for n in nl.live_nets() {
+            let net = &nl.nets[n];
+            let Some(d) = net.driver else { continue };
+            if is_global(n) {
+                continue;
+            }
+            let dpin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
+            for p in &net.users {
+                let spin = nl.str(nl.cells[p.cell].pins[p.pin as usize].name);
+                if p.cell == d.cell || (dpin == "COUT" && spin == "CIN") {
+                    continue;
+                }
+                let id = sa.conns.len() as u32;
+                sa.conns.push(Conn { drv: d.cell, sink: p.cell, pin: p.pin as usize });
+                sa.cell_conns.entry(d.cell).or_default().push(id);
+                sa.cell_conns.entry(p.cell).or_default().push(id);
+            }
+        }
+        sa.conn_weight = vec![0.0; sa.conns.len()];
+        sa.conn_cost = vec![0.0; sa.conns.len()];
         Ok(sa)
+    }
+
+    fn conn_delay(&self, k: usize) -> f64 {
+        let c = self.conns[k];
+        let (x0, y0) = self.cell_xy(c.drv);
+        let (x1, y1) = self.cell_xy(c.sink);
+        est_delay(((x1 - x0).abs() + (y1 - y0).abs()) as i32)
+    }
+
+    /// Recomputes connection criticalities from the current placement and
+    /// renormalises the cost terms.
+    fn update_timing(&mut self) {
+        if self.opts.timing_weight <= 0.0 || self.conns.is_empty() {
+            return;
+        }
+        let nl = self.nl;
+        // Delay of the connection to each input pin.
+        let mut idx: FxHashMap<(CellId, usize), usize> = FxHashMap::default();
+        for (k, c) in self.conns.iter().enumerate() {
+            idx.insert((c.sink, c.pin), k);
+        }
+        let delay = |c: CellId, i: usize| -> f64 {
+            match idx.get(&(c, i)) {
+                Some(&k) => self.conn_delay(k),
+                None => {
+                    // Carry chains, globals and unplaced cells.
+                    let n = nl.cells[c].pins[i].net;
+                    if n.is_some_and(|n| {
+                        nl.nets[n].driver.is_some_and(|d| nl.cell_kind(d.cell) == GB)
+                    }) {
+                        1500.0
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        };
+        let (_period, crit) = crate::timing::criticalities(self.arch, nl, &delay);
+        for k in 0..self.conns.len() {
+            let c = self.conns[k];
+            let cr = crit.get(&(c.sink, c.pin)).copied().unwrap_or(0.0);
+            self.conn_weight[k] = cr.powi(8);
+            self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
+        }
+        self.bb_norm = self.net_cost.iter().sum::<f64>().max(1.0);
+        self.t_norm = self.conn_cost.iter().sum::<f64>().max(1.0);
+    }
+
+    /// Normalised cost (wirelength and timing terms weighted).
+    fn norm_cost(&self) -> f64 {
+        let l = self.opts.timing_weight;
+        let t: f64 = self.conn_cost.iter().sum();
+        (1.0 - l) * self.total_cost() / self.bb_norm + l * t / self.t_norm
     }
 
     fn set_fixed(&mut self, placement: &Placement) {
@@ -576,9 +686,10 @@ impl<'a> Annealer<'a> {
         self.net_cost.iter().sum()
     }
 
-    /// Recomputes costs of the nets touching `cells`; returns the delta and
-    /// the new costs (applied only on accept).
-    fn delta(&self, cells: &[CellId], scratch: &mut Vec<(u32, f64)>) -> f64 {
+    /// Recomputes costs of the nets (and connections) touching `cells`;
+    /// returns the normalised cost delta. New costs are applied with
+    /// [`Annealer::commit`] if the move is accepted.
+    fn delta(&mut self, cells: &[CellId], scratch: &mut Vec<(u32, f64)>) -> f64 {
         scratch.clear();
         let mut d = 0.0;
         for &c in cells {
@@ -593,7 +704,35 @@ impl<'a> Annealer<'a> {
                 }
             }
         }
-        d
+        let l = self.opts.timing_weight;
+        let mut dt = 0.0;
+        let mut cs = std::mem::take(&mut self.conn_scratch);
+        cs.clear();
+        if l > 0.0 {
+            for &c in cells {
+                if let Some(conns) = self.cell_conns.get(&c) {
+                    for &k in conns {
+                        if self.conn_weight[k as usize] == 0.0 || cs.iter().any(|(m, _)| *m == k) {
+                            continue;
+                        }
+                        let new = self.conn_weight[k as usize] * self.conn_delay(k as usize);
+                        dt += new - self.conn_cost[k as usize];
+                        cs.push((k, new));
+                    }
+                }
+            }
+        }
+        self.conn_scratch = cs;
+        (1.0 - l) * d / self.bb_norm + l * dt / self.t_norm
+    }
+
+    fn commit(&mut self, scratch: &[(u32, f64)]) {
+        for &(n, cost) in scratch {
+            self.net_cost[n as usize] = cost;
+        }
+        for &(k, cost) in &self.conn_scratch {
+            self.conn_cost[k as usize] = cost;
+        }
     }
 
     /// Tries one move; returns whether it was accepted.
@@ -641,9 +780,7 @@ impl<'a> Annealer<'a> {
                     d <= 0.0 || self.rng.unit() < (-d / temp).exp()
                 };
                 if accept {
-                    for &(n, cost) in scratch.iter() {
-                        self.net_cost[n as usize] = cost;
-                    }
+                    self.commit(scratch);
                 } else {
                     self.lc_occ[s_old] = Some(c);
                     self.lc_occ[s_new] = other;
@@ -702,9 +839,7 @@ impl<'a> Annealer<'a> {
                     d <= 0.0 || self.rng.unit() < (-d / temp).exp()
                 };
                 if accept {
-                    for &(n, cost) in scratch.iter() {
-                        self.net_cost[n as usize] = cost;
-                    }
+                    self.commit(scratch);
                 } else {
                     for (i, &c) in cells.iter().enumerate() {
                         let s = self.slot(nx, ny + i / 8, i % 8);
@@ -745,9 +880,7 @@ impl<'a> Annealer<'a> {
                 let d = self.delta(&moved, scratch);
                 let accept = d <= 0.0 || self.rng.unit() < (-d / temp).exp();
                 if accept {
-                    for &(n, cost) in scratch.iter() {
-                        self.net_cost[n as usize] = cost;
-                    }
+                    self.commit(scratch);
                 } else {
                     place(self, c, s_old);
                     self.ram_occ[s_new] = None;
@@ -770,20 +903,26 @@ impl<'a> Annealer<'a> {
         // Initial temperature: standard deviation of random move deltas.
         let mut rlim = self.width.max(self.height) as f64;
         let start = self.total_cost();
+        self.bb_norm = start.max(1.0);
         let mut deltas = Vec::new();
         for _ in 0..self.units.len().min(500) {
-            let before = self.total_cost();
+            let before = self.norm_cost();
             if self.try_move(f64::INFINITY, rlim, &mut scratch) == Some(true) {
-                deltas.push(self.total_cost() - before);
+                deltas.push(self.norm_cost() - before);
             }
         }
         let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
         let var =
             deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / deltas.len().max(1) as f64;
-        let mut temp = 20.0 * var.sqrt().max(1.0);
+        let mut temp = 20.0 * var.sqrt().max(1e-6);
         let nets = self.nets.len() as f64;
         let mut iters = 0;
         loop {
+            // Criticalities follow the placement; normalise the cost terms.
+            self.update_timing();
+            if self.opts.timing_weight <= 0.0 {
+                self.bb_norm = self.total_cost().max(1.0);
+            }
             let (mut tried, mut accepted) = (0usize, 0usize);
             for _ in 0..moves_per_temp {
                 if let Some(a) = self.try_move(temp, rlim, &mut scratch) {
@@ -803,7 +942,7 @@ impl<'a> Annealer<'a> {
             };
             rlim = (rlim * (1.0 - 0.44 + rate)).clamp(1.0, self.width.max(self.height) as f64);
             iters += 1;
-            if temp < 0.005 * self.total_cost() / nets || iters > 2000 {
+            if temp < 0.005 / nets || iters > 2000 {
                 break;
             }
         }

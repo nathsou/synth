@@ -27,6 +27,7 @@ BUILD OPTIONS:
     synth build <files.v...> --device <hx1k|hx8k|...> --package <pkg>
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
+              [--timing-weight <0..1>]
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -107,6 +108,18 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     Ok(nl)
 }
 
+/// `--timing-weight` (default 0.5).
+fn timing_weight(a: &mut Args) -> Result<f64, String> {
+    match a.value("--timing-weight") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|w: &f64| (0.0..=1.0).contains(w))
+            .ok_or("bad --timing-weight".into()),
+        None => Ok(0.5),
+    }
+}
+
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
     let nl = synthesize(&mut a)?;
@@ -134,6 +147,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--asc",
             "--seed",
             "--effort",
+            "--timing-weight",
         ],
         &[],
     )?;
@@ -151,7 +165,13 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         .transpose()?
         .unwrap_or(1.0);
     let nl = synthesize(&mut a)?;
-    let opts = arch_ice40::flow::FlowOptions { part, package, seed, place_effort: effort };
+    let opts = arch_ice40::flow::FlowOptions {
+        part,
+        package,
+        seed,
+        place_effort: effort,
+        timing_weight: timing_weight(&mut a)?,
+    };
     let res = arch_ice40::flow::implement(nl, &pins, &opts)?;
     for l in &res.log {
         eprintln!("info: {l}");
@@ -168,7 +188,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
 fn cmd_pnr(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
-        &["--device", "--package", "--pcf", "-o", "--asc", "--seed", "--effort"],
+        &["--device", "--package", "--pcf", "-o", "--asc", "--seed", "--effort", "--timing-weight"],
         &[],
     )?;
     let input = a.positional(0, "netlist")?;
@@ -188,7 +208,13 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
     a.finish()?;
     let design = synth_rtlil::parse(&read(&input)?).map_err(|e| e.to_string())?;
     let nl = synth_rtlil::to_netlist(&design, &Ice40Lib)?;
-    let opts = arch_ice40::flow::FlowOptions { part, package, seed, place_effort: effort };
+    let opts = arch_ice40::flow::FlowOptions {
+        part,
+        package,
+        seed,
+        place_effort: effort,
+        timing_weight: timing_weight(&mut a)?,
+    };
     let res = arch_ice40::flow::implement(nl, &pins, &opts)?;
     for l in &res.log {
         eprintln!("info: {l}");

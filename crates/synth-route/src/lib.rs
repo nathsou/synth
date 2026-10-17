@@ -47,6 +47,8 @@ pub struct NetRequest {
 #[derive(Debug, Clone)]
 pub struct RouteOptions {
     pub max_iterations: usize,
+    /// Upper bound on the criticality used in costs.
+    pub max_criticality: f32,
     /// Initial present-congestion factor and its growth per iteration.
     pub present_factor: f32,
     pub present_growth: f32,
@@ -65,6 +67,7 @@ impl Default for RouteOptions {
     fn default() -> Self {
         RouteOptions {
             max_iterations: 200,
+            max_criticality: 0.9,
             present_factor: 0.5,
             present_growth: 1.6,
             history_factor: 0.4,
@@ -303,7 +306,9 @@ fn route_net(
         if st.in_tree[sink as usize] == tg {
             continue;
         }
-        let crit = net.criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, 0.99);
+        // Never fully ignore congestion, or critical nets cannot be moved
+        // off contested wires.
+        let crit = net.criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, opts.max_criticality);
         let tx = graph.node_x[sink as usize];
         let ty = graph.node_y[sink as usize];
         loop {

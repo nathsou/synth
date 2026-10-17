@@ -58,6 +58,30 @@ pub fn route(
         node_y: &g.node_y,
         node_cost: &costs,
     };
+    // Connection criticalities from estimated delays, so that critical
+    // connections take fast routes.
+    let est = |c: synth_netlist::CellId, i: usize| -> f64 {
+        let p = synth_netlist::PinRef { cell: c, pin: i as u32 };
+        let Some(d) = nl.cells[c].pins[i].net.and_then(|n| nl.nets[n].driver) else { return 0.0 };
+        let dname = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
+        let sname = nl.str(nl.cells[c].pins[p.pin as usize].name);
+        if dname == "COUT" && sname == "CIN" {
+            return 0.0;
+        }
+        match (
+            pin_node(arch, nl, placement, d.cell, dname),
+            pin_node(arch, nl, placement, c, sname),
+        ) {
+            (Ok(a), Ok(b)) => {
+                let (a, b) = (a.raw() as usize, b.raw() as usize);
+                let dist = (g.node_x[a] as i32 - g.node_x[b] as i32).abs()
+                    + (g.node_y[a] as i32 - g.node_y[b] as i32).abs();
+                crate::place::est_delay(dist)
+            }
+            _ => 0.0,
+        }
+    };
+    let (_, crit) = crate::timing::criticalities(arch, nl, &est);
     let mut requests = Vec::new();
     let mut ids = Vec::new();
     let mut sources = FxHashMap::default();
@@ -73,17 +97,24 @@ pub fn route(
             |p: synth_netlist::PinRef| nl.str(nl.cells[p.cell].pins[p.pin as usize].name);
         let source = pin_node(arch, nl, placement, drv.cell, pin_name(drv))?;
         let mut sinks: Vec<u32> = Vec::new();
+        let mut criticality: Vec<f32> = Vec::new();
         for &u in &net.users {
             let node = pin_node(arch, nl, placement, u.cell, pin_name(u))?;
-            if node != source && !sinks.contains(&node.raw()) {
-                sinks.push(node.raw());
+            let c = crit.get(&(u.cell, u.pin as usize)).copied().unwrap_or(0.0) as f32;
+            match sinks.iter().position(|&s| s == node.raw()) {
+                Some(k) => criticality[k] = criticality[k].max(c),
+                None if node != source => {
+                    sinks.push(node.raw());
+                    criticality.push(c);
+                }
+                None => {}
             }
         }
         sources.insert(n, source);
         if sinks.is_empty() {
             continue;
         }
-        requests.push(NetRequest { source: source.raw(), sinks, criticality: vec![] });
+        requests.push(NetRequest { source: source.raw(), sinks, criticality });
         ids.push(n);
     }
     let opts = RouteOptions { astar_cost_per_tile: 0.15, ..RouteOptions::default() };

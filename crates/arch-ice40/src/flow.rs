@@ -15,6 +15,8 @@ pub struct FlowOptions {
     pub package: String,
     pub seed: u64,
     pub place_effort: f64,
+    /// Weight of timing in the placement cost (0..1, 0 = wirelength only).
+    pub timing_weight: f64,
 }
 
 /// Result of a successful run.
@@ -67,16 +69,50 @@ fn run(
         stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     ));
 
-    let t = Instant::now();
-    let popts =
-        PlaceOptions { seed: opts.seed, effort: opts.place_effort, ..PlaceOptions::default() };
-    let (placement, plog) = crate::place::place(&arch, &mut nl, &packed, pins, &popts)?;
-    log.extend(plog);
-    log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
+    // IOs and global networks once; then placement and routing, retrying
+    // with less weight on timing if the placement does not route (timing
+    // pulls critical logic together, which can congest local routing).
+    let mut fixed = crate::place::Placement::default();
+    crate::place::place_ios(&arch, &nl, pins, &mut fixed, log)?;
+    crate::place::assign_globals(&arch, &mut nl, &mut fixed, log)?;
+    let weights = [opts.timing_weight, opts.timing_weight / 2.0, 0.0];
+    let mut result = None;
+    for (attempt, &w) in weights.iter().enumerate() {
+        if attempt > 0 && w == weights[attempt - 1] {
+            continue;
+        }
+        let t = Instant::now();
+        let popts = PlaceOptions {
+            seed: opts.seed,
+            effort: opts.place_effort,
+            timing_weight: w,
+            ..PlaceOptions::default()
+        };
+        let mut placement = fixed.clone();
+        crate::place::place_with_fixed(&arch, &nl, &packed, &mut placement, &popts, log)?;
+        log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
+        let t = Instant::now();
+        match crate::route::route(&arch, &nl, &placement, log) {
+            Ok(routing) => {
+                log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
+                result = Some((placement, routing));
+                break;
+            }
+            Err(e) if attempt + 1 < weights.len() => {
+                log.push(format!("{e}; placing again with timing weight {}", weights[attempt + 1]));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let (placement, routing) = result.expect("the last attempt returns or errors");
 
     let t = Instant::now();
-    let routing = crate::route::route(&arch, &nl, &placement, log)?;
-    log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
+    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing);
+    for c in &timing.clocks {
+        log.push(format!("clock {}: {:.2} ns, {:.1} MHz", c.clock, c.period_ns, c.fmax_mhz));
+        log.push(format!("  critical path: {}", c.path.join(" -> ")));
+    }
+    log.push(format!("timing analysed in {:.2}s", t.elapsed().as_secs_f64()));
 
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
