@@ -277,6 +277,93 @@ pub fn lit_val(v: &[u64], l: Lit) -> u64 {
     if l.is_compl() { !x } else { x }
 }
 
+impl Aig {
+    /// Writes the graph in the ASCII AIGER format (`aag`), for exchange with
+    /// other tools.
+    pub fn to_aag(&self) -> String {
+        use std::fmt::Write as _;
+        // AIGER variables: inputs first, then AND nodes, in order.
+        let mut var = vec![0u32; self.nodes.len()];
+        let mut next = 1;
+        for &n in &self.inputs {
+            var[n as usize] = next;
+            next += 1;
+        }
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::And(..) = n {
+                var[i] = next;
+                next += 1;
+            }
+        }
+        let lit = |l: Lit| 2 * var[l.node() as usize] + l.is_compl() as u32;
+        let ands = self.num_ands();
+        let mut o = String::new();
+        let _ =
+            writeln!(o, "aag {} {} 0 {} {}", next - 1, self.inputs.len(), self.outputs.len(), ands);
+        for &n in &self.inputs {
+            let _ = writeln!(o, "{}", 2 * var[n as usize]);
+        }
+        for &l in &self.outputs {
+            let _ = writeln!(o, "{}", lit(l));
+        }
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::And(a, b) = n {
+                let _ = writeln!(o, "{} {} {}", 2 * var[i], lit(*a), lit(*b));
+            }
+        }
+        o
+    }
+}
+
+impl Aig {
+    /// Writes the graph in the binary AIGER format (`aig`).
+    pub fn to_aiger(&self) -> Vec<u8> {
+        let mut var = vec![0u32; self.nodes.len()];
+        let mut next = 1;
+        for &n in &self.inputs {
+            var[n as usize] = next;
+            next += 1;
+        }
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::And(..) = n {
+                var[i] = next;
+                next += 1;
+            }
+        }
+        let lit = |l: Lit| 2 * var[l.node() as usize] + l.is_compl() as u32;
+        let mut o = format!(
+            "aig {} {} 0 {} {}\n",
+            next - 1,
+            self.inputs.len(),
+            self.outputs.len(),
+            self.num_ands()
+        )
+        .into_bytes();
+        for &l in &self.outputs {
+            o.extend_from_slice(format!("{}\n", lit(l)).as_bytes());
+        }
+        let push = |mut x: u32, o: &mut Vec<u8>| {
+            while x >= 0x80 {
+                o.push((x & 0x7f) as u8 | 0x80);
+                x >>= 7;
+            }
+            o.push(x as u8);
+        };
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Node::And(a, b) = n {
+                let lhs = 2 * var[i];
+                let (r0, r1) = {
+                    let (x, y) = (lit(*a), lit(*b));
+                    if x >= y { (x, y) } else { (y, x) }
+                };
+                push(lhs - r0, &mut o);
+                push(r0 - r1, &mut o);
+            }
+        }
+        o
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

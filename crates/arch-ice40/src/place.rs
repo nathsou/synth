@@ -49,10 +49,11 @@ struct LcInfo {
     clk: Option<NetId>,
     cen: Option<NetId>,
     sr: Option<NetId>,
-    /// Nets on inputs fed from local tracks of class A (`I0`, `I2`) and
-    /// class B (`I1`, `I3` unless it is the carry input).
-    class_a: [Option<NetId>; 2],
-    class_b: [Option<NetId>; 2],
+    /// Nets on inputs `I0`/`I2` and on `I1`/`I3` (unless it is the carry
+    /// input). In even logic cells the former use class A local tracks and
+    /// the latter class B; odd cells are the other way round.
+    even_pins: [Option<NetId>; 2],
+    odd_pins: [Option<NetId>; 2],
     /// Control nets that need a class A local track (not on a global).
     fabric_ctrl: [Option<NetId>; 3],
 }
@@ -326,8 +327,8 @@ impl<'a> Annealer<'a> {
                 info.fabric_ctrl = [fab(info.clk), fab(info.cen), fab(info.sr)];
             }
             let cin = nl.pin_net(c, "CIN");
-            info.class_a = [nl.pin_net(c, "I0"), nl.pin_net(c, "I2")];
-            info.class_b = [nl.pin_net(c, "I1"), nl.pin_net(c, "I3").filter(|&n| Some(n) != cin)];
+            info.even_pins = [nl.pin_net(c, "I0"), nl.pin_net(c, "I2")];
+            info.odd_pins = [nl.pin_net(c, "I1"), nl.pin_net(c, "I3").filter(|&n| Some(n) != cin)];
             sa.lc_info.insert(c, info);
         }
         // Units: chains first, then single logic cells and RAMs.
@@ -397,9 +398,9 @@ impl<'a> Annealer<'a> {
 
     /// Whether the logic cells placed in tile (x, y) can share it: one
     /// control set, and enough local tracks. A tile has 16 local tracks of
-    /// each class; inputs `I0`/`I2` and control pins not on a global take
-    /// class A tracks, `I1`/`I3` class B (a net reaching several pins of a
-    /// class needs one track).
+    /// each of two classes: control pins not on a global and `I0`/`I2` of
+    /// even cells (`I1`/`I3` of odd cells) take class A, the other inputs
+    /// class B (a net reaching several pins of a class needs one track).
     fn tile_ok(&self, x: usize, y: usize) -> bool {
         let mut ctrl: Option<ControlSet> = None;
         let mut a: [Option<NetId>; 19] = [None; 19];
@@ -424,13 +425,15 @@ impl<'a> Annealer<'a> {
                     _ => {}
                 }
             }
-            for n in i.class_a.iter().flatten() {
+            let (ca, cb) =
+                if z % 2 == 0 { (&i.even_pins, &i.odd_pins) } else { (&i.odd_pins, &i.even_pins) };
+            for n in ca.iter().flatten() {
                 if !a[..na].contains(&Some(*n)) {
                     a[na] = Some(*n);
                     na += 1;
                 }
             }
-            for n in i.class_b.iter().flatten() {
+            for n in cb.iter().flatten() {
                 if !b[..nb].contains(&Some(*n)) {
                     b[nb] = Some(*n);
                     nb += 1;

@@ -49,7 +49,17 @@ pub fn extract_controls(m: &mut Module) -> usize {
         let dff = dff.as_ref().clone();
         let mut groups: BTreeMap<Ctrl, Vec<(usize, SigBit, Logic)>> = BTreeMap::new();
         for j in 0..dff.q.width() {
-            let (ctrl, d, val) = analyse(m, &mux_of, dff.q.0[j], dff.d.0[j]);
+            let (mut ctrl, mut d, val) = analyse(m, &mux_of, dff.q.0[j], dff.d.0[j]);
+            // Holds deeper in the multiplexer tree: an extra enable term (not
+            // below a reset that the enable gates, which would reorder them).
+            if !ctrl.en_over_srst {
+                let mut memo = FxHashMap::default();
+                let (e, nd) = deep_hold(m, &mux_of, dff.q.0[j], d, &mut memo, 0);
+                if e != SigBit::ONE && e != SigBit::ZERO {
+                    ctrl.en.push((e, true));
+                    d = nd;
+                }
+            }
             if !ctrl.en.is_empty() || ctrl.srst.is_some() {
                 changed += 1;
             }
@@ -99,6 +109,49 @@ pub fn extract_controls(m: &mut Module) -> usize {
         }
     }
     changed
+}
+
+/// Splits a multiplexer tree `t` (input of flip-flop bit `q`) into an enable
+/// (when a leaf other than `q` is selected) and the data loaded then.
+fn deep_hold(
+    m: &mut Module,
+    mux_of: &FxHashMap<SigBit, (CellId, usize)>,
+    q: SigBit,
+    t: SigBit,
+    memo: &mut FxHashMap<SigBit, (SigBit, SigBit)>,
+    depth: usize,
+) -> (SigBit, SigBit) {
+    if t == q {
+        return (SigBit::ZERO, q);
+    }
+    if let Some(&r) = memo.get(&t) {
+        return r;
+    }
+    let Some(&(ci, i)) = mux_of.get(&t) else { return (SigBit::ONE, t) };
+    if depth > 64 {
+        return (SigBit::ONE, t);
+    }
+    let CellKind::Mux { a, b, s, .. } = &m.cells[ci].kind else { unreachable!() };
+    let (a, b, s) = (a.0[i], b.0[i], *s);
+    let (ea, da) = deep_hold(m, mux_of, q, a, memo, depth + 1);
+    let (eb, db) = deep_hold(m, mux_of, q, b, memo, depth + 1);
+    let r = if ea == SigBit::ONE && eb == SigBit::ONE {
+        (SigBit::ONE, t)
+    } else {
+        let e = m.mux(s, Sig::bit(ea), Sig::bit(eb)).0[0];
+        let d = if ea == SigBit::ZERO {
+            db
+        } else if eb == SigBit::ZERO {
+            da
+        } else if da == a && db == b {
+            t
+        } else {
+            m.mux(s, Sig::bit(da), Sig::bit(db)).0[0]
+        };
+        (e, d)
+    };
+    memo.insert(t, r);
+    r
 }
 
 /// Walks the multiplexers in front of flip-flop bit `q` with input `d`.

@@ -764,11 +764,14 @@ impl<'a> Elab<'a> {
         }
         // Without a default, a case that covers every value (or is marked
         // full_case, meaning other values do not matter) runs its last item
-        // unconditionally instead of keeping old values (no latch).
+        // that can match unconditionally instead of keeping old values (no
+        // latch). Items that can never match stay out of the logic.
         let has_default = items.iter().any(|it| it.exprs.is_empty());
         if !has_default
             && (full_case || self.case_covers_all(kind, w, items))
-            && let Some(last) = items.iter().rposition(|it| !it.exprs.is_empty())
+            && let Some(last) = (0..items.len())
+                .rev()
+                .find(|&i| !items[i].exprs.is_empty() && conds[i] != SigBit::ZERO)
         {
             conds[last] = SigBit::ONE;
         }

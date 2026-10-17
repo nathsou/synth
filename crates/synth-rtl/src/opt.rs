@@ -289,3 +289,191 @@ pub fn two_state(m: &mut Module) {
         m.connect(y, v);
     }
 }
+
+/// Merges identical combinational cells (same operation and inputs; operands
+/// of commutative operations in any order). Returns the number removed.
+pub fn merge_identical(m: &mut Module) -> usize {
+    use synth_core::FxHashMap;
+    let mut total = 0;
+    loop {
+        let mut seen: FxHashMap<String, Sig> = FxHashMap::default();
+        let mut removed = 0;
+        for i in 0..m.cells.len() {
+            let ci = CellId::new(i);
+            let c = &m.cells[ci];
+            if !c.alive {
+                continue;
+            }
+            let (key, y) = match &c.kind {
+                CellKind::Binary { op, signed, a, b, y } => {
+                    let (a, b) = if op.is_commutative() && format!("{b:?}") < format!("{a:?}") {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
+                    (format!("B{op:?}{signed}{a:?}{b:?}{}", y.width()), y.clone())
+                }
+                CellKind::Unary { op, a, y } => (format!("U{op:?}{a:?}{}", y.width()), y.clone()),
+                CellKind::Mux { a, b, s, y, ternary } => {
+                    (format!("M{a:?}{b:?}{s:?}{ternary}"), y.clone())
+                }
+                CellKind::Pmux { default, cases, s, y } => {
+                    (format!("P{default:?}{cases:?}{s:?}"), y.clone())
+                }
+                CellKind::Shiftx { a, b, b_signed, offset, y } => {
+                    (format!("S{a:?}{b:?}{b_signed}{offset}{}", y.width()), y.clone())
+                }
+                _ => continue,
+            };
+            match seen.get(&key) {
+                Some(orig) => {
+                    let orig = orig.clone();
+                    m.cells[ci].alive = false;
+                    m.connect(y, orig);
+                    removed += 1;
+                }
+                None => {
+                    seen.insert(key, y);
+                }
+            }
+        }
+        if removed == 0 {
+            return total;
+        }
+        total += removed;
+        // Resolve the new connections so that users of merged cells match.
+        let _ = resolve_connections(m);
+    }
+}
+
+/// Uses of every signal bit by cells, memory ports, connections and output
+/// ports.
+pub fn use_counts(m: &Module) -> synth_core::FxHashMap<SigBit, u32> {
+    let mut u: synth_core::FxHashMap<SigBit, u32> = Default::default();
+    let mut add = |b: SigBit| *u.entry(b).or_default() += 1;
+    for c in m.cells.iter().filter(|c| c.alive) {
+        c.for_each_input(&mut add);
+    }
+    for mem in m.memories.iter().filter(|m| m.alive) {
+        for rd in &mem.reads {
+            rd.addr.iter().for_each(|&b| add(b));
+            add(rd.en);
+            if let Some(c) = rd.clk {
+                add(c.sig);
+            }
+        }
+        for wr in &mem.writes {
+            wr.addr.iter().chain(wr.data.iter()).chain(wr.en.iter()).for_each(|&b| add(b));
+            add(wr.clk.sig);
+        }
+    }
+    for (_, rhs) in &m.connections {
+        rhs.iter().for_each(|&b| add(b));
+    }
+    for w in m.ports() {
+        if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
+            m.wire_sig(w).iter().for_each(|&b| add(b));
+        }
+    }
+    u
+}
+
+/// Shares arithmetic between the inputs of a multiplexer:
+/// `s ? x op z : x op w` becomes `x op (s ? w : z)` (for `+ - & | ^`), and
+/// `s ? x - z : x + z` one adder, `x + (z ^ s) + s`. Only when the operations
+/// feed nothing else. Returns the number of multiplexers rewritten.
+pub fn share_arith(m: &mut Module) -> usize {
+    use crate::BinaryOp as B;
+    use synth_core::FxHashMap;
+    let uses = use_counts(m);
+    // Cell driving exactly the whole signal `y`.
+    let mut by_y: FxHashMap<Vec<SigBit>, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive
+            && let CellKind::Binary { y, .. } = &c.kind
+        {
+            by_y.insert(y.0.clone(), ci);
+        }
+    }
+    let exclusive = |s: &Sig| s.iter().all(|b| uses.get(b).copied() == Some(1));
+    let mut n = 0;
+    for i in 0..m.cells.len() {
+        let mi = CellId::new(i);
+        let CellKind::Mux { a, b, s, y, .. } = &m.cells[mi].kind else { continue };
+        if !m.cells[mi].alive {
+            continue;
+        }
+        let (Some(&ca), Some(&cb)) = (by_y.get(&a.0), by_y.get(&b.0)) else { continue };
+        if ca == cb || !m.cells[ca].alive || !m.cells[cb].alive || !exclusive(a) || !exclusive(b) {
+            continue;
+        }
+        let (
+            CellKind::Binary { op: oa, signed: sa, a: xa, b: za, .. },
+            CellKind::Binary { op: ob, signed: sb, a: xb, b: zb, .. },
+        ) = (&m.cells[ca].kind, &m.cells[cb].kind)
+        else {
+            continue;
+        };
+        if sa != sb
+            || xa.width() != xb.width()
+            || za.width() != zb.width()
+            || xa.width() != y.width()
+        {
+            continue;
+        }
+        let (s, y, sa) = (*s, y.clone(), *sa);
+        let (oa, ob, xa, za, xb, zb) = (*oa, *ob, xa.clone(), za.clone(), xb.clone(), zb.clone());
+        let new = match (oa, ob) {
+            (B::Add, B::Sub) | (B::Sub, B::Add) if xa == xb && za == zb => {
+                // Subtract when the select picks the Sub input.
+                let sub_sel = if ob == B::Sub { s } else { m.not1(s) };
+                let w = y.width();
+                let flip = Sig(vec![sub_sel; w]);
+                let zz = m.binary(B::Xor, false, za, flip);
+                let mut x1 = Sig::bit(SigBit::ONE);
+                x1.0.extend_from_slice(&xa.0);
+                let mut z1 = Sig::bit(sub_sel);
+                z1.0.extend_from_slice(&zz.0);
+                let sum = m.binary(B::Add, false, x1, z1);
+                Sig(sum.0[1..].to_vec())
+            }
+            (op1, op2)
+                if op1 == op2 && matches!(op1, B::Add | B::Sub | B::And | B::Or | B::Xor) =>
+            {
+                let commutative = op1 != B::Sub;
+                let (shared, p, q) = if xa == xb {
+                    (xa, za, zb)
+                } else if za == zb && za.width() == xa.width() {
+                    // `p op z : q op z`; for Sub the shared operand is the subtrahend.
+                    if commutative {
+                        (za, xa, xb)
+                    } else {
+                        let sel = m.mux(s, xa, xb);
+                        let r = m.binary(op1, sa, sel, za);
+                        m.connect(y, r);
+                        m.cells[mi].alive = false;
+                        m.cells[ca].alive = false;
+                        m.cells[cb].alive = false;
+                        n += 1;
+                        continue;
+                    }
+                } else if commutative && xa == zb && za.width() == xa.width() {
+                    (xa, za, xb)
+                } else if commutative && za == xb && za.width() == xa.width() {
+                    (za, xa, zb)
+                } else {
+                    continue;
+                };
+                let sel = m.mux(s, p, q);
+                m.binary(op1, sa, shared, sel)
+            }
+            _ => continue,
+        };
+        m.connect(y, new);
+        m.cells[mi].alive = false;
+        m.cells[ca].alive = false;
+        m.cells[cb].alive = false;
+        n += 1;
+    }
+    n
+}

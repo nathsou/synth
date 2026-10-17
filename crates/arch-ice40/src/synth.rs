@@ -40,6 +40,12 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let mut log = Vec::new();
     let t = Instant::now();
     opt::clean(&mut m)?;
+    let merged = opt::merge_identical(&mut m);
+    let shared = opt::share_arith(&mut m);
+    opt::clean(&mut m)?;
+    opt::merge_identical(&mut m);
+    opt::clean(&mut m)?;
+    log.push(format!("{merged} duplicate cells merged, {shared} arithmetic operations shared"));
     let n = dff::extract_controls(&mut m);
     log.push(format!("{n} flip-flop bits with enable/reset"));
     mem::merge_write_ports(&mut m);
@@ -81,6 +87,18 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         net.ffs.len(),
         net.carries.len()
     ));
+    if std::env::var("SYNTH_DEBUG").is_ok() {
+        let w: Vec<String> = net
+            .carries
+            .iter()
+            .map(|c| format!("{}{}", c.a.len(), if c.sum.is_empty() { "c" } else { "" }))
+            .collect();
+        log.push(format!("carry chains: {}", w.join(" ")));
+    }
+    if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
+        // Debugging aid: the graph about to be mapped, for other tools.
+        let _ = std::fs::write(path, net.aig.to_aiger());
+    }
     let t = Instant::now();
     let mapping = lutmap::map(&net.aig, &opts.map);
     log.push(format!(
@@ -260,6 +278,9 @@ struct Emitter<'a> {
     nl: Netlist,
     src: Vec<NetId>,
     lut_of: FxHashMap<u32, (NetId, Vec<u32>, u64)>,
+    /// Mapped nodes whose LUT outputs the complement (chosen when most
+    /// uses outside the LUT network want the complement).
+    phase: FxHashMap<u32, bool>,
     inverted: FxHashMap<u32, NetId>,
     pads: Vec<NetId>,
     zero: Option<NetId>,
@@ -295,6 +316,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
         nl: Netlist::new(),
         src: Vec::new(),
         lut_of: FxHashMap::default(),
+        phase: FxHashMap::default(),
         inverted: FxHashMap::default(),
         pads: Vec::new(),
         zero: None,
@@ -309,15 +331,28 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
         let n = e.nl.add_net(&format!("$pad{p}"));
         e.pads.push(n);
     }
-    // LUTs.
+    // LUTs, each in the polarity most of its sinks want (LUT users absorb
+    // either).
+    let mut refs: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
+    for o in &net.aig.outputs {
+        let r = refs.entry(o.node()).or_default();
+        if o.is_compl() {
+            r.1 += 1;
+        } else {
+            r.0 += 1;
+        }
+    }
     for l in &mapping.luts {
         let o = e.nl.add_net(&format!("$n{}", l.node));
         e.lut_of.insert(l.node, (o, l.leaves.clone(), l.truth));
+        let (pos, neg) = refs.get(&l.node).copied().unwrap_or_default();
+        e.phase.insert(l.node, neg > pos);
     }
     for l in &mapping.luts {
         let out = e.lut_of[&l.node].0;
         let ins: Vec<NetId> = l.leaves.iter().map(|&x| e.node_net(x)).collect::<Result<_, _>>()?;
-        e.lut(&format!("$lut{}", l.node), &ins, l.truth, out)?;
+        let truth = e.net_truth(l.node, &l.leaves, l.truth, false);
+        e.lut(&format!("$lut{}", l.node), &ins, truth, out)?;
     }
     // Ports.
     for p in &net.ports {
@@ -482,7 +517,32 @@ impl Emitter<'_> {
         n
     }
 
-    /// The net carrying the (positive) value of an AIG node.
+    fn phase(&self, node: u32) -> bool {
+        self.phase.get(&node).copied().unwrap_or(false)
+    }
+
+    /// Truth table over the leaves' nets (which carry complemented values
+    /// for leaves in negative phase) computing node `root`, complemented if
+    /// the node's phase (xor `invert`) says so.
+    fn net_truth(&self, root: u32, leaves: &[u32], truth: u64, invert: bool) -> u64 {
+        let k = leaves.len();
+        let mask: usize =
+            leaves.iter().enumerate().map(|(j, &l)| (self.phase(l) as usize) << j).sum();
+        let mut t = 0u64;
+        for x in 0..(1usize << k) {
+            if (truth >> (x ^ mask)) & 1 == 1 {
+                t |= 1 << x;
+            }
+        }
+        if self.phase(root) ^ invert {
+            let all = if k >= 6 { u64::MAX } else { (1u64 << (1 << k)) - 1 };
+            t = !t & all;
+        }
+        t
+    }
+
+    /// The net of an AIG node: its value, or its complement for mapped
+    /// nodes in negative phase.
     fn node_net(&mut self, node: u32) -> Result<NetId, String> {
         match self.net.aig.nodes[node as usize] {
             Node::Const => Ok(self.konst(false)),
@@ -504,7 +564,7 @@ impl Emitter<'_> {
             return Ok(self.konst(l == Lit::TRUE));
         }
         let n = self.node_net(l.node())?;
-        if !l.is_compl() {
+        if l.is_compl() == self.phase(l.node()) {
             return Ok(n);
         }
         if let Some(&x) = self.inverted.get(&l.node()) {
@@ -512,13 +572,12 @@ impl Emitter<'_> {
         }
         let out = self.nl.add_net(&format!("$inv{}", l.node()));
         match self.lut_of.get(&l.node()).cloned() {
-            // A second LUT with the complemented function.
+            // A second LUT computing the other polarity.
             Some((_, leaves, truth)) => {
                 let ins: Vec<NetId> =
                     leaves.iter().map(|&x| self.node_net(x)).collect::<Result<_, _>>()?;
-                let mask =
-                    if leaves.len() >= 6 { u64::MAX } else { (1u64 << (1 << leaves.len())) - 1 };
-                self.lut(&format!("$lutn{}", l.node()), &ins, !truth & mask, out)?;
+                let t = self.net_truth(l.node(), &leaves, truth, true);
+                self.lut(&format!("$lutn{}", l.node()), &ins, t, out)?;
             }
             None => self.lut(&format!("$not{}", l.node()), &[n], 0b01, out)?,
         }

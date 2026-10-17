@@ -29,6 +29,10 @@ struct Lower<'a> {
     /// Connection source of a bit (`lhs <- rhs`).
     alias: FxHashMap<SigBit, SigBit>,
     pads: FxHashMap<SigBit, u32>,
+    /// Signal bits that something reads (after resolving connections).
+    used: synth_core::FxHashSet<SigBit>,
+    /// AND nodes created per cell kind (`SYNTH_DEBUG`).
+    profile: Option<FxHashMap<String, usize>>,
 }
 
 /// Lowers `m` (memories and latches must have been removed) to a logic
@@ -42,6 +46,8 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
         driver: FxHashMap::default(),
         alias: FxHashMap::default(),
         pads: FxHashMap::default(),
+        profile: std::env::var("SYNTH_DEBUG").ok().map(|_| FxHashMap::default()),
+        used: Default::default(),
     };
     if let Some(mem) = m.memories.iter().find(|m| m.alive) {
         return Err(format!("memory {} was not mapped", mem.name));
@@ -51,6 +57,19 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
             l.alias.insert(*a, *b);
         }
     }
+    let mut used = Vec::new();
+    for c in m.cells.iter().filter(|c| c.alive) {
+        c.for_each_input(|b| used.push(b));
+    }
+    for (_, rhs) in &m.connections {
+        used.extend(rhs.iter().copied());
+    }
+    for w in m.ports() {
+        if m.wires[w].port.is_some_and(|(d, _)| d != PortDir::Input) {
+            used.extend(m.wire_sig(w).iter().copied());
+        }
+    }
+    l.used = used.into_iter().map(|b| l.resolve(b)).collect();
     // Sources: input ports, flip-flop outputs, instance outputs.
     let mut ports = Vec::new();
     for w in m.ports() {
@@ -188,6 +207,11 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
             _ => {}
         }
     }
+    if let Some(p) = &l.profile {
+        let mut v: Vec<_> = p.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("debug: AND nodes by cell kind: {v:?}");
+    }
     Ok(l.net)
 }
 
@@ -275,6 +299,24 @@ impl Lower<'_> {
     }
 
     fn lower_cell(&mut self, ci: CellId) -> Result<(), String> {
+        let before = self.net.aig.nodes.len();
+        self.lower_cell_inner(ci)?;
+        if let Some(p) = self.profile.as_mut() {
+            let c = &self.m.cells[ci];
+            let kind = match &c.kind {
+                CellKind::Binary { op, .. } => format!("{op:?}"),
+                CellKind::Unary { op, .. } => format!("{op:?}"),
+                CellKind::Mux { .. } => "Mux".into(),
+                CellKind::Pmux { .. } => "Pmux".into(),
+                CellKind::Shiftx { .. } => "Shiftx".into(),
+                _ => "other".into(),
+            };
+            *p.entry(kind).or_default() += self.net.aig.nodes.len() - before;
+        }
+        Ok(())
+    }
+
+    fn lower_cell_inner(&mut self, ci: CellId) -> Result<(), String> {
         let cell = &self.m.cells[ci];
         match &cell.kind {
             CellKind::Unary { op, a, y } => {
@@ -297,8 +339,15 @@ impl Lower<'_> {
                 self.set(y, v);
             }
             CellKind::Binary { op, signed, a, b, y } => {
-                let (av, bv) = (self.sig(a)?, self.sig(b)?);
-                let v = self.binary(*op, *signed, av, bv, y.width())?;
+                let (mut av, mut bv) = (self.sig(a)?, self.sig(b)?);
+                let mut yw = y.width();
+                // Arithmetic only up to the highest result bit anyone reads.
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+                    yw = y.iter().rposition(|b| self.used.contains(b)).map_or(0, |i| i + 1);
+                    av.truncate(yw);
+                    bv.truncate(yw);
+                }
+                let v = self.binary(*op, *signed, av, bv, yw)?;
                 let v = fit(v, y.width());
                 self.set(y, v);
             }
@@ -468,6 +517,18 @@ impl Lower<'_> {
     /// `a + b + cin`, both `a.len()` bits; returns the sum and carry out.
     fn add(&mut self, a: &[Lit], b: &[Lit], cin: Lit) -> (Vec<Lit>, Lit) {
         let w = a.len();
+        // Low bits where `b` equals the (constant) carry pass `a` through
+        // unchanged and keep the carry: `x + 0 + 0` and `x + 1 + 1`.
+        let mut k = 0;
+        while k < w && cin.is_const() && b[k] == cin {
+            k += 1;
+        }
+        if k > 0 {
+            let (hs, c) = self.add(&a[k..], &b[k..], cin);
+            let mut s = a[..k].to_vec();
+            s.extend(hs);
+            return (s, c);
+        }
         if self.opts.carry_min_width.is_some_and(|m| w >= m) {
             return self.carry_chain(a, b, cin, true);
         }
@@ -483,7 +544,8 @@ impl Lower<'_> {
     }
 
     fn carry_out(&mut self, a: &[Lit], b: &[Lit], cin: Lit) -> Lit {
-        if self.opts.carry_min_width.is_some_and(|m| a.len() >= m + 2) {
+        let konst = |v: &[Lit]| v.iter().all(|l| l.is_const());
+        if self.opts.carry_min_width.is_some_and(|m| a.len() >= m + 2) && !konst(a) && !konst(b) {
             return self.carry_chain(a, b, cin, false).1;
         }
         let g = &mut self.net.aig;
