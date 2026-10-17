@@ -1,0 +1,11 @@
+set_io clk 15
+set_io btn 53
+set_io led[0] 56
+set_io led[1] 57
+set_io led[2] 59
+set_io led[3] 60
+set_io led[4] 3
+set_io led[5] 4
+set_io led[6] 7
+set_io led[7] 8
+set_io tx 74

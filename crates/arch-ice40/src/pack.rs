@@ -557,49 +557,63 @@ fn drive_constants(nl: &mut Netlist) -> Result<(), String> {
     Ok(())
 }
 
-fn is_clock_pin(kind: &str, pin: &str) -> bool {
-    matches!((kind, pin), (LC, "CLK") | (RAM, "RCLK" | "WCLK") | (IO, "INPUT_CLK" | "OUTPUT_CLK"))
+/// Which global networks can drive a control pin directly.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GlobalClass {
+    /// Clock pins: any global network.
+    Clock,
+    /// Set/reset-type pins: even global networks.
+    Reset,
+    /// Clock-enable-type pins: odd global networks.
+    Enable,
 }
 
-fn is_control_pin(kind: &str, pin: &str) -> bool {
-    matches!(
-        (kind, pin),
-        (LC, "CEN" | "SR") | (RAM, "RCLKE" | "WCLKE" | "RE" | "WE") | (IO, "CLOCK_ENABLE")
-    )
+/// Classifies a cell pin as a global-network control input.
+pub fn global_class(kind: &str, pin: &str) -> Option<GlobalClass> {
+    match (kind, pin) {
+        (LC, "CLK") | (RAM, "RCLK" | "WCLK") | (IO, "INPUT_CLK" | "OUTPUT_CLK") => Some(GlobalClass::Clock),
+        (LC, "SR") | (RAM, "RE" | "WE") | (IO, "LATCH_INPUT_VALUE") => Some(GlobalClass::Reset),
+        (LC, "CEN") | (RAM, "RCLKE" | "WCLKE") | (IO, "CLOCK_ENABLE") => Some(GlobalClass::Enable),
+        _ => None,
+    }
 }
 
 /// Inserts `SB_GB` global buffers for clocks and high-fanout control nets
 /// (at most eight globals, counting explicitly instantiated ones).
+///
+/// A global network reaches clock pins everywhere, but only even networks
+/// reach set/reset pins and only odd ones clock enables, so each promoted
+/// net carries a single class of users; the others stay on fabric routing.
 fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), String> {
     let mut used = nl.live_cells().filter(|&c| nl.cell_kind(c) == GB).count();
-    // Nets already driven by a global buffer.
-    let mut candidates: Vec<(usize, bool, NetId)> = Vec::new();
+    let mut candidates: Vec<(usize, GlobalClass, NetId)> = Vec::new();
     for n in nl.live_nets() {
         let net = &nl.nets[n];
         let Some(drv) = net.driver else { continue };
         if nl.cell_kind(drv.cell) == GB {
             continue;
         }
-        let (mut clocks, mut controls) = (0, 0);
+        let (mut clocks, mut resets, mut enables) = (0, 0, 0);
         for p in &net.users {
-            let kind = nl.cell_kind(p.cell);
             let pin = port_base(nl.str(nl.cells[p.cell].pins[p.pin as usize].name));
-            if is_clock_pin(kind, pin) {
-                clocks += 1;
-            } else if is_control_pin(kind, pin) {
-                controls += 1;
+            match global_class(nl.cell_kind(p.cell), pin) {
+                Some(GlobalClass::Clock) => clocks += 1,
+                Some(GlobalClass::Reset) => resets += 1,
+                Some(GlobalClass::Enable) => enables += 1,
+                None => {}
             }
         }
         if clocks > 0 {
-            candidates.push((clocks + controls + 1_000_000, true, n));
-        } else if controls > 32 {
-            candidates.push((controls, false, n));
+            candidates.push((clocks + 1_000_000, GlobalClass::Clock, n));
+        } else if resets.max(enables) > 32 {
+            let class = if resets >= enables { GlobalClass::Reset } else { GlobalClass::Enable };
+            candidates.push((resets.max(enables), class, n));
         }
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
-    for (_, is_clock, n) in candidates {
+    for (_, class, n) in candidates {
         if used >= 8 {
-            if is_clock {
+            if class == GlobalClass::Clock {
                 report.messages.push(format!(
                     "warning: clock {} not promoted to a global network (all 8 in use)",
                     nl.str(nl.nets[n].name)
@@ -613,18 +627,17 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
         let gnet = nl.add_net(&format!("{name}$glb"));
         nl.add_pin(gb, "USER_SIGNAL_TO_GLOBAL_BUFFER", Dir::Input, None).unwrap();
         nl.add_pin(gb, "GLOBAL_BUFFER_OUTPUT", Dir::Output, Some(gnet)).unwrap();
-        // Clock and control users move to the global; data users stay.
         let users = nl.nets[n].users.clone();
         for p in users {
             let kind = nl.cell_kind(p.cell).to_string();
             let pin = port_base(nl.str(nl.cells[p.cell].pins[p.pin as usize].name)).to_string();
-            if is_clock_pin(&kind, &pin) || is_control_pin(&kind, &pin) {
+            if global_class(&kind, &pin) == Some(class) {
                 nl.disconnect(p);
                 nl.connect(p, gnet).map_err(|e| e.0)?;
             }
         }
         nl.connect(pin_ref(nl, gb, "USER_SIGNAL_TO_GLOBAL_BUFFER").unwrap(), n).map_err(|e| e.0)?;
-        report.messages.push(format!("promoted {name} to a global network"));
+        report.messages.push(format!("promoted {name} to a global network ({class:?})"));
     }
     Ok(())
 }

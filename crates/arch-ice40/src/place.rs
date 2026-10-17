@@ -12,7 +12,7 @@ use synth_netlist::{CellId, Dir, NetId, Netlist, Param, PinRef};
 
 use crate::arch::{Arch, BelId, BelKind};
 use crate::device::TileKind;
-use crate::pack::{GB, IO, LC, Packed, RAM};
+use crate::pack::{GB, GlobalClass, IO, LC, Packed, RAM, global_class};
 
 /// Placement options.
 #[derive(Clone, Debug)]
@@ -200,22 +200,31 @@ fn assign_globals(
     }
     for gb in rest {
         let out = nl.pin_net(gb, "GLOBAL_BUFFER_OUTPUT");
-        let (mut sr, mut cen) = (false, false);
+        let (mut reset, mut enable) = (false, false);
         if let Some(n) = out {
             for p in &nl.nets[n].users {
-                match nl.str(nl.cells[p.cell].pins[p.pin as usize].name) {
-                    "SR" => sr = true,
-                    "CEN" => cen = true,
+                let pin = nl.str(nl.cells[p.cell].pins[p.pin as usize].name);
+                match global_class(nl.cell_kind(p.cell), crate::cells::port_base(pin)) {
+                    Some(GlobalClass::Reset) => reset = true,
+                    Some(GlobalClass::Enable) => enable = true,
                     _ => {}
                 }
             }
         }
-        let preferred = |g: usize| {
-            (sr && g.is_multiple_of(2)) || (cen && !g.is_multiple_of(2)) || (!sr && !cen)
-        };
-        let g = (0..8)
-            .find(|&g| !taken[g] && preferred(g))
-            .or_else(|| (0..8).find(|&g| !taken[g]))
+        if reset && enable {
+            log.push(format!(
+                "warning: global {} drives both set/reset and clock-enable pins; some may not route",
+                nl.str(nl.cells[gb].name)
+            ));
+        }
+        let fits = |g: usize| (!reset || g.is_multiple_of(2)) && (!enable || !g.is_multiple_of(2));
+        // Plain clocks take the networks nobody else can use first.
+        let order: Vec<usize> = if !reset && !enable { vec![0, 2, 4, 6, 1, 3, 5, 7] } else { (0..8).collect() };
+        let g = order
+            .iter()
+            .copied()
+            .find(|&g| !taken[g] && fits(g))
+            .or_else(|| order.iter().copied().find(|&g| !taken[g]))
             .ok_or("more than 8 global networks needed")?;
         taken[g] = true;
         let bel = arch.bels_of(BelKind::Gb).find(|&b| arch.bel(b).z == 2 + g as u8).unwrap();

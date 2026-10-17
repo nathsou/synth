@@ -68,7 +68,7 @@ def main():
     decl = []
     for base, (d, idxs) in vectors.items():
         width = (max(i for i in idxs if i is not None) + 1) if None not in idxs else 1
-        rng = f"[{width-1}:0] " if None not in idxs else ""
+        rng = f"[{width-1}:0] "
         if d == "input":
             tb.append(f"  reg {rng}{base} = 0;")
         else:
@@ -85,15 +85,18 @@ def main():
         else:
             conns_chip += [f".\\{b}[{i}] ({sig}[{i}])" for i in sorted(idxs)]
     tb.append(f"  chip dut_chip ({', '.join(conns_chip)});")
-    tb.append("  integer cyc, errors;")
+    tb.append("  integer cyc, errors, k;")
     tb.append("  initial begin")
     tb.append("    errors = 0;")
     tb.append(f"    for (cyc = 0; cyc < {a.cycles}; cyc = cyc + 1) begin")
     tb.append(f"      #5 {a.clock} = 1;")
     tb.append(f"      #5 {a.clock} = 0;")
     outs = [b for b, d, _, _ in decl if d == "output"]
+    widths = {b: w for b, d, _, w in decl}
+    # RTL bits that are still x (uninitialized registers) are don't-cares.
     for b in outs:
-        tb.append(f"      if (rtl_{b} !== chip_{b}) begin errors = errors + 1; "
+        tb.append(f"      for (k = 0; k < {widths[b]}; k = k + 1)")
+        tb.append(f"        if (rtl_{b}[k] !== 1'bx && rtl_{b}[k] !== chip_{b}[k]) begin errors = errors + 1; "
                   f"if (errors < 10) $display(\"cycle %0d: {b} rtl=%b chip=%b\", cyc, rtl_{b}, chip_{b}); end")
     ins = [b for b, d, _, _ in decl if d == "input" and b != a.clock]
     tb.append("      // random stimulus with random hold times")

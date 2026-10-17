@@ -41,3 +41,21 @@ jobs:
           rustup default 1.88
       - name: Check
         run: cargo check --workspace --all-targets
+
+  bitsim:
+    name: bitstream simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install reference tools (test oracles only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends yosys fpga-icestorm iverilog
+      - name: Build
+        run: cargo build --release -p synth
+      - name: Bitstream-level simulation
+        run: tools/ci_bitsim.sh
