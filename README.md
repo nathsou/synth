@@ -23,18 +23,25 @@ target/release/synth build design.v --top top \
 
 ## Status
 
-**iCE40 works end to end.** Verilog-2005 elaboration, logic synthesis (AIG,
-LUT mapping, carry chains, block RAM inference), packing, placement, routing
-and bitstream generation are implemented for the iCE40 HX1K and HX8K.
+**iCE40 works end to end.** Verilog-2005 elaboration, logic synthesis (AIG
+with SAT sweeping, balancing, refactoring and structural choices; sequential
+clean-up; LUT mapping, carry chains, block RAM inference), packing,
+timing-driven placement and routing, static timing analysis and bitstream
+generation are implemented for the iCE40 HX1K and HX8K.
 [examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
 (Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
 
 Every stage is checked by simulation against the source RTL on four RISC-V
 cores (PicoRV32, SERV, DarkRISCV, Hazard3), and the bitstreams by simulating
-the decoded configuration. Quality of results is close to Yosys + nextpnr
-and improving: the PicoRV32 SoC takes 1769 logic cells at 63.5 MHz (Yosys +
-nextpnr: 1588 cells, 66.2 MHz). Timing-driven placement and static timing
-analysis are next; Artix-7 follows.
+the decoded configuration. Quality of results against Yosys + nextpnr on the
+HX8K (`tools/qor.sh` compares synthesis alone on more designs):
+
+| Design               | synth                | Yosys + nextpnr      |
+|----------------------|----------------------|----------------------|
+| PicoRV32 SoC         | 1651 cells, 63 MHz   | 1588 cells, 66 MHz   |
+| Hazard3 SoC (Cu)     | 2359 cells, 31 MHz   | 2278 cells, 35 MHz   |
+
+Artix-7 is next.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.

@@ -30,7 +30,7 @@ synth build top.v $(sed -n "s|^file |$H/|p" $H/hazard3.f) -I $H --top top \
   --device hx8k --package cb132 --pcf alchitry_cu.pcf -o hazard3.bin
 ```
 
-About 3500 of 7680 logic cells and 20 of 32 block RAMs.
+About 2400 of 7680 logic cells and 20 of 32 block RAMs.
 
 ## Nandland Go Board: SERV (bit-serial RV32I)
 
