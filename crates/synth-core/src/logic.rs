@@ -101,9 +101,7 @@ impl LogicVec {
 
     pub fn ones(width: usize) -> Self {
         let mut v = Self::zeros(width);
-        for w in &mut v.val {
-            *w = u64::MAX;
-        }
+        v.val.fill(u64::MAX);
         v.mask();
         v
     }
@@ -111,9 +109,7 @@ impl LogicVec {
     /// All-x vector.
     pub fn xs(width: usize) -> Self {
         let mut v = Self::zeros(width);
-        for w in &mut v.unk {
-            *w = u64::MAX;
-        }
+        v.unk.fill(u64::MAX);
         v.mask();
         v
     }
