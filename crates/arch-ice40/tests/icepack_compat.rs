@@ -46,8 +46,8 @@ fn blocks(text: &str) -> Vec<String> {
         }
     }
     out.retain(|b| {
-        let zero_ram = b.starts_with(".ram_data")
-            && b.lines().skip(1).all(|l| l.bytes().all(|c| c == b'0'));
+        let zero_ram =
+            b.starts_with(".ram_data") && b.lines().skip(1).all(|l| l.bytes().all(|c| c == b'0'));
         !(b.starts_with(".comment") || b.starts_with(".sym") || zero_ram)
     });
     out.sort();

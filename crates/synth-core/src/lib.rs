@@ -4,7 +4,9 @@
 //! - [`hash`]: a deterministic fast hasher and map/set aliases.
 //! - [`ordered`]: insertion-ordered maps and sets for deterministic iteration.
 //! - [`intern`]: string interning.
+//! - [`bin`]: a compact binary serialization format for databases.
 
+pub mod bin;
 pub mod hash;
 pub mod id;
 pub mod intern;

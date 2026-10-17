@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 synth-core = { path = "crates/synth-core" }
 arch-ice40 = { path = "crates/arch-ice40" }
+synth-dbgen = { path = "crates/synth-dbgen" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
