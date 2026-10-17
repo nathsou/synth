@@ -477,3 +477,109 @@ pub fn share_arith(m: &mut Module) -> usize {
     }
     n
 }
+
+/// Rewrites priority chains of multiplexers selected by comparisons of one
+/// narrow signal with constants (`s == 0 ? a : s == 3 ? b : c`, the shape of
+/// `case` statements and `?:` chains) into a multiplexer tree indexed by the
+/// signal's bits, which maps to far fewer LUTs. Returns the number of chains
+/// rewritten.
+pub fn chains_to_trees(m: &mut Module) -> usize {
+    use crate::BinaryOp as B;
+    use synth_core::FxHashMap;
+    const MAX_SEL: usize = 6;
+    let uses = use_counts(m);
+    let mut driver: FxHashMap<SigBit, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive {
+            for o in c.outputs() {
+                for &b in o.iter() {
+                    driver.insert(b, ci);
+                }
+            }
+        }
+    }
+    // The (signal, constant) a select bit compares, if it is such a test.
+    let test = |m: &Module, s: SigBit| -> Option<(Sig, u64)> {
+        let ci = *driver.get(&s)?;
+        let CellKind::Binary { op: B::Eq, a, b, .. } = &m.cells[ci].kind else { return None };
+        let (sig, c) = match (a.as_const(), b.as_const()) {
+            (None, Some(c)) => (a.clone(), c),
+            (Some(c), None) => (b.clone(), c),
+            _ => return None,
+        };
+        if sig.width() > MAX_SEL || sig.iter().any(|b| matches!(b, SigBit::Const(_))) {
+            return None;
+        }
+        Some((sig, c.to_u64()?))
+    };
+    // Chain muxes: Mux cells driving exactly their `y`.
+    let mut mux_by_y: FxHashMap<Vec<SigBit>, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive
+            && let CellKind::Mux { y, .. } = &c.kind
+        {
+            mux_by_y.insert(y.0.clone(), ci);
+        }
+    }
+    let exclusive = |s: &Sig| s.iter().all(|b| uses.get(b).copied() == Some(1));
+    // Muxes that continue a chain (they are another chain mux's `a`).
+    let mut inner: synth_core::FxHashSet<CellId> = Default::default();
+    for c in m.cells.iter().filter(|c| c.alive) {
+        if let CellKind::Mux { a, .. } = &c.kind
+            && let Some(&ni) = mux_by_y.get(&a.0)
+            && exclusive(a)
+        {
+            inner.insert(ni);
+        }
+    }
+    let heads: Vec<CellId> = mux_by_y.values().copied().filter(|ci| !inner.contains(ci)).collect();
+    let mut n = 0;
+    for head in heads {
+        let mut items: Vec<(u64, Sig)> = Vec::new();
+        let mut sel: Option<Sig> = None;
+        let mut cur = head;
+        let default = loop {
+            let CellKind::Mux { a, b, s, .. } = &m.cells[cur].kind else { unreachable!() };
+            let Some((sig, c)) = test(m, *s) else {
+                // Not a test: the chain ends above this mux.
+                break m.cells[cur].outputs()[0].clone();
+            };
+            if sel.as_ref().is_some_and(|x| *x != sig) {
+                break m.cells[cur].outputs()[0].clone();
+            }
+            sel = Some(sig);
+            items.push((c, b.clone()));
+            match mux_by_y.get(&a.0) {
+                Some(&next) if exclusive(a) && next != head => cur = next,
+                _ => break a.clone(),
+            }
+        };
+        let Some(sel) = sel else { continue };
+        if items.len() < 3 {
+            continue;
+        }
+        let width = default.width();
+        let leaves: Vec<Sig> = (0..1u64 << sel.width())
+            .map(|v| {
+                items.iter().find(|(c, _)| *c == v).map_or(default.clone(), |(_, x)| x.clone())
+            })
+            .collect();
+        fn tree(m: &mut Module, sel: &[SigBit], leaves: &[Sig], bit: usize) -> Sig {
+            if leaves.len() == 1 {
+                return leaves[0].clone();
+            }
+            let even: Vec<Sig> = leaves.iter().step_by(2).cloned().collect();
+            let odd: Vec<Sig> = leaves.iter().skip(1).step_by(2).cloned().collect();
+            let a = tree(m, sel, &even, bit + 1);
+            let b = tree(m, sel, &odd, bit + 1);
+            m.mux(sel[bit], a, b)
+        }
+        let _ = width;
+        let y = m.cells[head].outputs()[0].clone();
+        let t = tree(m, &sel.0, &leaves, 0);
+        m.cells[head].alive = false;
+        m.connect(y, t);
+        n += 1;
+    }
+    n
+}

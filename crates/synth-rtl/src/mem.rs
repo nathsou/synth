@@ -92,9 +92,20 @@ pub fn merge_read_ffs(m: &mut Module) -> usize {
             if m.memories[mi].reads[ri].clk.is_some() {
                 continue;
             }
-            if merge_data_ff(m, mi, ri) || merge_addr_ff(m, mi, ri) {
-                n += 1;
+            let how = if merge_data_ff(m, mi, ri) {
+                "data"
+            } else if merge_addr_ff(m, mi, ri) {
+                "address"
+            } else {
+                continue;
+            };
+            if std::env::var("SYNTH_DEBUG").is_ok() {
+                eprintln!(
+                    "debug: memory {} read port {ri}: {how} register merged",
+                    m.memories[mi].name
+                );
             }
+            n += 1;
         }
     }
     n
@@ -225,8 +236,22 @@ pub fn emulate_transparency(m: &mut Module, mi: MemId) {
             let aw = wr.addr.width().max(rd.addr.width());
             let (wa, ra) = (wr.addr.extend(aw, false), rd.addr.extend(aw, false));
             let hit = m.binary(BinaryOp::Eq, false, wa, ra).0[0];
-            let sel: Sig = wr.en.iter().map(|&e| m.and1(e, hit)).collect();
-            let sel_q = register(m, clk, rd.en, &sel);
+            // One registered hit flag per distinct write-enable signal (all
+            // bits share one for word-wide writes).
+            let mut flags: Vec<(SigBit, SigBit)> = Vec::new();
+            let mut sel_q = Sig::new();
+            for &e in wr.en.iter() {
+                let f = match flags.iter().find(|(x, _)| *x == e) {
+                    Some(&(_, f)) => f,
+                    None => {
+                        let h = m.and1(e, hit);
+                        let f = register(m, clk, rd.en, &Sig::bit(h)).0[0];
+                        flags.push((e, f));
+                        f
+                    }
+                };
+                sel_q.push(f);
+            }
             let data_q = register(m, clk, rd.en, &wr.data);
             let base = result.take().unwrap_or_else(|| raw.clone());
             let mut y = Sig::new();

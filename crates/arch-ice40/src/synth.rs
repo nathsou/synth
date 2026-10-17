@@ -42,10 +42,14 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     opt::clean(&mut m)?;
     let merged = opt::merge_identical(&mut m);
     let shared = opt::share_arith(&mut m);
+    let trees = opt::chains_to_trees(&mut m);
+    let fsm = synth_rtl::fsm::simplify_state_compares(&mut m);
     opt::clean(&mut m)?;
     opt::merge_identical(&mut m);
     opt::clean(&mut m)?;
-    log.push(format!("{merged} duplicate cells merged, {shared} arithmetic operations shared"));
+    log.push(format!(
+        "{merged} duplicate cells merged, {shared} arithmetic operations shared, {trees} mux chains as trees, {fsm} state comparisons simplified"
+    ));
     let n = dff::extract_controls(&mut m);
     log.push(format!("{n} flip-flop bits with enable/reset"));
     mem::merge_write_ports(&mut m);
@@ -95,6 +99,40 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
             .collect();
         log.push(format!("carry chains: {}", w.join(" ")));
     }
+    if std::env::var("SYNTH_DEBUG").is_ok() {
+        // AND nodes in each flip-flop's exclusive input cone, by register.
+        let g = &net.aig;
+        let refs = g.fanout_counts();
+        let mut cost: FxHashMap<String, usize> = FxHashMap::default();
+        for ff in &net.ffs {
+            let mut seen = synth_core::FxHashSet::default();
+            let mut stack: Vec<u32> = [Some(ff.d), ff.en, ff.srst.map(|x| x.0)]
+                .into_iter()
+                .flatten()
+                .map(|k| g.outputs[k].node())
+                .collect();
+            let mut n = 0;
+            while let Some(x) = stack.pop() {
+                if !seen.insert(x) {
+                    continue;
+                }
+                if let Some((a, b)) = g.fanins(x) {
+                    n += 1;
+                    for f in [a.node(), b.node()] {
+                        if refs[f as usize] <= 1 {
+                            stack.push(f);
+                        }
+                    }
+                }
+            }
+            let name = ff.name.trim_end_matches("$dff").to_string();
+            *cost.entry(name).or_default() += n;
+        }
+        let mut v: Vec<_> = cost.into_iter().collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
+        v.truncate(25);
+        log.push(format!("exclusive input cones: {v:?}"));
+    }
     if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
         // Debugging aid: the graph about to be mapped, for other tools.
         let _ = std::fs::write(path, net.aig.to_aiger());
@@ -121,20 +159,72 @@ fn bram_ok(mem: &Memory, opts: &SynthOptions) -> bool {
         && mem.writes.iter().all(|w| w.clk.posedge)
 }
 
+/// Physical `RDATA`/`WDATA`/`MASK` pin of data bit `b` in a `w`-bit mode.
+fn bram_pin(w: usize, b: usize) -> usize {
+    const P2: [usize; 2] = [3, 11];
+    const P4: [usize; 4] = [1, 9, 5, 13];
+    const P8: [usize; 8] = [0, 8, 4, 12, 2, 10, 6, 14];
+    match w {
+        2 => P2[b],
+        4 => P4[b],
+        8 => P8[b],
+        // Bit-reversed, like the other modes' layout.
+        _ => (b & 1) << 3 | (b & 2) << 1 | (b & 4) >> 1 | (b & 8) >> 3,
+    }
+}
+
+/// The 11 physical address pins for word `word` (a signal of `abits` bits)
+/// in a `w`-bit mode: the logical address counts 2-bit units, and its three
+/// low bits go to the top pins in reverse.
+fn bram_addr(word: &Sig, w: usize) -> Sig {
+    let shift = (w / 2).trailing_zeros() as usize;
+    // Logical address A (11 bits) = word << shift.
+    let mut a = [SigBit::ZERO; 11];
+    for (i, &b) in word.iter().enumerate() {
+        if i + shift < 11 {
+            a[i + shift] = b;
+        }
+    }
+    // RADDR = {A[0], A[1], A[2], A[10:3]}: pins 0..7 carry A[3..10].
+    let mut pins = a[3..11].to_vec();
+    pins.extend([a[2], a[1], a[0]]);
+    Sig(pins)
+}
+
 /// Replaces memory `mi` (synchronous, non-transparent reads; at most one
-/// write port) with `SB_RAM40_4K` blocks in 256x16 mode: one set per read
-/// port, banked by the address bits above 8. Returns the number of blocks.
+/// write port) with `SB_RAM40_4K` blocks: one set per read port, in the
+/// 16/8/4/2-bit mode needing the fewest blocks, banked by the address bits
+/// above the block depth. Returns the number of blocks.
 fn map_bram(m: &mut Module, mi: MemId) -> usize {
     let mem = m.memories[mi].clone();
     let width = mem.width as usize;
     let depth = mem.depth as usize;
-    let cols = width.div_ceil(16);
-    let banks = depth.div_ceil(256);
+    let wr = mem.writes.first().cloned();
+    // Narrow modes have no bit mask: each column's bits must share an enable.
+    let uniform = |w: usize| {
+        wr.as_ref().is_none_or(|wr| (0..width).all(|b| wr.en.0[b] == wr.en.0[b - b % w]))
+    };
+    let (mode, _) = [16usize, 8, 4, 2]
+        .into_iter()
+        .filter(|&w| w == 16 || uniform(w))
+        .map(|w| (w, width.div_ceil(w) * depth.div_ceil(4096 / w)))
+        .min_by_key(|&(w, n)| (n, usize::MAX - 4096 / w))
+        .unwrap();
+    let cols = width.div_ceil(mode);
+    let wdepth = 4096 / mode;
+    let abits = wdepth.trailing_zeros() as usize;
+    let banks = depth.div_ceil(wdepth);
     let bank_bits = banks.next_power_of_two().trailing_zeros() as usize;
+    let mode_param = match mode {
+        16 => 0,
+        8 => 1,
+        4 => 2,
+        _ => 3,
+    };
     let mut count = 0;
-    // Word index (address minus offset), 8 + bank_bits wide.
+    // Word index (address minus offset), abits + bank_bits wide.
     let index = |m: &mut Module, addr: &Sig| -> Sig {
-        let w = 8 + bank_bits;
+        let w = abits + bank_bits;
         let a = addr.extend(w.max(addr.width()), false);
         let a = if mem.offset == 0 {
             a
@@ -144,57 +234,50 @@ fn map_bram(m: &mut Module, mi: MemId) -> usize {
         };
         Sig(a.0[..w].to_vec())
     };
-    let wr = mem.writes.first().cloned();
     let windex = wr.as_ref().map(|w| index(m, &w.addr));
     for rd in &mem.reads {
         let clk = rd.clk.unwrap();
         let rindex = index(m, &rd.addr);
-        // Data of each bank, then selected by the registered bank number.
         let mut bank_data: Vec<Sig> = Vec::new();
         for bank in 0..banks {
             let mut data = Sig::new();
             for col in 0..cols {
-                let lo = col * 16;
-                let n = (width - lo).min(16);
+                let lo = col * mode;
+                let n = (width - lo).min(mode);
                 let rdata = m.new_sig(16);
-                data.0.extend_from_slice(&rdata.0[..n]);
-                let mut conns: Vec<(String, PortDir, Sig)> = Vec::new();
-                let raddr = Sig(rindex.0[..8].to_vec()).extend(11, false);
-                conns.push(("RDATA".into(), PortDir::Output, rdata));
-                conns.push(("RADDR".into(), PortDir::Input, raddr));
-                conns.push(("RCLK".into(), PortDir::Input, Sig::bit(clk.sig)));
-                conns.push(("RCLKE".into(), PortDir::Input, Sig::bit(SigBit::ONE)));
-                conns.push(("RE".into(), PortDir::Input, Sig::bit(rd.en)));
+                data.0.extend((0..n).map(|b| rdata.0[bram_pin(mode, b)]));
+                let raddr = bram_addr(&Sig(rindex.0[..abits].to_vec()), mode);
+                let mut conns: Vec<(String, PortDir, Sig)> = vec![
+                    ("RDATA".into(), PortDir::Output, rdata),
+                    ("RADDR".into(), PortDir::Input, raddr),
+                    ("RCLK".into(), PortDir::Input, Sig::bit(clk.sig)),
+                    ("RCLKE".into(), PortDir::Input, Sig::bit(SigBit::ONE)),
+                    ("RE".into(), PortDir::Input, Sig::bit(rd.en)),
+                ];
                 match (&wr, &windex) {
                     (Some(w), Some(wi)) => {
                         let in_bank = if banks == 1 {
                             SigBit::ONE
                         } else {
-                            let hi = Sig(wi.0[8..].to_vec());
+                            let hi = Sig(wi.0[abits..].to_vec());
                             m.eq_const(hi, &LogicVec::from_u64(bank as u64, bank_bits))
                         };
-                        let en: Vec<SigBit> = (0..16)
-                            .map(|i| if i < n { w.en.0[lo + i] } else { SigBit::ZERO })
-                            .collect();
-                        let uniform = en[..n].iter().all(|&e| e == en[0]);
-                        let any =
-                            if uniform { en[0] } else { m.reduce_bool(Sig(en[..n].to_vec())) };
+                        let en: Vec<SigBit> = (0..n).map(|i| w.en.0[lo + i]).collect();
+                        let same = en.iter().all(|&e| e == en[0]);
+                        let any = if same { en[0] } else { m.reduce_bool(Sig(en.clone())) };
                         let we = m.and1(any, in_bank);
-                        let mask: Sig = if uniform {
-                            Sig::zeros(16)
-                        } else {
-                            en.iter().map(|&e| m.not1(e)).collect()
-                        };
-                        let wdata: Sig = (0..16)
-                            .map(|i| if i < n { w.data.0[lo + i] } else { SigBit::ZERO })
-                            .collect();
-                        conns.push((
-                            "WADDR".into(),
-                            PortDir::Input,
-                            Sig(wi.0[..8].to_vec()).extend(11, false),
-                        ));
-                        conns.push(("WDATA".into(), PortDir::Input, wdata));
-                        conns.push(("MASK".into(), PortDir::Input, mask));
+                        let mut wdata = vec![SigBit::ZERO; 16];
+                        let mut mask = vec![SigBit::ZERO; 16];
+                        for b in 0..n {
+                            wdata[bram_pin(mode, b)] = w.data.0[lo + b];
+                            if !same {
+                                mask[bram_pin(mode, b)] = m.not1(en[b]);
+                            }
+                        }
+                        let waddr = bram_addr(&Sig(wi.0[..abits].to_vec()), mode);
+                        conns.push(("WADDR".into(), PortDir::Input, waddr));
+                        conns.push(("WDATA".into(), PortDir::Input, Sig(wdata)));
+                        conns.push(("MASK".into(), PortDir::Input, Sig(mask)));
                         conns.push(("WCLK".into(), PortDir::Input, Sig::bit(w.clk.sig)));
                         conns.push(("WCLKE".into(), PortDir::Input, Sig::bit(SigBit::ONE)));
                         conns.push(("WE".into(), PortDir::Input, Sig::bit(we)));
@@ -204,23 +287,36 @@ fn map_bram(m: &mut Module, mi: MemId) -> usize {
                         conns.push(("WCLKE".into(), PortDir::Input, Sig::bit(SigBit::ZERO)));
                     }
                 }
-                let mut params = vec![
-                    ("READ_MODE".to_string(), Attr::Const(LogicVec::from_u64(0, 2))),
-                    ("WRITE_MODE".to_string(), Attr::Const(LogicVec::from_u64(0, 2))),
-                ];
-                for k in 0..16 {
-                    let mut bits = vec![Logic::Zero; 256];
-                    for wd in 0..16 {
-                        let word = bank * 256 + k * 16 + wd;
-                        if word >= depth {
-                            continue;
-                        }
-                        for b in 0..n {
-                            if mem.init[word].get(lo + b) == Logic::One {
-                                bits[wd * 16 + b] = Logic::One;
-                            }
+                // Initial contents: logical bit `word * mode + b` of the block,
+                // sliced into INIT_0..F like the hardware expects.
+                let mut logical = vec![false; 4096];
+                for wd in 0..wdepth {
+                    let word = bank * wdepth + wd;
+                    if word >= depth {
+                        break;
+                    }
+                    for b in 0..n {
+                        if mem.init[word].get(lo + b) == Logic::One {
+                            logical[wd * mode + b] = true;
                         }
                     }
+                }
+                let mut params = vec![
+                    ("READ_MODE".to_string(), Attr::Const(LogicVec::from_u64(mode_param, 2))),
+                    ("WRITE_MODE".to_string(), Attr::Const(LogicVec::from_u64(mode_param, 2))),
+                ];
+                for k in 0..16usize {
+                    let bits: Vec<Logic> = (0..256usize)
+                        .map(|i| {
+                            let a = k << 8
+                                | (i >> 4) << 4
+                                | (i & 1) << 3
+                                | (i & 2) << 1
+                                | (i & 4) >> 1
+                                | (i & 8) >> 3;
+                            if logical[a] { Logic::One } else { Logic::Zero }
+                        })
+                        .collect();
                     params.push((format!("INIT_{k:X}"), Attr::Const(LogicVec::from_bits(&bits))));
                 }
                 m.add_cell(
@@ -239,7 +335,7 @@ fn map_bram(m: &mut Module, mi: MemId) -> usize {
             bank_data.pop().unwrap()
         } else {
             // The bank of the word being read, registered like the RAM output.
-            let sel = Sig(rindex.0[8..].to_vec());
+            let sel = Sig(rindex.0[abits..].to_vec());
             let q = m.new_sig(bank_bits);
             m.add_cell(
                 format!("{}$bank", mem.name),

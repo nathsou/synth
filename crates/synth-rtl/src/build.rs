@@ -80,8 +80,17 @@ impl Module {
         self.mux_impl(s, a, b, true)
     }
 
-    fn mux_impl(&mut self, s: SigBit, a: Sig, b: Sig, ternary: bool) -> Sig {
+    fn mux_impl(&mut self, s: SigBit, mut a: Sig, mut b: Sig, ternary: bool) -> Sig {
         debug_assert_eq!(a.width(), b.width());
+        // An unknown input bit may take the other input's value.
+        let unknown = |x: SigBit| matches!(x, SigBit::Const(Logic::X | Logic::Z));
+        for i in 0..a.width() {
+            if unknown(a.0[i]) {
+                a.0[i] = b.0[i];
+            } else if unknown(b.0[i]) {
+                b.0[i] = a.0[i];
+            }
+        }
         match s {
             SigBit::Const(Logic::Zero) => return a,
             SigBit::Const(Logic::One) => return b,

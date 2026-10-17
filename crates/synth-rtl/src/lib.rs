@@ -12,6 +12,7 @@
 pub mod build;
 pub mod dff;
 pub mod eval;
+pub mod fsm;
 pub mod mem;
 pub mod opt;
 pub mod verilog;

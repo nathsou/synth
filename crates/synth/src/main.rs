@@ -31,7 +31,7 @@ BUILD OPTIONS:
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
-              [--pass <clean|merge|share|dff|memff|memtrans|memregs|two-state>]...
+              [--pass <clean|merge|share|trees|fsm|dff|memff|memtrans|memregs|two-state>]...
 
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
@@ -262,6 +262,14 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             let n = opt::merge_identical(m);
             eprintln!("info: merge: {n} duplicate cells");
         }
+        "fsm" => {
+            let n = synth_rtl::fsm::simplify_state_compares(m);
+            eprintln!("info: fsm: {n} state comparisons simplified");
+        }
+        "trees" => {
+            let n = opt::chains_to_trees(m);
+            eprintln!("info: trees: {n} multiplexer chains as trees");
+        }
         "share" => {
             let n = opt::share_arith(m);
             eprintln!("info: share: {n} multiplexed operations shared");
@@ -291,7 +299,7 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "unknown pass `{name}` (clean, merge, share, dff, memff, memtrans, memregs, two-state)"
+                "unknown pass `{name}` (clean, merge, share, trees, fsm, dff, memff, memtrans, memregs, two-state)"
             ));
         }
     }
