@@ -641,6 +641,34 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
         let (pos, neg) = refs.get(&l.node).copied().unwrap_or_default();
         e.phase.insert(l.node, neg > pos);
     }
+    // A carry chain is self-dual: with every operand bit and the carry in
+    // complemented, it computes the complemented sums and carry out. Chains
+    // take the form needing fewer inverters for their operands, when only
+    // LUTs read their carry out (they absorb its complement); their sum LUTs
+    // then compute XNOR.
+    let flipped: Vec<bool> = net
+        .carries
+        .iter()
+        .map(|ch| {
+            let cout_read = ch.cout.is_some_and(|s| refs.contains_key(&net.aig.inputs[s as usize]));
+            let inverters = |flip: bool| {
+                let mut nodes: FxHashSet<u32> = FxHashSet::default();
+                for &k in ch.a.iter().chain(&ch.b).chain([&ch.cin]) {
+                    let l = net.aig.outputs[k].xor(flip);
+                    if !l.is_const() && l.is_compl() != e.phase(l.node()) {
+                        nodes.insert(l.node());
+                    }
+                }
+                nodes.len()
+            };
+            !cout_read && inverters(true) < inverters(false)
+        })
+        .collect();
+    for (ch, _) in net.carries.iter().zip(&flipped).filter(|(_, f)| **f) {
+        if let Some(s) = ch.cout {
+            e.phase.insert(net.aig.inputs[s as usize], true);
+        }
+    }
     for l in &mapping.luts {
         let out = e.lut_of[&l.node].0;
         let ins: Vec<NetId> = l.leaves.iter().map(|&x| e.node_net(x)).collect::<Result<_, _>>()?;
@@ -711,11 +739,13 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     let xor3: u64 = (0..16u64).map(|i| (((i >> 1) ^ (i >> 2) ^ (i >> 3)) & 1) << i).sum();
     let mut sums = Vec::new();
     for (ci, ch) in net.carries.iter().enumerate() {
-        let mut carry = e.sink(ch.cin)?;
+        let flip = flipped[ci];
+        let operand = |e: &mut Emitter, k: usize| e.lit_net(net.aig.outputs[k].xor(flip));
+        let mut carry = operand(&mut e, ch.cin)?;
         let w = ch.a.len();
         for i in 0..w {
-            let a = e.sink(ch.a[i])?;
-            let b = e.sink(ch.b[i])?;
+            let a = operand(&mut e, ch.a[i])?;
+            let b = operand(&mut e, ch.b[i])?;
             if let Some(&s) = ch.sum.get(i) {
                 let c = e.nl.add_cell(&format!("$alu{ci}_lut{i}"), "SB_LUT4");
                 e.pin(c, "I1", Dir::Input, Some(a))?;
@@ -723,8 +753,9 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
                 e.pin(c, "I3", Dir::Input, Some(carry))?;
                 let out = e.src[s as usize];
                 e.pin(c, "O", Dir::Output, Some(out))?;
-                e.nl.set_param(c, "LUT_INIT", lut_init(xor3, 4));
-                sums.push(SumLut { cell: c, a, b, carry, out });
+                let init = if flip { !xor3 & 0xffff } else { xor3 };
+                e.nl.set_param(c, "LUT_INIT", lut_init(init, 4));
+                sums.push(SumLut { cell: c, a, b, carry, out, xnor: flip });
             }
             let co = if i + 1 == w {
                 match ch.cout {
@@ -785,13 +816,15 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     Ok(e.nl)
 }
 
-/// The LUT computing bit `out = a ^ b ^ carry` of an adder on a carry chain.
+/// The LUT computing bit `out = a ^ b ^ carry` (complemented if `xnor`) of
+/// an adder on a carry chain.
 struct SumLut {
     cell: CellId,
     a: NetId,
     b: NetId,
     carry: NetId,
     out: NetId,
+    xnor: bool,
 }
 
 /// Folds each sum bit read only by one LUT into that LUT, when the LUT's
@@ -841,7 +874,7 @@ fn absorb_sums(nl: &mut Netlist, sums: &[SumLut]) -> usize {
                 } else if n == s.carry {
                     c
                 } else if n == s.out {
-                    a ^ b ^ c
+                    a ^ b ^ c ^ s.xnor as u64
                 } else if let Some(k) = nl.nets[n].constant {
                     (k == Const::One) as u64
                 } else {
@@ -995,5 +1028,111 @@ impl Emitter<'_> {
         }
         self.inverted.insert(l.node(), out);
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synth_logic::Aig;
+    use synth_logic::net::{Carry, Port};
+
+    /// Evaluates a combinational netlist of `SB_LUT4` and `SB_CARRY` cells:
+    /// the values of the output ports given those of the input ports.
+    fn evaluate(nl: &Netlist, inputs: &FxHashMap<String, bool>) -> FxHashMap<String, bool> {
+        let mut val: FxHashMap<NetId, bool> = FxHashMap::default();
+        for (n, net) in nl.nets.iter_enumerated() {
+            if let Some(k) = net.constant {
+                val.insert(n, k == Const::One);
+            }
+        }
+        let name = |c: CellId| nl.names.resolve(nl.cells[c].name).to_string();
+        for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == synth_netlist::INPUT_PORT) {
+            val.insert(nl.pin_net(c, "PAD").unwrap(), inputs[&name(c)]);
+        }
+        loop {
+            let mut progress = false;
+            for c in nl.live_cells() {
+                let get = |pin: &str| nl.pin_net(c, pin).map(|n| val.get(&n).copied());
+                let (out, v) = match nl.cell_kind(c) {
+                    "SB_LUT4" => {
+                        let mut idx = 0;
+                        let mut known = true;
+                        for j in 0..4 {
+                            match get(&format!("I{j}")) {
+                                Some(Some(b)) => idx |= (b as u64) << j,
+                                Some(None) => known = false,
+                                None => {}
+                            }
+                        }
+                        let init = nl.param(c, "LUT_INIT").and_then(Param::as_u64).unwrap();
+                        ("O", known.then(|| (init >> idx) & 1 == 1))
+                    }
+                    "SB_CARRY" => {
+                        let v = match (get("I0"), get("I1"), get("CI")) {
+                            (Some(Some(a)), Some(Some(b)), Some(Some(ci))) => {
+                                Some((a & b) | (a & ci) | (b & ci))
+                            }
+                            _ => None,
+                        };
+                        ("CO", v)
+                    }
+                    _ => continue,
+                };
+                let n = nl.pin_net(c, out).unwrap();
+                if let (Some(v), None) = (v, val.get(&n)) {
+                    val.insert(n, v);
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        nl.live_cells()
+            .filter(|&c| nl.cell_kind(c) == synth_netlist::OUTPUT_PORT)
+            .map(|c| (name(c), val[&nl.pin_net(c, "PAD").unwrap()]))
+            .collect()
+    }
+
+    #[test]
+    fn carry_chain_takes_the_polarity_needing_fewer_inverters() {
+        // y = ~x + 5 on a chain whose operand is the complement of an input
+        // (an inverter per bit), and c = cout & x[0] read by a LUT.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..4).map(|_| g.input()).collect();
+        let s: Vec<Lit> = (0..4).map(|_| g.input()).collect();
+        let cout = g.input();
+        let a: Vec<usize> = x.iter().map(|&l| g.output(!l)).collect();
+        let b: Vec<usize> = (0..4).map(|i| g.output(Lit::new(0, (5 >> i) & 1 == 1))).collect();
+        let cin = g.output(Lit::FALSE);
+        let y: Vec<usize> = s.iter().map(|&l| g.output(l)).collect();
+        let t = g.and(cout, x[0]);
+        let c = g.output(t);
+        let port = |name: &str, dir: PortDir, bits: Vec<Bit>| Port { name: name.into(), dir, bits };
+        let net = LogicNet {
+            name: "t".into(),
+            aig: g,
+            ports: vec![
+                port("x", PortDir::Input, (0..4).map(Bit::Src).collect()),
+                port("y", PortDir::Output, y.into_iter().map(Bit::Snk).collect()),
+                port("c", PortDir::Output, vec![Bit::Snk(c)]),
+            ],
+            carries: vec![Carry { a, b, cin, sum: (4..8).collect(), cout: Some(8) }],
+            ..Default::default()
+        };
+        let mapping = lutmap::map(&net.aig, &MapOptions::default());
+        let nl = emit(&net, &mapping).unwrap();
+        // Four sum LUTs and the AND: no inverters.
+        assert_eq!(nl.live_cells().filter(|&c| nl.cell_kind(c) == "SB_LUT4").count(), 5);
+        for v in 0..16u32 {
+            let inputs = (0..4).map(|i| (format!("x[{i}]"), (v >> i) & 1 == 1)).collect();
+            let out = evaluate(&nl, &inputs);
+            let sum = (!v & 15) + 5;
+            for i in 0..4 {
+                assert_eq!(out[&format!("y[{i}]")], (sum >> i) & 1 == 1, "x = {v}");
+            }
+            assert_eq!(out["c"], sum > 15 && v & 1 == 1, "x = {v}");
+        }
     }
 }
