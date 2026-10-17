@@ -21,13 +21,19 @@ run() { # name top device package pcf cycles hold rtl...
     --top "$top" --clock clk --cycles "$cycles" --hold "$hold" "$@" | head -12
 }
 
-build() { # name top device package pcf cycles hold rtl... (synth only)
+build() { # name top device package pcf cycles hold [bitsim options --] rtl... (synth only)
   local name=$1 top=$2 dev=$3 pkg=$4 pcf=$5 cycles=$6 hold=$7; shift 7
+  local extra=()
+  if [ "${1:-}" = "--opts" ]; then
+    shift
+    while [ "$1" != -- ]; do extra+=("$1"); shift; done
+    shift
+  fi
   echo "== $name ($dev $pkg, synth only)"
   "$synth" build "$@" --top "$top" --device "$dev" --package "$pkg" --pcf "$pcf" --asc "$work/$name.asc" 2>&1 \
     | grep -E "^info: (mapped|packed|routing|total)|error"
   python3 "$root/tools/bitsim.py" --asc "$work/$name.asc" --pcf "$pcf" --package "$pkg" \
-    --top "$top" --clock clk --cycles "$cycles" --hold "$hold" "$@" | head -12
+    --top "$top" --clock clk --cycles "$cycles" --hold "$hold" "${extra[@]}" "$@" | head -12
 }
 
 d="$root/tests/designs/blinky_ram"
@@ -36,4 +42,15 @@ run blinky_ram_hx8k top hx8k cb132 "$d/alchitry_cu.pcf" 100000 50 "$d/blinky_ram
 build blinky_ram_synth_hx1k top hx1k vq100 "$d/go_board.pcf" 100000 50 "$d/blinky_ram.v"
 p="$root/tests/designs/picosoc"
 (cd "$p" && build picosoc_synth_hx8k top hx8k cb132 "$p/alchitry_cu.pcf" 200000 5000 soc.v picorv32.v)
+# Board examples (see examples/README.md).
+e="$root/tests/designs/third_party"
+g="$root/examples/go_board_serv"
+sv=("$e"/serv/servant/servant.v "$e"/serv/servant/servant_mux.v "$e"/serv/servant/servant_ram.v \
+  "$e"/serv/servant/servant_timer.v "$e"/serv/servant/servant_gpio.v "$e"/serv/servile/*.v "$e"/serv/rtl/*.v)
+(cd "$g" && build go_board_serv top hx1k vq100 "$g/go_board.pcf" 150000 1000 top.v "${sv[@]}")
+c="$root/examples/alchitry_cu_hazard3"
+h="$e/hazard3/hdl"
+mapfile -t hz < <(grep '^file' "$h/hazard3.f" | awk -v h="$h" '{print h "/" $2}')
+(cd "$c" && build alchitry_cu_hazard3 top hx8k cb132 "$c/alchitry_cu.pcf" 400000 1 \
+  --opts --const rst_n=1 -I "$h" -- -I "$h" top.v "${hz[@]}")
 echo "all bitstream simulations passed"

@@ -204,10 +204,10 @@ fn assign_globals(
             _ => rest.push(gb),
         }
     }
-    for gb in rest {
-        let out = nl.pin_net(gb, "GLOBAL_BUFFER_OUTPUT");
+    // Control nets first (they need a network of their class), then clocks.
+    let class_of = |nl: &Netlist, gb: CellId| {
         let (mut reset, mut enable) = (false, false);
-        if let Some(n) = out {
+        if let Some(n) = nl.pin_net(gb, "GLOBAL_BUFFER_OUTPUT") {
             for p in &nl.nets[n].users {
                 let pin = nl.str(nl.cells[p.cell].pins[p.pin as usize].name);
                 match global_class(nl.cell_kind(p.cell), crate::cells::port_base(pin)) {
@@ -217,6 +217,14 @@ fn assign_globals(
                 }
             }
         }
+        (reset, enable)
+    };
+    rest.sort_by_key(|&gb| {
+        let (r, e) = class_of(nl, gb);
+        !(r || e)
+    });
+    for gb in rest {
+        let (reset, enable) = class_of(nl, gb);
         if reset && enable {
             log.push(format!(
                 "warning: global {} drives both set/reset and clock-enable pins; some may not route",
@@ -227,12 +235,26 @@ fn assign_globals(
         // Plain clocks take the networks nobody else can use first.
         let order: Vec<usize> =
             if !reset && !enable { vec![0, 2, 4, 6, 1, 3, 5, 7] } else { (0..8).collect() };
-        let g = order
-            .iter()
-            .copied()
-            .find(|&g| !taken[g] && fits(g))
-            .or_else(|| order.iter().copied().find(|&g| !taken[g]))
-            .ok_or("more than 8 global networks needed")?;
+        let g = order.iter().copied().find(|&g| !taken[g] && fits(g));
+        let Some(g) = g else {
+            if reset || enable {
+                // No network of the right class left: back to fabric routing.
+                let input = nl.pin_net(gb, "USER_SIGNAL_TO_GLOBAL_BUFFER").unwrap();
+                let out = nl.pin_net(gb, "GLOBAL_BUFFER_OUTPUT").unwrap();
+                let users = nl.nets[out].users.clone();
+                nl.remove_cell(gb);
+                for p in users {
+                    nl.disconnect(p);
+                    nl.connect(p, input).map_err(|e| e.0)?;
+                }
+                log.push(format!(
+                    "{} stays on fabric routing (no free global network of its class)",
+                    nl.str(nl.nets[input].name)
+                ));
+                continue;
+            }
+            return Err("more than 8 global networks needed".into());
+        };
         taken[g] = true;
         let bel = arch.bels_of(BelKind::Gb).find(|&b| arch.bel(b).z == 2 + g as u8).unwrap();
         placement.cell_bel.insert(gb, bel);

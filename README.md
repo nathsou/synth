@@ -15,23 +15,31 @@ Initial targets, in order:
 The goal is to match or beat vendor tools (iCEcube2/Radiant, Diamond, Vivado) on
 resource use and Fmax, with deterministic, reproducible results.
 
-```
-synth init --board alchitry-cu
-synth build
-synth prog
+```sh
+cargo build --release
+target/release/synth build design.v --top top \
+  --device hx8k --package cb132 --pcf pins.pcf -o design.bin
 ```
 
 ## Status
 
-**Planning.** Nothing is implemented yet. See:
+**iCE40 works end to end.** Verilog-2005 elaboration, logic synthesis (AIG,
+LUT mapping, carry chains, block RAM inference), packing, placement, routing
+and bitstream generation are implemented for the iCE40 HX1K and HX8K.
+[examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
+(Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
+
+Every stage is checked by simulation against the source RTL on four RISC-V
+cores (PicoRV32, SERV, DarkRISCV, Hazard3), and the bitstreams by simulating
+the decoded configuration. Quality of results is close to Yosys + nextpnr
+and improving: the PicoRV32 SoC takes 1769 logic cells at 63.5 MHz (Yosys +
+nextpnr: 1588 cells, 66.2 MHz). Timing-driven placement and static timing
+analysis are next; Artix-7 follows.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.
-- [docs/ROADMAP.md](docs/ROADMAP.md): phases, exit criteria, first PRs, risks and
-  open decisions.
-
-Milestone 1: a pipelined RISC-V SoC built only with `synth`, running on the
-Alchitry Cu.
+- [docs/ROADMAP.md](docs/ROADMAP.md): phases, exit criteria, risks and open
+  decisions.
 
 ## Licence
 

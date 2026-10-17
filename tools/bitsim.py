@@ -42,6 +42,10 @@ def main():
     ap.add_argument("--cycles", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--hold", type=int, default=50, help="max cycles an input value is held")
+    ap.add_argument("--const", action="append", default=[],
+                    help="NAME=VALUE: hold an input at a constant instead of random stimulus")
+    ap.add_argument("-I", dest="incdirs", action="append", default=[])
+    ap.add_argument("-D", dest="defines", action="append", default=[])
     ap.add_argument("rtl", nargs="+")
     a = ap.parse_args()
 
@@ -63,6 +67,7 @@ def main():
         base, idx = split(n)
         vectors.setdefault(base, (d, set()))[1].add(idx)
     rnd = random.Random(a.seed)
+    consts = dict(c.split("=", 1) for c in a.const)
 
     tb = ["`timescale 1ns/1ps", "module tb;"]
     decl = []
@@ -70,7 +75,8 @@ def main():
         width = (max(i for i in idxs if i is not None) + 1) if None not in idxs else 1
         rng = f"[{width-1}:0] "
         if d == "input":
-            tb.append(f"  reg {rng}{base} = 0;")
+            init = consts.get(base, "0")
+            tb.append(f"  reg {rng}{base} = {init};")
         else:
             tb.append(f"  wire {rng}rtl_{base};")
             tb.append(f"  wire {rng}chip_{base};")
@@ -86,6 +92,10 @@ def main():
             conns_chip += [f".\\{b}[{i}] ({sig}[{i}])" for i in sorted(idxs)]
     tb.append(f"  chip dut_chip ({', '.join(conns_chip)});")
     tb.append("  integer cyc, errors, k;")
+    # Output activity on the chip, reported with the result.
+    for b, d, _, w in decl:
+        if d == "output":
+            tb.append(f"  integer tog_{b} = 0; reg [{w-1}:0] prev_{b} = 0;")
     tb.append("  initial begin")
     tb.append("    errors = 0;")
     tb.append(f"    for (cyc = 0; cyc < {a.cycles}; cyc = cyc + 1) begin")
@@ -98,11 +108,15 @@ def main():
         tb.append(f"      for (k = 0; k < {widths[b]}; k = k + 1)")
         tb.append(f"        if (rtl_{b}[k] !== 1'bx && rtl_{b}[k] !== chip_{b}[k]) begin errors = errors + 1; "
                   f"if (errors < 10) $display(\"cycle %0d: {b} rtl=%b chip=%b\", cyc, rtl_{b}, chip_{b}); end")
-    ins = [b for b, d, _, _ in decl if d == "input" and b != a.clock]
+    for b in outs:
+        tb.append(f"      if (chip_{b} !== prev_{b}) tog_{b} = tog_{b} + 1; prev_{b} = chip_{b};")
+    ins = [b for b, d, _, _ in decl if d == "input" and b != a.clock and b not in consts]
     tb.append("      // random stimulus with random hold times")
     for b in ins:
         tb.append(f"      if (($random & 63) < {max(1, 64 // a.hold)}) {b} = $random;")
     tb.append("    end")
+    toggles = ", ".join(f"{b} %0d" for b in outs)
+    tb.append(f"    $display(\"output toggles: {toggles}\", {', '.join('tog_' + b for b in outs)});")
     tb.append("    if (errors == 0) $display(\"PASS %0d cycles\", cyc); else $display(\"FAIL %0d mismatches\", errors);")
     tb.append("    $finish;")
     tb.append("  end")
@@ -112,7 +126,8 @@ def main():
         f.write("\n".join(tb) + "\n")
     out = os.path.join(tmp, "sim")
     subprocess.run(["iverilog", "-g2012", "-o", out, "-DNO_ICE40_DEFAULT_ASSIGNMENTS", tb_path,
-                    os.path.join(tmp, "chip.v"), CELLS_SIM] + a.rtl, check=True)
+                    os.path.join(tmp, "chip.v"), CELLS_SIM] + [f"-I{i}" for i in a.incdirs]
+                   + [f"-D{d}" for d in a.defines] + a.rtl, check=True)
     r = subprocess.run(["vvp", "-n", out], capture_output=True, text=True)
     print(r.stdout.strip())
     sys.exit(0 if "PASS" in r.stdout else 1)

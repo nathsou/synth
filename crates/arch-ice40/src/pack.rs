@@ -592,7 +592,9 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
     for n in nl.live_nets() {
         let net = &nl.nets[n];
         let Some(drv) = net.driver else { continue };
-        if nl.cell_kind(drv.cell) == GB {
+        // Constant drivers need no global network.
+        let dname = nl.str(nl.cells[drv.cell].name);
+        if nl.cell_kind(drv.cell) == GB || dname == "$PACKER_VCC" || dname == "$PACKER_GND" {
             continue;
         }
         let (mut clocks, mut resets, mut enables) = (0, 0, 0);
@@ -613,7 +615,18 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
         }
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
+    // Only the four even networks reach set/reset pins and the four odd
+    // ones clock enables.
+    let (mut resets, mut enables) = (0, 0);
     for (_, class, n) in candidates {
+        let class_full = match class {
+            GlobalClass::Reset => resets >= 4,
+            GlobalClass::Enable => enables >= 4,
+            GlobalClass::Clock => false,
+        };
+        if class_full {
+            continue;
+        }
         if used >= 8 {
             if class == GlobalClass::Clock {
                 report.messages.push(format!(
@@ -624,6 +637,11 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
             continue;
         }
         used += 1;
+        match class {
+            GlobalClass::Reset => resets += 1,
+            GlobalClass::Enable => enables += 1,
+            GlobalClass::Clock => {}
+        }
         let name = nl.str(nl.nets[n].name).to_string();
         let gb = nl.add_cell(&format!("{name}$gb"), GB);
         let gnet = nl.add_net(&format!("{name}$glb"));
