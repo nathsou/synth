@@ -797,19 +797,62 @@ impl<'a> Elab<'a> {
     }
 
     fn case_chain(&mut self, items: &'a [ast::CaseItem], conds: &[SigBit], i: usize) {
-        // Skip the default item in the chain; it runs when nothing matched.
-        let mut i = i;
-        while i < items.len() && items[i].exprs.is_empty() {
-            i += 1;
-        }
-        if i >= items.len() {
-            if let Some(d) = items.iter().find(|it| it.exprs.is_empty()) {
-                self.exec(&d.body);
+        // Items that can never match do not take part.
+        let idx: Vec<usize> = (i..items.len())
+            .filter(|&k| !items[k].exprs.is_empty() && conds[k] != SigBit::ZERO)
+            .collect();
+        self.case_tree(items, conds, &idx, false);
+    }
+
+    /// Runs the first matching item of `idx` (in order), else the default.
+    /// Items are split in halves (if any item of the first half matches,
+    /// the winner is there), which keeps priority but gives logarithmic
+    /// depth instead of a chain as long as the case. With `matched`, one of
+    /// the items is known to match.
+    fn case_tree(
+        &mut self,
+        items: &'a [ast::CaseItem],
+        conds: &[SigBit],
+        idx: &[usize],
+        matched: bool,
+    ) {
+        match idx {
+            [] => {
+                if let Some(d) = items.iter().find(|it| it.exprs.is_empty()) {
+                    self.exec(&d.body);
+                }
             }
-            return;
+            [k] if matched => self.exec(&items[*k].body),
+            [k, rest @ ..] if idx.len() <= 2 => {
+                let c = conds[*k];
+                self.branch(
+                    c,
+                    |e| e.exec(&items[*k].body),
+                    |e| e.case_tree(items, conds, rest, matched),
+                );
+            }
+            _ => {
+                let (first, second) = idx.split_at(idx.len() / 2);
+                let any = self.or_tree(&first.iter().map(|&k| conds[k]).collect::<Vec<_>>());
+                self.branch(
+                    any,
+                    |e| e.case_tree(items, conds, first, true),
+                    |e| e.case_tree(items, conds, second, matched),
+                );
+            }
         }
-        let c = conds[i];
-        self.branch(c, |e| e.exec(&items[i].body), |e| e.case_chain(items, conds, i + 1));
+    }
+
+    fn or_tree(&mut self, bits: &[SigBit]) -> SigBit {
+        match bits {
+            [] => SigBit::ZERO,
+            [b] => *b,
+            _ => {
+                let (l, r) = bits.split_at(bits.len() / 2);
+                let (a, b) = (self.or_tree(l), self.or_tree(r));
+                self.out.or1(a, b)
+            }
+        }
     }
 
     fn case_match(

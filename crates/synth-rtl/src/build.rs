@@ -36,6 +36,28 @@ impl Module {
         if let (Some(ca), Some(cb)) = (a.as_const(), b.as_const()) {
             return Sig::from_const(&eval::binary(op, signed, &ca, &cb));
         }
+        // Equality: positions where both sides are the same signal or the
+        // same constant do not matter; two different constants decide it.
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let known = |x: SigBit| matches!(x, SigBit::Const(Logic::Zero | Logic::One));
+            let (mut ka, mut kb) = (Sig::new(), Sig::new());
+            for (&x, &y) in a.iter().zip(b.iter()) {
+                if known(x) && known(y) && x != y {
+                    return Sig::bit(if op == BinaryOp::Eq { SigBit::ZERO } else { SigBit::ONE });
+                }
+                if x == y && (known(x) || matches!(x, SigBit::Wire(..))) {
+                    continue;
+                }
+                ka.push(x);
+                kb.push(y);
+            }
+            if ka.width() == 0 {
+                return Sig::bit(if op == BinaryOp::Eq { SigBit::ONE } else { SigBit::ZERO });
+            }
+            if ka.width() < a.width() {
+                return self.binary(op, signed, ka, kb);
+            }
+        }
         // Simple identities that matter during process lowering.
         match op {
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr

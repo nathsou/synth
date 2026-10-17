@@ -145,6 +145,31 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         mapping.luts.len(),
         mapping.depth
     ));
+    if std::env::var("SYNTH_DEBUG").is_ok() {
+        // The deepest sinks after mapping.
+        let mut level: FxHashMap<u32, u32> = FxHashMap::default();
+        for l in &mapping.luts {
+            let lv =
+                1 + l.leaves.iter().map(|x| level.get(x).copied().unwrap_or(0)).max().unwrap_or(0);
+            level.insert(l.node, lv);
+        }
+        let lv = |k: usize| level.get(&net.aig.outputs[k].node()).copied().unwrap_or(0);
+        let mut deep: Vec<(u32, String)> = net
+            .ffs
+            .iter()
+            .map(|f| (lv(f.d).max(f.en.map_or(0, lv)), f.name.clone()))
+            .chain(net.carries.iter().enumerate().map(|(i, c)| {
+                (
+                    c.a.iter().chain(&c.b).map(|&k| lv(k)).max().unwrap_or(0),
+                    format!("carry chain {i}"),
+                )
+            }))
+            .collect();
+        deep.sort_by_key(|d| std::cmp::Reverse(d.0));
+        deep.dedup_by(|a, b| a.1 == b.1);
+        deep.truncate(8);
+        log.push(format!("deepest sinks: {deep:?}"));
+    }
     let nl = emit(&net, &mapping)?;
     Ok((nl, log))
 }

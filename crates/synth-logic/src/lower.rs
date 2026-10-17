@@ -29,6 +29,8 @@ struct Lower<'a> {
     /// Connection source of a bit (`lhs <- rhs`).
     alias: FxHashMap<SigBit, SigBit>,
     pads: FxHashMap<SigBit, u32>,
+    /// RTL cell that created each AIG node (`SYNTH_DEBUG`).
+    origin: Vec<u32>,
     /// Signal bits that something reads (after resolving connections).
     used: synth_core::FxHashSet<SigBit>,
     /// AND nodes created per cell kind (`SYNTH_DEBUG`).
@@ -48,6 +50,7 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
         pads: FxHashMap::default(),
         profile: std::env::var("SYNTH_DEBUG").ok().map(|_| FxHashMap::default()),
         used: Default::default(),
+        origin: Vec::new(),
     };
     if let Some(mem) = m.memories.iter().find(|m| m.alive) {
         return Err(format!("memory {} was not mapped", mem.name));
@@ -211,11 +214,58 @@ pub fn lower(m: &Module, opts: &LowerOptions) -> Result<LogicNet, String> {
         let mut v: Vec<_> = p.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
         eprintln!("debug: AND nodes by cell kind: {v:?}");
+        l.critical_path();
     }
     Ok(l.net)
 }
 
 impl Lower<'_> {
+    /// Prints the RTL cells along the deepest AIG path (debugging aid).
+    fn critical_path(&self) {
+        let g = &self.net.aig;
+        let lv = g.levels();
+        let Some(out) = g.outputs.iter().max_by_key(|o| lv[o.node() as usize]) else { return };
+        // Names of wires aliased to cell outputs, for readable reports.
+        let mut names: FxHashMap<SigBit, String> = FxHashMap::default();
+        for (lhs, rhs) in self.m.aliases.iter().chain(&self.m.connections) {
+            for (l, r) in lhs.iter().zip(rhs.iter()) {
+                names.entry(*r).or_insert_with(|| self.m.bit_name(*l));
+            }
+        }
+        let mut n = out.node();
+        let mut cells: Vec<u32> = Vec::new();
+        while let Some((a, b)) = g.fanins(n) {
+            if let Some(&o) = self.origin.get(n as usize)
+                && cells.last() != Some(&o)
+            {
+                cells.push(o);
+            }
+            n = if lv[a.node() as usize] >= lv[b.node() as usize] { a.node() } else { b.node() };
+        }
+        eprintln!(
+            "debug: deepest AIG path: {} levels through {} RTL cells",
+            lv[out.node() as usize],
+            cells.len()
+        );
+        for &c in cells.iter().rev() {
+            if c == u32::MAX {
+                continue;
+            }
+            let cell = &self.m.cells[CellId::new(c as usize)];
+            let kind = match &cell.kind {
+                CellKind::Binary { op, .. } => format!("{op:?}"),
+                CellKind::Unary { op, .. } => format!("{op:?}"),
+                CellKind::Mux { .. } => "Mux".into(),
+                CellKind::Pmux { .. } => "Pmux".into(),
+                CellKind::Shiftx { .. } => "Shiftx".into(),
+                _ => "?".into(),
+            };
+            let label =
+                cell.outputs().first().and_then(|y| y.iter().find_map(|b| names.get(b).cloned()));
+            eprintln!("debug:   {kind} {}", label.unwrap_or_default());
+        }
+    }
+
     /// The input index of a source literal.
     fn source(&self, l: Lit) -> u32 {
         match self.net.aig.nodes[l.node() as usize] {
@@ -301,6 +351,11 @@ impl Lower<'_> {
     fn lower_cell(&mut self, ci: CellId) -> Result<(), String> {
         let before = self.net.aig.nodes.len();
         self.lower_cell_inner(ci)?;
+        if self.profile.is_some() {
+            let n = self.net.aig.nodes.len();
+            self.origin.resize(before, u32::MAX);
+            self.origin.resize(n, ci.index() as u32);
+        }
         if let Some(p) = self.profile.as_mut() {
             let c = &self.m.cells[ci];
             let kind = match &c.kind {
