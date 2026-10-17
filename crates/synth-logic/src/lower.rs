@@ -556,29 +556,9 @@ impl Lower<'_> {
                 self.mul(a, b)
             }
             BinaryOp::Div | BinaryOp::Mod => {
-                // Unsigned division by a power of two only.
-                let k = b.iter().position(|&l| l == Lit::TRUE);
-                let pow2 =
-                    !signed && k.is_some() && b.iter().filter(|&&l| l != Lit::FALSE).count() == 1;
-                if !pow2 {
-                    return Err("division is only supported by constant powers of two".into());
-                }
-                let k = k.unwrap();
-                if op == BinaryOp::Div {
-                    a.iter()
-                        .skip(k)
-                        .copied()
-                        .chain(std::iter::repeat(Lit::FALSE))
-                        .take(yw)
-                        .collect()
-                } else {
-                    a.iter()
-                        .take(k)
-                        .copied()
-                        .chain(std::iter::repeat(Lit::FALSE))
-                        .take(yw)
-                        .collect()
-                }
+                let (a, b) = same_width(a, b, signed);
+                let (q, r) = self.divmod(&a, &b, signed);
+                fit(if op == BinaryOp::Div { q } else { r }, yw)
             }
             BinaryOp::Shl => {
                 // Shift left == reverse, shift right, reverse.
@@ -683,6 +663,94 @@ impl Lower<'_> {
         (lits, cl)
     }
 
+    /// Quotient and remainder (Verilog semantics: signed division truncates
+    /// towards zero, the remainder takes the dividend's sign; division by
+    /// zero gives all ones and the dividend).
+    fn divmod(&mut self, a: &[Lit], b: &[Lit], signed: bool) -> (Vec<Lit>, Vec<Lit>) {
+        if !signed || a.is_empty() {
+            return self.udivmod(a, b);
+        }
+        let w = a.len();
+        let (sa, sb) = (a[w - 1], b[w - 1]);
+        let ua = self.negate_if(a, sa);
+        let ub = self.negate_if(b, sb);
+        let (q, r) = self.udivmod(&ua, &ub);
+        let sq = self.net.aig.xor(sa, sb);
+        (self.negate_if(&q, sq), self.negate_if(&r, sa))
+    }
+
+    /// `c ? -x : x`.
+    fn negate_if(&mut self, x: &[Lit], c: Lit) -> Vec<Lit> {
+        if c == Lit::FALSE {
+            return x.to_vec();
+        }
+        let inv: Vec<Lit> = x.iter().map(|&l| self.net.aig.xor(l, c)).collect();
+        let zero = vec![Lit::FALSE; x.len()];
+        let w = x.len();
+        let (s, _) = self.add_gates_or_chain(&inv, &zero, c, w >= 8);
+        s
+    }
+
+    /// Restoring division: one compare-and-subtract per quotient bit, each
+    /// only as wide as the partial remainder can be.
+    fn udivmod(&mut self, a: &[Lit], b: &[Lit]) -> (Vec<Lit>, Vec<Lit>) {
+        let w = a.len();
+        // A constant divisor folds into the logic; a variable one uses carry chains.
+        let chains = !b.iter().all(|l| l.is_const());
+        let mut r: Vec<Lit> = Vec::new();
+        let mut q = vec![Lit::FALSE; w];
+        for i in (0..w).rev() {
+            // sh = 2r + a[i] < 2^m
+            let m = w - i;
+            let mut sh = vec![a[i]];
+            sh.extend(r.iter().copied());
+            sh.resize(m, Lit::FALSE);
+            // sh >= b: b's bits from m up are zero and sh - b[..m] does not borrow
+            let high: Vec<Lit> = b[m.min(w)..].iter().map(|&l| !l).collect();
+            let high_zero = self.net.aig.and_all(&high);
+            if high_zero == Lit::FALSE {
+                r = sh;
+                continue;
+            }
+            let nb: Vec<Lit> = b[..m.min(w)]
+                .iter()
+                .map(|&l| !l)
+                .chain(std::iter::repeat(Lit::TRUE))
+                .take(m)
+                .collect();
+            let (diff, cout) = self.add_gates_or_chain(&sh, &nb, Lit::TRUE, chains);
+            let g = &mut self.net.aig;
+            let ge = g.and(cout, high_zero);
+            q[i] = ge;
+            r = sh.iter().zip(&diff).map(|(&x, &d)| g.mux(ge, d, x)).collect();
+        }
+        r.resize(w, Lit::FALSE);
+        (q, r)
+    }
+
+    /// `a + b + cin` and its carry out, on a carry chain (when allowed and wide
+    /// enough) or in gates.
+    fn add_gates_or_chain(
+        &mut self,
+        a: &[Lit],
+        b: &[Lit],
+        cin: Lit,
+        chain: bool,
+    ) -> (Vec<Lit>, Lit) {
+        if chain {
+            return self.add(a, b, cin);
+        }
+        let g = &mut self.net.aig;
+        let mut c = cin;
+        let mut s = Vec::with_capacity(a.len());
+        for i in 0..a.len() {
+            let x = g.xor(a[i], b[i]);
+            s.push(g.xor(x, c));
+            c = g.maj(a[i], b[i], c);
+        }
+        (s, c)
+    }
+
     /// Shift-and-add multiplier, truncated to the operand width.
     fn mul(&mut self, a: Vec<Lit>, b: Vec<Lit>) -> Vec<Lit> {
         let w = a.len();
@@ -726,4 +794,86 @@ fn same_width(mut a: Vec<Lit>, mut b: Vec<Lit>, signed: bool) -> (Vec<Lit>, Vec<
     ext(&mut a);
     ext(&mut b);
     (a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synth_core::LogicVec;
+
+    /// Lowers `y = a op b` for `w`-bit operands and checks every input pair
+    /// against the RTL evaluator (skipping division by zero, which is `x`).
+    fn check_exhaustive(op: BinaryOp, signed: bool, w: usize) {
+        let mut m = Module::new("t");
+        let mut sigs = Vec::new();
+        for (i, (name, dir)) in
+            [("a", PortDir::Input), ("b", PortDir::Input), ("y", PortDir::Output)]
+                .into_iter()
+                .enumerate()
+        {
+            let wire = m.add_wire(name, w as u32);
+            m.wires[wire].port = Some((dir, i as u32));
+            sigs.push(m.wire_sig(wire));
+        }
+        let y = m.binary(op, signed, sigs[0].clone(), sigs[1].clone());
+        m.connect(sigs[2].clone(), y);
+        let net = lower(&m, &LowerOptions { carry_min_width: None }).unwrap();
+        let srcs = |p: usize| -> Vec<u32> {
+            net.ports[p]
+                .bits
+                .iter()
+                .map(|b| match b {
+                    Bit::Src(s) => *s,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let (sa, sb) = (srcs(0), srcs(1));
+        let outs: Vec<usize> = net.ports[2]
+            .bits
+            .iter()
+            .map(|b| match b {
+                Bit::Snk(k) => *k,
+                _ => unreachable!(),
+            })
+            .collect();
+        let pairs: Vec<(u64, u64)> =
+            (0..1u64 << w).flat_map(|a| (0..1u64 << w).map(move |b| (a, b))).collect();
+        for chunk in pairs.chunks(64) {
+            let mut inputs = vec![0u64; net.aig.inputs.len()];
+            for (j, &(a, b)) in chunk.iter().enumerate() {
+                for i in 0..w {
+                    inputs[sa[i] as usize] |= ((a >> i) & 1) << j;
+                    inputs[sb[i] as usize] |= ((b >> i) & 1) << j;
+                }
+            }
+            let vals = net.aig.simulate(&inputs);
+            for (j, &(a, b)) in chunk.iter().enumerate() {
+                if b == 0 {
+                    continue;
+                }
+                let got: u64 = (0..w)
+                    .map(|i| ((crate::aig::lit_val(&vals, net.aig.outputs[outs[i]]) >> j) & 1) << i)
+                    .sum();
+                let want = synth_rtl::eval::binary(
+                    op,
+                    signed,
+                    &LogicVec::from_u64(a, w),
+                    &LogicVec::from_u64(b, w),
+                )
+                .to_u64()
+                .unwrap();
+                assert_eq!(got, want, "{op:?} signed={signed}: {a} {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn division_and_modulo() {
+        for signed in [false, true] {
+            for op in [BinaryOp::Div, BinaryOp::Mod] {
+                check_exhaustive(op, signed, 5);
+            }
+        }
+    }
 }

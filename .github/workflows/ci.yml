@@ -79,3 +79,21 @@ jobs:
         run: tools/ci_rtlsim.sh
       - name: Synthesised netlists vs RTL
         run: MODE=synth tools/ci_rtlsim.sh
+
+  euler:
+    name: Project Euler solvers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install iverilog and Yosys cell models (test oracles only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog yosys
+      - name: Build
+        run: cargo build --release -p synth
+      - name: RTL and synthesised netlists give the answers
+        run: tools/ci_euler.sh
