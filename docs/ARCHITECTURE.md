@@ -25,12 +25,14 @@ phased plan for getting there is in [ROADMAP.md](ROADMAP.md).
    we aim to beat the vendor tools. On Artix-7, matching Vivado is a long-term goal.
 4. **Deterministic.** The same inputs and seed give a bit-identical bitstream,
    whatever the thread count, platform or run.
-5. **Easy to use.** `synth build --board icebreaker top.v` should just work, with
+5. **Easy to use.** `synth build --board alchitry-cu top.v` should just work, with
    good diagnostics, readable reports and sensible defaults.
 
 ### Non-goals (for now)
 
-- VHDL (to be revisited after SystemVerilog, §6.1).
+- Native SystemVerilog, VHDL and FIRRTL frontends (deferred, §6.1). Meanwhile,
+  SystemVerilog and VHDL designs can reach `synth` as RTLIL, by running Yosys
+  (with yosys-slang or the GHDL plugin) on the user's side.
 - Transceivers (GTP, ECP5 SERDES), PCIe, partial reconfiguration, bitstream
   encryption.
 - Vendor IP generators (MIG, CoreGen). Users instantiate primitives directly.
@@ -66,14 +68,15 @@ process with one data model**:
 ## 3. Pipeline overview
 
 ```
- Verilog / SystemVerilog                 Constraints: synth.toml, PCF, LPF, XDC/SDC
-          │                                              │
-          ▼                                              │
- ┌─────────────────┐   preprocess → lex → parse          │
- │    Frontend     │   elaborate (params, generate,      │
- │                 │   functions, processes)             │
- └────────┬────────┘                                     │
-          ▼                                              │
+ Verilog-2005        RTLIL, SRTL         Constraints: synth.toml, PCF, LPF, XDC/SDC
+      │                   │                              │
+      ▼                   ▼                              │
+ ┌─────────┐       ┌─────────────┐                       │
+ │ Verilog │       │  low-level  │  Verilog: preprocess, │
+ │ frontend│       │   readers   │  parse, elaborate     │
+ └────┬────┘       └──────┬──────┘  RTLIL / SRTL: §6.4   │
+      └───┬───────────────┘                              │
+          ▼  shared process lowering                     │
  ┌─────────────────┐   const-prop, CSE, DCE, width       │
  │  RTL IR (word)  │   reduction, FSM / memory / arith   │
  │                 │   inference, DFF legalization       │
@@ -106,8 +109,10 @@ process with one data model**:
  └─────────────────┘
 ```
 
-Every arrow between IRs can be dumped (`--emit rtl|aig|netlist|place|route|fasm`)
-and, in `--check` mode, verified (§13.3).
+Every arrow between IRs can be dumped (`--emit rtl|aig|netlist|place|route|fasm`;
+`--emit rtl` writes SRTL, §6.4) and, in `--check` mode, verified (§13.3). An
+RTLIL input made only of device primitives (a netlist that Yosys has already
+mapped) skips synthesis and enters at the mapped netlist.
 
 ---
 
@@ -121,8 +126,9 @@ compile times stay reasonable and dependencies stay acyclic.
 | `synth` (bin) | CLI, project file, board catalog, driving the flow |
 | `synth-core` | Typed IDs and arenas, string interning, deterministic hashing and maps, bit vectors (2- and 4-state), diagnostics, thread pool, instrumentation |
 | `synth-verilog` | Preprocessor, lexer, parser, AST (Verilog-2005, then SystemVerilog) |
-| `synth-elab` | Elaboration: hierarchy, constant evaluation, generate, process lowering, producing RTL IR |
-| `synth-rtl` | Word-level RTL IR and its passes (opt, memory, FSM, arithmetic inference) |
+| `synth-elab` | Verilog elaboration: hierarchy, constant evaluation, generate, producing RTL IR |
+| `synth-rtlil` | RTLIL reader (Amaranth output, Yosys netlists) |
+| `synth-rtl` | Word-level RTL IR, the SRTL text format (read and write), the process-lowering engine shared by the Verilog and RTLIL paths, and RTL passes (opt, memory, FSM, arithmetic inference) |
 | `synth-sat` | CDCL SAT solver (incremental, with assumptions) |
 | `synth-logic` | AIG, optimization, cut enumeration, LUT mapping, equivalence checking |
 | `synth-sim` | Simulators: 4-state event-driven (RTL) and 2-state compiled cycle simulator (netlists) |
@@ -164,23 +170,35 @@ golden outputs), `bench/` (QoR suite and harness), `docs/`.
 
 ---
 
-## 6. Frontend (`synth-verilog`, `synth-elab`)
+## 6. Frontends (`synth-verilog`, `synth-elab`, `synth-rtlil`)
 
-### 6.1 Language scope
+### 6.1 Input languages
 
-| Phase | Scope | Unlocks |
-|---|---|---|
-| 1 | Synthesizable **Verilog-2005** (IEEE 1364): modules, parameters, `generate`, constant functions, `always`/`assign`, signed arithmetic, `$clog2`, `$readmemh/b`, `initial` for power-on values and memory init, attributes (`(* keep *)` and similar), `` `define/`ifdef/`include `` | PicoRV32, Hazard3, DarkRISCV, SERV, VexRiscv (SpinalHDL output), LiteX/Migen output, Amaranth/Chisel Verilog output |
-| 2 | Synthesizable **SystemVerilog** (IEEE 1800-2017) subset: `logic`, `always_ff/comb/latch`, `typedef`, `enum`, packed `struct`/`union`, packages, `unique/priority case`, `'0`/`'1`, multidimensional packed arrays, `inside`, interfaces and modports | Ibex, CVA6 (stretch goal), most modern RTL |
-| later | VHDL (decide based on demand; it is a frontend of comparable size) | NEORV32 and others |
+| Input | Level | When | Unlocks |
+|---|---|---|---|
+| **Verilog-2005** (IEEE 1364), synthesizable subset | HDL | Milestone 1 | Hand-written RTL; PicoRV32, Hazard3, DarkRISCV, SERV; Verilog generated by SpinalHDL (VexRiscv), Migen/LiteX, Clash, Bluespec, and Chisel (through `firtool` with Verilog lowering options) |
+| **RTLIL** (Yosys text IR) | Word-level RTL | Milestone 1 | Amaranth designs directly, without Yosys; backend bring-up on netlists mapped by Yosys; SystemVerilog (yosys-slang) and VHDL (GHDL plugin) through a Yosys run on the user's side |
+| **SRTL** (our RTL IR's text form) | Word-level RTL | Milestone 1 | IR dumps and golden tests; a documented, stable target for generators and new HDLs |
+| SystemVerilog, synthesizable subset | HDL | Later, demand-driven | Ibex, CVA6 and most modern RTL, natively |
+| FIRRTL | HDL-level IR | Deferred | Chisel without `firtool` |
+| VHDL | HDL | Deferred | NEORV32 and others, natively |
 
-Other inputs:
-- **Vendor primitive instantiation** (`SB_PLL40_CORE`, `EHXPLLL`, `MMCME2_BASE`,
-  `BUFG`, `IBUFDS` and so on). Each `arch-*` crate declares its primitives (ports,
-  parameters with defaults) to the elaborator.
-- **Yosys JSON netlist reader** (behind a feature flag). It lets backend work start
-  before the frontend matures (see the roadmap) and allows A/B comparison of our
-  frontend against Yosys. It may stay as an interoperability input.
+The Verilog-2005 subset covers modules, parameters, `generate`, constant
+functions, `always`/`assign`, signed arithmetic, `$clog2`, `$readmemh/b`,
+`initial` for power-on values and memory init, attributes (`(* keep *)` and
+similar), and `` `define/`ifdef/`include ``.
+
+**Why not FIRRTL yet.** FIRRTL is not a low-level format. It has aggregate types,
+width and reset inference and `when` blocks, and its spec moves with Chisel
+releases, so supporting it means writing a second frontend. The lowered form that
+`firtool` produces (the CIRCT `hw`/`comb`/`seq` dialects) is MLIR, whose text form
+has no stability guarantee. For Chisel, `firtool` → Verilog → `synth` is the
+practical path. A FIRRTL reader can be revisited after Milestone 1 if there is
+demand.
+
+**Vendor primitive instantiation** (`SB_PLL40_CORE`, `EHXPLLL`, `MMCME2_BASE`,
+`BUFG`, `IBUFDS` and so on) works from every input. Each `arch-*` crate declares its
+primitives (ports, parameters with defaults) to the frontends.
 
 ### 6.2 Preprocessor, lexer, parser
 
@@ -204,7 +222,8 @@ Other inputs:
   context-determined operands). This is a classic source of synthesis bugs, so it
   gets a dedicated test corpus.
 - **Process lowering** by symbolic execution of each `always` block over an
-  environment that maps each variable to a value:
+  environment that maps each variable to a value. The engine lives in `synth-rtl`
+  and also lowers RTLIL processes (§6.4):
   - Blocking assignments update the environment. Non-blocking assignments are
     collected and committed at the end of the block.
   - `if`/`case` produce muxes (`case` produces parallel muxes when it is
@@ -216,6 +235,42 @@ Other inputs:
 - **Initial values.** `initial` blocks and declaration initializers become flop
   init values or memory contents. `$readmemh` is evaluated at elaboration time.
   This matters for milestone 1: firmware lives in BRAM.
+
+### 6.4 Low-level RTL inputs (`synth-rtlil`, `synth-rtl`)
+
+**RTLIL reader.**
+- It parses the RTLIL text format:
+  - modules, wires (width, offset, `upto`, signedness, ports), `connect`;
+  - cells with parameters;
+  - attributes (`src` is mapped to our source spans for diagnostics);
+  - `memory` objects;
+  - `process` blocks (`switch`/`case`, plus `sync` rules for Yosys output that
+    has not been through `proc`).
+- Cells supported:
+  - Yosys word-level cells: `$add` … `$pmux`, `$shift`/`$shiftx`, the
+    `$dff`/`$adff`/`$sdff`/`$dffe` families, `$mem_v2`/`$memrd_v2`/`$memwr_v2`/`$meminit_v2`,
+    `$tribuf`.
+  - Gate-level cells (`$_AND_` and similar).
+  - Vendor cells by name (`SB_LUT4`, `SB_CARRY`, `LUT6`, `FDRE` and so on), mapped
+    to our primitive library.
+- It covers what Amaranth emits today: combinational processes, `$dff`/`$adff`
+  cells, and `memory` objects with `_v2` ports and `$meminit_v2`. Processes go
+  through the same lowering engine as Verilog `always` blocks.
+- It has two uses:
+  1. Backend bring-up: netlists produced by `yosys -p "synth_ice40; write_rtlil"`
+     before our own frontend is ready.
+  2. A permanent way in for Amaranth and other RTLIL producers.
+- RTLIL has no formal spec. We pin the tested Yosys and Amaranth versions and keep
+  a corpus generated with each. Unknown cells or constructs produce a clear
+  diagnostic rather than a guess.
+
+**SRTL.** The text form of our own RTL IR:
+- It maps one-to-one to the in-memory IR and round-trips exactly. It is versioned,
+  with a documented grammar and a stability promise from 1.0.
+- `--emit rtl` writes it. Pass-level unit tests read it back (input SRTL → pass →
+  expected SRTL).
+- It costs little because we need it for testing anyway, and it gives new HDLs and
+  generators a target that we control.
 
 ---
 
@@ -507,9 +562,20 @@ Correctness is the first QoR metric: a fast bitstream that is wrong is worthless
    `fasm2frames`) for identical feature sets.
 6. **Golden tests**: small designs with checked-in feature dumps and reports.
    Changes appear as reviewable diffs.
-7. **Hardware in the loop**: a self-hosted CI runner with an iCEBreaker, a ULX3S
-   and an Arty A7. It loads SRAM only (never flash), runs test firmware and checks
-   UART output (riscv-tests, CoreMark checksum, memory tests).
+7. **Hardware in the loop**: a self-hosted CI runner with the reference boards:
+   - Nandland Go Board (iCE40HX1K) and Alchitry Cu (iCE40HX8K).
+   - Alchitry Au (XC7A35T) and Nexys A7 (XC7A100T).
+
+   All four use an FT2232H, which provides both the programming interface and a
+   USB UART on one cable.
+   - The Artix-7 boards load SRAM over JTAG.
+   - The iCE40 boards appear to be wired like the iCEstick, with the FT2232H on the
+     SPI flash. Their tests will then write and read back flash (to be checked on
+     the boards). Typical flash endurance (~100k erase cycles) is enough for CI.
+
+   Tests run firmware and check UART output (riscv-tests, Dhrystone/CoreMark,
+   memory tests). There is no ECP5 board yet. Until one is added, ECP5 is verified
+   by bitstream round-trip only (item 5).
 8. **QoR regression** (`bench/`): the benchmark suite runs on every merge. It
    records LUT/FF/BRAM/DSP counts, Fmax per clock, runtime and peak memory, and
    compares them with stored baselines from vendor tools and Yosys+nextpnr. CI
@@ -520,9 +586,10 @@ Correctness is the first QoR metric: a fast bitstream that is wrong is worthless
 ## 14. User experience
 
 ```
-synth init --board icebreaker            # scaffold synth.toml + pin constraints
+synth init --board alchitry-cu           # scaffold synth.toml + pin constraints
 synth build                              # uses synth.toml
-synth build top.v --board ulx3s-85f --clock clk=25MHz -o out.bit
+synth build top.v --board nexys-a7-100t --clock clk=100MHz -o out.bit
+synth build soc.il --board alchitry-cu   # RTLIL, e.g. from Amaranth
 synth check                              # parse + elaborate + lint only
 synth report timing|util|clocks          # from the last build
 synth prog [--flash]                     # program the board (see below)
@@ -538,9 +605,22 @@ synth db list|info <device>
   **XDC/SDC** subset (Xilinx), so existing projects migrate directly.
 - **Integration targets**: a LiteX toolchain backend, an Amaranth platform hook,
   and apio-style workflows. These are cheap and drive adoption.
-- **Programming**: start by delegating to `openFPGALoader` when it is present
-  (optional and clearly reported). Then add a native programmer: FTDI MPSSE
-  JTAG/SPI over Linux usbfs ioctls, without libusb, with other OSes following.
+- **Programming**: `synth prog` delegates to `openFPGALoader` for now. It is
+  optional and its use is clearly reported.
+  - openFPGALoader has board entries for the Alchitry Au (`alchitry_au`) and the
+    Nexys A7 (`nexys_a7_100`).
+  - The Cu and the Go Board are programmed through their SPI flash, with
+    openFPGALoader's generic FT2232 cable or `iceprog` (to be verified on the
+    boards).
+- **Native programmer.** This is reasonably straightforward **on Linux**, because
+  all four reference boards use the FT2232H:
+  - usbfs ioctls (no libusb), FTDI MPSSE;
+  - SPI flash access for iCE40;
+  - JTAG SRAM loading for 7-series (UG470).
+
+  That is roughly 2k lines. Writing 7-series flash needs a SPI-over-JTAG bridge
+  bitstream, which `synth` can build itself. macOS (IOKit) and Windows (WinUSB
+  driver setup) are more work and come later.
 
 ---
 
@@ -561,9 +641,15 @@ synth db list|info <device>
   - iCE40 RISC-V SoC full flow < 10 s.
   - 50k-LUT ECP5/XC7 design < 3–5 min on 8 cores.
   - Peak memory < 4 GB for XC7A200T.
-- **Licensing**: the project license should be permissive (Apache-2.0 OR MIT, or
-  ISC), compatible with the ISC/CC0 databases. Vendor primitive simulation models
-  are written from the public documentation, never copied.
+- **Licensing** (pending confirmation, see the roadmap):
+  - Toolchain code under **EUPL-1.2**.
+  - HDL in the repository (example designs, test SoCs, soft IP) under
+    **CERN-OHL-W-2.0**.
+  - A README statement that bitstreams, netlists and reports produced by `synth`
+    are not covered by the toolchain licence.
+
+  Both licences are compatible with the ISC/CC0 databases. Vendor primitive
+  simulation models are written from the public documentation, never copied.
 
 ---
 
