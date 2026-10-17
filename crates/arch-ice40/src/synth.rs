@@ -251,6 +251,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         ));
         (best, prev) = (c, restructured);
     }
+    best = polish(&net, best, &opts.map)?;
     log.push(format!(
         "mapped in {:.2}s: {} LUTs, depth {}",
         t.elapsed().as_secs_f64(),
@@ -308,6 +309,20 @@ fn map_best(net: &LogicNet, c: ChoiceAig, opts: &MapOptions) -> Result<Candidate
     }
     let (mapping, luts) = best.expect("two mappings tried");
     Ok(Candidate { graph: c.aig, mapping, luts })
+}
+
+/// `c` after don't-care optimisation, if that shrinks its netlist.
+fn polish(net: &LogicNet, c: Candidate, opts: &MapOptions) -> Result<Candidate, String> {
+    let (mut graph, mut mapping) = (c.graph.clone(), c.mapping.clone());
+    let o =
+        synth_logic::mfs::MfsOptions { k: opts.k, lut_delay: opts.lut_delay, ..Default::default() };
+    synth_logic::mfs::optimize(&mut graph, &mut mapping, &o, &Default::default());
+    let luts = netlist_luts(net, &graph, &mapping)?;
+    if luts < c.luts && mapping.depth <= c.mapping.depth {
+        Ok(Candidate { graph, mapping, luts })
+    } else {
+        Ok(c)
+    }
 }
 
 /// Number of LUTs in the netlist of a mapping of `aig` (the graph of
