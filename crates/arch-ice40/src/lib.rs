@@ -5,10 +5,18 @@
 //! - [`asc`]: the IceStorm `.asc` text format.
 //! - [`chipdb`]: the device database (routing graph, config bits, timing).
 
+pub mod arch;
 pub mod asc;
+pub mod bitgen;
 pub mod bitstream;
+pub mod cells;
 pub mod chipdb;
 pub mod device;
+pub mod flow;
+pub mod pack;
+pub mod pcf;
+pub mod place;
+pub mod route;
 
 pub use bitstream::{Config, FreqRange};
 pub use device::{Die, TileKind};

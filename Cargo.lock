@@ -7,13 +7,18 @@ name = "arch-ice40"
 version = "0.1.0"
 dependencies = [
  "synth-core",
+ "synth-netlist",
+ "synth-route",
 ]
 
 [[package]]
 name = "synth"
 version = "0.1.0"
 dependencies = [
+ "arch-ice40",
  "synth-core",
+ "synth-netlist",
+ "synth-rtlil",
 ]
 
 [[package]]
@@ -25,4 +30,26 @@ name = "synth-dbgen"
 version = "0.1.0"
 dependencies = [
  "arch-ice40",
+]
+
+[[package]]
+name = "synth-netlist"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+]
+
+[[package]]
+name = "synth-route"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+]
+
+[[package]]
+name = "synth-rtlil"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-netlist",
 ]

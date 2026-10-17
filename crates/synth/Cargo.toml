@@ -10,6 +10,9 @@ publish.workspace = true
 
 [dependencies]
 synth-core.workspace = true
+synth-netlist.workspace = true
+synth-rtlil.workspace = true
+arch-ice40.workspace = true
 
 [lints]
 workspace = true

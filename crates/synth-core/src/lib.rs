@@ -5,14 +5,17 @@
 //! - [`ordered`]: insertion-ordered maps and sets for deterministic iteration.
 //! - [`intern`]: string interning.
 //! - [`bin`]: a compact binary serialization format for databases.
+//! - [`rng`]: a deterministic pseudo-random number generator.
 
 pub mod bin;
 pub mod hash;
 pub mod id;
 pub mod intern;
 pub mod ordered;
+pub mod rng;
 
 pub use hash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher, fx_hash};
 pub use id::{IdRange, Idx, IndexVec};
 pub use intern::{Interner, Sym};
 pub use ordered::{OrderedMap, OrderedSet};
+pub use rng::Rng;
