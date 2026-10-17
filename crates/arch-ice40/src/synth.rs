@@ -133,6 +133,19 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         v.truncate(25);
         log.push(format!("exclusive input cones: {v:?}"));
     }
+    let t = Instant::now();
+    let before = net.aig.num_ands();
+    let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
+    net.aig = aig.cleanup();
+    log.push(format!(
+        "fraiged in {:.2}s: {} -> {} AND nodes ({} merged, {} refuted, {} undecided)",
+        t.elapsed().as_secs_f64(),
+        before,
+        net.aig.num_ands(),
+        st.proved,
+        st.refuted,
+        st.unknown
+    ));
     if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
         // Debugging aid: the graph about to be mapped, for other tools.
         let _ = std::fs::write(path, net.aig.to_aiger());

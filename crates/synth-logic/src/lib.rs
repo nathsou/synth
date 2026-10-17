@@ -9,9 +9,11 @@
 
 pub mod aig;
 pub mod ff;
+pub mod fraig;
 pub mod lower;
 pub mod lutmap;
 pub mod net;
+pub mod sat;
 
 pub use aig::{Aig, Lit};
 pub use net::LogicNet;
