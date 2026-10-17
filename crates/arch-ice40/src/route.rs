@@ -94,7 +94,31 @@ pub fn route(
                 nl.str(nl.nets[ids[net]].name),
                 arch.db.node_name(NodeId::from_raw(sink))
             ),
-            other => other.to_string(),
+            synth_route::RouteError::Congested { overused_nodes, nodes, nets } => {
+                let names: Vec<&str> =
+                    nets.iter().take(8).map(|&i| nl.str(nl.nets[ids[i]].name)).collect();
+                let wires: Vec<String> =
+                    nodes.iter().take(4).map(|&k| arch.db.node_name(NodeId::from_raw(k))).collect();
+                // Sinks of the conflicting nets in the tile of the first wire.
+                let tile = wires.first().map(|w| w.rsplit_once('/').map_or("", |x| x.0).to_string());
+                let mut detail = String::new();
+                if let Some(tile) = tile {
+                    for &i in nets.iter().take(4) {
+                        let sinks: Vec<String> = requests[i]
+                            .sinks
+                            .iter()
+                            .map(|&k| arch.db.node_name(NodeId::from_raw(k)))
+                            .filter(|n| n.starts_with(&format!("{tile}/")))
+                            .collect();
+                        detail.push_str(&format!("; {} -> {}", nl.str(nl.nets[ids[i]].name), sinks.join(" ")));
+                    }
+                }
+                format!(
+                    "routing congestion not resolved: {overused_nodes} wires overused (e.g. {}) by nets {}{detail}",
+                    wires.join(", "),
+                    names.join(", ")
+                )
+            }
         })?;
     log.push(format!(
         "routing: {} nets, {} wires used, {} iterations",

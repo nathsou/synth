@@ -208,3 +208,84 @@ pub fn clean(m: &mut Module) -> Result<(), String> {
     remove_dead(m);
     Ok(())
 }
+
+/// Rewrites the module so that it simulates with two-valued semantics, as
+/// synthesised hardware behaves: unknown constants, initial values and
+/// memory contents become 0, and dynamic part-selects read 0 outside the
+/// vector. Used to compare synthesis results against their RTL in
+/// simulation.
+pub fn two_state(m: &mut Module) {
+    use synth_core::Logic;
+    let fix = |b: &mut SigBit| {
+        if let SigBit::Const(Logic::X | Logic::Z) = b {
+            *b = SigBit::ZERO;
+        }
+    };
+    let fix_v = |v: &mut synth_core::LogicVec| {
+        let bits: Vec<Logic> =
+            v.bits().map(|b| if b.is_known() { b } else { Logic::Zero }).collect();
+        *v = synth_core::LogicVec::from_bits(&bits);
+    };
+    let mut shiftx = Vec::new();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive && matches!(c.kind, CellKind::Shiftx { .. }) {
+            shiftx.push(ci);
+        }
+    }
+    for c in m.cells.iter_mut().filter(|c| c.alive) {
+        c.map_inputs(|mut b| {
+            fix(&mut b);
+            b
+        });
+        if let CellKind::Dff(d) = &mut c.kind {
+            fix_v(&mut d.init);
+            if let Some((_, v)) = &mut d.srst {
+                fix_v(v);
+            }
+            if let Some((_, v)) = &mut d.arst {
+                fix_v(v);
+            }
+        }
+    }
+    for mem in m.memories.iter_mut().filter(|m| m.alive) {
+        mem.init.iter_mut().for_each(fix_v);
+        for rd in &mut mem.reads {
+            rd.addr.0.iter_mut().for_each(fix);
+            fix(&mut rd.en);
+        }
+        for wr in &mut mem.writes {
+            wr.addr
+                .0
+                .iter_mut()
+                .chain(wr.data.0.iter_mut())
+                .chain(wr.en.0.iter_mut())
+                .for_each(fix);
+        }
+    }
+    for (_, rhs) in &mut m.connections {
+        rhs.0.iter_mut().for_each(fix);
+    }
+    // Dynamic part-selects as zero-filling shifts.
+    for ci in shiftx {
+        let CellKind::Shiftx { a, b, b_signed, offset, y } = m.cells[ci].kind.clone() else {
+            unreachable!()
+        };
+        m.cells[ci].alive = false;
+        let mut b = b;
+        let neg = if b_signed { b.0.pop() } else { None };
+        let base: Sig = if offset >= 0 {
+            a.0.iter().skip(offset as usize).copied().collect()
+        } else {
+            std::iter::repeat_n(SigBit::ZERO, offset.unsigned_abs() as usize)
+                .chain(a.0.iter().copied())
+                .collect()
+        };
+        let w = y.width().max(base.width()).max(1);
+        let shifted = m.binary(crate::BinaryOp::Shr, false, base.extend(w, false), b);
+        let mut v = Sig(shifted.0[..y.width()].to_vec());
+        if let Some(n) = neg {
+            v = m.mux(n, v, Sig::zeros(y.width()));
+        }
+        m.connect(y, v);
+    }
+}

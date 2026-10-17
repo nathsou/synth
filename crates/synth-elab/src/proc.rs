@@ -367,6 +367,7 @@ impl<'a> Elab<'a> {
                 q: Sig(ks.clone()),
                 en: None,
                 srst: None,
+                en_over_srst: false,
                 arst,
                 init: LogicVec::from_bits(&init),
             };

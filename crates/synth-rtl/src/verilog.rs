@@ -282,26 +282,28 @@ pub fn write(m: &Module) -> String {
                     );
                     prefix = "    else ";
                 }
-                if let Some((c, v)) = &d.srst {
-                    let _ = writeln!(
-                        chain,
-                        "{prefix}if ({} == 1'b{}) {r} <= {};",
-                        bit(m, c.sig),
-                        c.pol as u8,
-                        konst(v)
-                    );
-                    prefix = "    else ";
-                }
-                if let Some(c) = &d.en {
-                    let _ = writeln!(
-                        chain,
-                        "{prefix}if ({} == 1'b{}) {r} <= {};",
-                        bit(m, c.sig),
-                        c.pol as u8,
+                let test = |c: &crate::Control| format!("{} == 1'b{}", bit(m, c.sig), c.pol as u8);
+                let data = match &d.srst {
+                    Some((c, v)) if d.en_over_srst || d.en.is_none() => format!(
+                        "begin if ({}) {r} <= {}; else {r} <= {}; end",
+                        test(c),
+                        konst(v),
                         sig(m, &d.d)
-                    );
-                } else {
-                    let _ = writeln!(chain, "{prefix}{r} <= {};", sig(m, &d.d));
+                    ),
+                    Some((c, v)) => {
+                        let _ = writeln!(chain, "{prefix}if ({}) {r} <= {};", test(c), konst(v));
+                        prefix = "    else ";
+                        format!("{r} <= {};", sig(m, &d.d))
+                    }
+                    None => format!("{r} <= {};", sig(m, &d.d)),
+                };
+                match &d.en {
+                    Some(c) => {
+                        let _ = writeln!(chain, "{prefix}if ({}) {data}", test(c));
+                    }
+                    None => {
+                        let _ = writeln!(chain, "{prefix}{data}");
+                    }
                 }
                 o.push_str(&chain);
                 let _ = writeln!(o, "  end");
@@ -380,12 +382,29 @@ pub fn write(m: &Module) -> String {
                     let _ = writeln!(o, "  assign {} = {r};", sig(m, &rd.data));
                     let _ = writeln!(
                         o,
-                        "  always @({} {}) if ({}) {r} <= {name}[{}];",
+                        "  always @({} {}) if ({}) begin {r} <= {name}[{}];",
                         if clk.posedge { "posedge" } else { "negedge" },
                         bit(m, clk.sig),
                         bit(m, rd.en),
                         sig(m, &rd.addr)
                     );
+                    // Write-first ports: same-cycle writes are visible.
+                    for (wi, wr) in mem.writes.iter().enumerate() {
+                        if !rd.transparent.get(wi).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        for i in 0..mem.width as usize {
+                            let _ = writeln!(
+                                o,
+                                "    if ({} && {} == {}) {r}[{i}] <= {};",
+                                bit(m, wr.en.0[i]),
+                                sig(m, &wr.addr),
+                                sig(m, &rd.addr),
+                                bit(m, wr.data.0[i])
+                            );
+                        }
+                    }
+                    let _ = writeln!(o, "  end");
                 }
             }
         }

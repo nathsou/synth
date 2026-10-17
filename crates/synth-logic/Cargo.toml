@@ -1,0 +1,16 @@
+[package]
+name = "synth-logic"
+description = "Logic synthesis: and-inverter graphs, optimisation and LUT mapping"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-rtl.workspace = true
+
+[lints]
+workspace = true

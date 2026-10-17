@@ -89,8 +89,10 @@ pub struct NetRoute {
 pub enum RouteError {
     /// A sink is not reachable from its source at all.
     Unroutable { net: usize, sink: u32 },
-    /// Congestion could not be resolved within the iteration limit.
-    Congested { overused_nodes: usize },
+    /// Congestion could not be resolved within the iteration limit. From
+    /// the iteration with the least overuse: the overused nodes and the nets
+    /// using them.
+    Congested { overused_nodes: usize, nodes: Vec<u32>, nets: Vec<usize> },
 }
 
 impl std::fmt::Display for RouteError {
@@ -99,7 +101,7 @@ impl std::fmt::Display for RouteError {
             RouteError::Unroutable { net, sink } => {
                 write!(f, "net {net}: sink node {sink} is unreachable")
             }
-            RouteError::Congested { overused_nodes } => {
+            RouteError::Congested { overused_nodes, .. } => {
                 write!(f, "routing congestion not resolved ({overused_nodes} nodes overused)")
             }
         }
@@ -184,6 +186,7 @@ pub fn route(
         }
     }
 
+    let mut best: Option<(Vec<u32>, Vec<usize>)> = None;
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
@@ -213,6 +216,18 @@ pub fn route(
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
         stats.overused_history.push(overused.len());
+        if best.as_ref().is_none_or(|b: &(Vec<u32>, Vec<usize>)| overused.len() < b.0.len()) {
+            let set: std::collections::HashSet<usize> = overused.iter().copied().collect();
+            let users = (0..nets.len())
+                .filter(|&i| {
+                    routes[i]
+                        .edges
+                        .iter()
+                        .any(|&e| set.contains(&(graph.edge_dst[e as usize] as usize)))
+                })
+                .collect();
+            best = Some((overused.iter().map(|&k| k as u32).collect(), users));
+        }
         if overused.is_empty() {
             stats.wire_nodes = routes.iter().map(|r| r.edges.len()).sum();
             return Ok((routes, stats));
@@ -220,7 +235,8 @@ pub fn route(
         for &k in &overused {
             st.history[k] += opts.history_factor * (st.occupancy[k] - 1) as f32;
         }
-        pres_fac *= opts.present_growth;
+        // Bounded so that costs stay finite on hopeless nets.
+        pres_fac = (pres_fac * opts.present_growth).min(1e6);
         // Reroute only nets using overused nodes.
         let mut is_over = vec![false; n];
         for &k in &overused {
@@ -232,8 +248,9 @@ pub fn route(
             })
             .collect();
     }
-    let overused_nodes = (0..n).filter(|&k| st.occupancy[k] > 1).count();
-    Err(RouteError::Congested { overused_nodes })
+    let (nodes, nets) = best.unwrap_or_default();
+    let overused_nodes = nodes.len();
+    Err(RouteError::Congested { overused_nodes, nodes, nets })
 }
 
 /// Statistics of a routing run.

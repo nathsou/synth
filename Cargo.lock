@@ -7,8 +7,10 @@ name = "arch-ice40"
 version = "0.1.0"
 dependencies = [
  "synth-core",
+ "synth-logic",
  "synth-netlist",
  "synth-route",
+ "synth-rtl",
 ]
 
 [[package]]
@@ -42,6 +44,14 @@ dependencies = [
  "synth-core",
  "synth-rtl",
  "synth-verilog",
+]
+
+[[package]]
+name = "synth-logic"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-rtl",
 ]
 
 [[package]]

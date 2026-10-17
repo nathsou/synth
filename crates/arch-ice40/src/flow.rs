@@ -24,13 +24,30 @@ pub struct FlowResult {
     pub log: Vec<String>,
 }
 
-/// Packs, places and routes a netlist of iCE40 primitives.
+/// Packs, places and routes a netlist of iCE40 primitives. On failure the
+/// error message starts with the log so far (one `info:` line per entry).
 pub fn implement(
-    mut nl: Netlist,
+    nl: Netlist,
     pins: &PinConstraints,
     opts: &FlowOptions,
 ) -> Result<FlowResult, String> {
     let mut log = Vec::new();
+    match run(nl, pins, opts, &mut log) {
+        Ok(config) => Ok(FlowResult { config, log }),
+        Err(e) => {
+            let mut msg: String = log.iter().map(|l| format!("info: {l}\n")).collect();
+            msg.push_str(&e);
+            Err(msg)
+        }
+    }
+}
+
+fn run(
+    mut nl: Netlist,
+    pins: &PinConstraints,
+    opts: &FlowOptions,
+    log: &mut Vec<String>,
+) -> Result<Config, String> {
     let t0 = Instant::now();
     let arch = Arch::new(opts.part, &opts.package)?;
     log.push(format!(
@@ -58,10 +75,10 @@ pub fn implement(
     log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
 
     let t = Instant::now();
-    let routing = crate::route::route(&arch, &nl, &placement, &mut log)?;
+    let routing = crate::route::route(&arch, &nl, &placement, log)?;
     log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
 
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
-    Ok(FlowResult { config, log })
+    Ok(config)
 }

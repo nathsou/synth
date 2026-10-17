@@ -17,6 +17,7 @@ pub mod pack;
 pub mod pcf;
 pub mod place;
 pub mod route;
+pub mod synth;
 
 pub use bitstream::{Config, FreqRange};
 pub use device::{Die, TileKind};

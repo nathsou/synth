@@ -14,6 +14,8 @@ USAGE:
 
 COMMANDS:
     check      Parse Verilog files and report errors
+    build      Synthesise, place and route Verilog into an iCE40 bitstream
+    synth      Synthesise Verilog to iCE40 primitives (--verilog <out.v>)
     elab       Elaborate Verilog into RTL (--verilog <out.v> to write it back)
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
@@ -21,9 +23,15 @@ COMMANDS:
     help       Print this message
     version    Print version information
 
+BUILD OPTIONS:
+    synth build <files.v...> --device <hx1k|hx8k|...> --package <pkg>
+              [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
+              [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
+
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
+              [--pass <clean|dff|memff|memtrans|memregs|two-state>]...
 
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
@@ -43,6 +51,8 @@ fn main() -> ExitCode {
         }
         Some("check") => cmd_check(&argv[1..]),
         Some("elab") => cmd_elab(&argv[1..]),
+        Some("build") => cmd_build(&argv[1..]),
+        Some("synth") => cmd_synth(&argv[1..]),
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
@@ -71,6 +81,88 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
     fn port_dir(&self, kind: &str, port: &str) -> Option<synth_netlist::Dir> {
         arch_ice40::cells::port_dir(kind, port)
     }
+}
+
+/// Elaborates and synthesises the Verilog named by `a` for iCE40.
+fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
+    let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
+    let t = std::time::Instant::now();
+    let (sm, src) = load_verilog(a)?;
+    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
+    let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+    if !diags.items.is_empty() {
+        eprint!("{}", diags.render(&sm));
+    }
+    let m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
+    eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    let (nl, log) = arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
+    for l in &log {
+        eprintln!("info: {l}");
+    }
+    let stats = nl.stats();
+    eprintln!(
+        "info: {}",
+        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
+    );
+    Ok(nl)
+}
+
+fn cmd_synth(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
+    let nl = synthesize(&mut a)?;
+    if let Some(out) = a.value("--verilog") {
+        let name = a.value("--rename").unwrap_or_else(|| {
+            nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into())
+        });
+        write(&out, synth_netlist::verilog::write(&nl, &name).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn cmd_build(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(
+        argv,
+        &[
+            "-I",
+            "-D",
+            "-P",
+            "--top",
+            "--device",
+            "--package",
+            "--pcf",
+            "-o",
+            "--asc",
+            "--seed",
+            "--effort",
+        ],
+        &[],
+    )?;
+    let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
+    let package = a.required("--package")?;
+    let pins = match a.value("--pcf") {
+        Some(p) => arch_ice40::pcf::parse_pcf(&read(&p)?)?,
+        None => Default::default(),
+    };
+    let seed =
+        a.value("--seed").map(|s| s.parse().map_err(|_| "bad --seed")).transpose()?.unwrap_or(1);
+    let effort = a
+        .value("--effort")
+        .map(|s| s.parse().map_err(|_| "bad --effort"))
+        .transpose()?
+        .unwrap_or(1.0);
+    let nl = synthesize(&mut a)?;
+    let opts = arch_ice40::flow::FlowOptions { part, package, seed, place_effort: effort };
+    let res = arch_ice40::flow::implement(nl, &pins, &opts)?;
+    for l in &res.log {
+        eprintln!("info: {l}");
+    }
+    if let Some(out) = a.value("-o") {
+        write(&out, &res.config.to_bin())?;
+    }
+    if let Some(out) = a.value("--asc") {
+        write(&out, arch_ice40::asc::write_asc(&res.config).as_bytes())?;
+    }
+    Ok(())
 }
 
 fn cmd_pnr(argv: &[String]) -> Result<(), String> {
@@ -158,6 +250,46 @@ fn load_verilog(
     Ok((sm, src))
 }
 
+/// Runs a named RTL pass (`synth elab --pass`), for testing passes by
+/// differential simulation.
+fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
+    use synth_rtl::{MemId, mem, opt};
+    let mems = || (0..m.memories.len()).map(MemId::new).collect::<Vec<_>>();
+    match name {
+        "clean" => opt::clean(m)?,
+        "two-state" => opt::two_state(m),
+        "dff" => {
+            let n = synth_rtl::dff::extract_controls(m);
+            eprintln!("info: dff: {n} flip-flop bits gained controls");
+        }
+        "memff" => {
+            mem::merge_write_ports(m);
+            let n = mem::merge_read_ffs(m);
+            eprintln!("info: memff: {n} read ports made synchronous");
+        }
+        "memtrans" => {
+            for mi in mems() {
+                if m.memories[mi].alive {
+                    mem::emulate_transparency(m, mi);
+                }
+            }
+        }
+        "memregs" => {
+            for mi in mems() {
+                if m.memories[mi].alive {
+                    mem::to_registers(m, mi)?;
+                }
+            }
+        }
+        _ => {
+            return Err(format!(
+                "unknown pass `{name}` (clean, dff, memff, memtrans, memregs, two-state)"
+            ));
+        }
+    }
+    opt::clean(m)
+}
+
 /// Parses a top-level parameter override `NAME=VALUE`, where the value is a
 /// decimal or `0x` hexadecimal integer or a double-quoted string.
 fn parse_param(p: &str) -> Result<(String, synth_core::LogicVec), String> {
@@ -187,7 +319,9 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_elab(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
+    let mut a =
+        Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--pass"], &[])?;
+    let passes = a.values("--pass");
     let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
     let (sm, src) = load_verilog(&mut a)?;
     let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
@@ -196,6 +330,9 @@ fn cmd_elab(argv: &[String]) -> Result<(), String> {
         eprint!("{}", diags.render(&sm));
     }
     let mut m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
+    for p in &passes {
+        run_rtl_pass(&mut m, p)?;
+    }
     let stats = m.stats();
     eprintln!(
         "info: {} wires, cells: {}",

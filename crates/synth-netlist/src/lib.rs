@@ -7,6 +7,8 @@
 //! [`INPUT_PORT`], [`OUTPUT_PORT`] or [`INOUT_PORT`] with a single pin `PAD`,
 //! so every net endpoint is a cell pin.
 
+pub mod verilog;
+
 use std::fmt;
 
 use synth_core::{FxHashMap, IndexVec, Interner, OrderedMap, Sym, define_id};

@@ -10,7 +10,9 @@
 //! comparisons have equally wide operands and a 1-bit output.
 
 pub mod build;
+pub mod dff;
 pub mod eval;
+pub mod mem;
 pub mod opt;
 pub mod verilog;
 
@@ -299,7 +301,8 @@ pub struct Control {
 /// A flip-flop vector: `q <= d` on the clock edge, with optional enable,
 /// synchronous reset and asynchronous reset.
 ///
-/// Priority: async reset, then sync reset, then enable.
+/// Priority: async reset, then sync reset, then enable — unless
+/// `en_over_srst`, where the synchronous reset only acts when enabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dff {
     pub clk: Clock,
@@ -307,6 +310,7 @@ pub struct Dff {
     pub q: Sig,
     pub en: Option<Control>,
     pub srst: Option<(Control, LogicVec)>,
+    pub en_over_srst: bool,
     pub arst: Option<(Control, LogicVec)>,
     /// Power-on value (`x` bits mean unspecified).
     pub init: LogicVec,

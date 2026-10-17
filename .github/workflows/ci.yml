@@ -69,11 +69,13 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - name: Install iverilog (test oracle only)
+      - name: Install iverilog and Yosys cell models (test oracles only)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iverilog
+          sudo apt-get install -y --no-install-recommends iverilog yosys
       - name: Build
         run: cargo build --release -p synth
       - name: Elaborated netlists vs source RTL
         run: tools/ci_rtlsim.sh
+      - name: Synthesised netlists vs RTL
+        run: MODE=synth tools/ci_rtlsim.sh

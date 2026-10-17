@@ -73,6 +73,8 @@ def main():
     ap.add_argument("-D", dest="defines", action="append", default=[])
     ap.add_argument("-P", dest="params", action="append", default=[],
                     help="NAME=VALUE parameter override for the reference top")
+    ap.add_argument("--lib", action="append", default=[],
+                    help="extra Verilog for the netlist side (primitive models)")
     ap.add_argument("--probe", action="store_true",
                     help="also compare every named internal wire and report the first divergence")
     ap.add_argument("--watch", default="",
@@ -141,7 +143,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="rtlsim")
     tbp = os.path.join(tmp, "tb.v")
     out = os.path.join(tmp, "sim")
-    cmd = ["iverilog", "-g2012", "-o", out, tbp, a.netlist] + [f"-I{i}" for i in a.incdirs] + [f"-D{d}" for d in a.defines] + a.rtl
+    cmd = ["iverilog", "-g2012", "-o", out, tbp, a.netlist] + a.lib + [f"-I{i}" for i in a.incdirs] + [f"-D{d}" for d in a.defines] + a.rtl
     # Probes whose path does not exist in the reference are dropped and the
     # testbench is recompiled.
     while True:

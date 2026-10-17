@@ -10,7 +10,9 @@ publish.workspace = true
 
 [dependencies]
 synth-core.workspace = true
+synth-logic.workspace = true
 synth-netlist.workspace = true
+synth-rtl.workspace = true
 synth-route.workspace = true
 
 [lints]

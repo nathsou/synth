@@ -49,7 +49,12 @@ struct LcInfo {
     clk: Option<NetId>,
     cen: Option<NetId>,
     sr: Option<NetId>,
-    locals: u8,
+    /// Nets on inputs fed from local tracks of class A (`I0`, `I2`) and
+    /// class B (`I1`, `I3` unless it is the carry input).
+    class_a: [Option<NetId>; 2],
+    class_b: [Option<NetId>; 2],
+    /// Control nets that need a class A local track (not on a global).
+    fabric_ctrl: [Option<NetId>; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -317,17 +322,12 @@ impl<'a> Annealer<'a> {
                 info.clk = nl.pin_net(c, "CLK");
                 info.cen = nl.pin_net(c, "CEN");
                 info.sr = nl.pin_net(c, "SR");
+                let fab = |n: Option<NetId>| n.filter(|&n| !is_global(n));
+                info.fabric_ctrl = [fab(info.clk), fab(info.cen), fab(info.sr)];
             }
             let cin = nl.pin_net(c, "CIN");
-            let mut locals = 0u8;
-            for (k, pin) in ["I0", "I1", "I2", "I3"].iter().enumerate() {
-                if let Some(n) = nl.pin_net(c, pin)
-                    && !(k == 3 && Some(n) == cin)
-                {
-                    locals += 1;
-                }
-            }
-            info.locals = locals;
+            info.class_a = [nl.pin_net(c, "I0"), nl.pin_net(c, "I2")];
+            info.class_b = [nl.pin_net(c, "I1"), nl.pin_net(c, "I3").filter(|&n| Some(n) != cin)];
             sa.lc_info.insert(c, info);
         }
         // Units: chains first, then single logic cells and RAMs.
@@ -395,26 +395,50 @@ impl<'a> Annealer<'a> {
         (x * (self.height + 2) + y) * 8 + z
     }
 
+    /// Whether the logic cells placed in tile (x, y) can share it: one
+    /// control set, and enough local tracks. A tile has 16 local tracks of
+    /// each class; inputs `I0`/`I2` and control pins not on a global take
+    /// class A tracks, `I1`/`I3` class B (a net reaching several pins of a
+    /// class needs one track).
     fn tile_ok(&self, x: usize, y: usize) -> bool {
-        let mut locals = 0usize;
         let mut ctrl: Option<ControlSet> = None;
+        let mut a: [Option<NetId>; 19] = [None; 19];
+        let mut b: [Option<NetId>; 16] = [None; 16];
+        let (mut na, mut nb) = (0, 0);
         for z in 0..8 {
             let Some(c) = self.lc_occ[self.slot(x, y, z)] else { continue };
             let i = &self.lc_info[&c];
-            locals += i.locals as usize;
             if i.dff {
                 let key = (i.clk, i.cen, i.sr, i.neg_clk);
                 match ctrl {
                     None => {
                         ctrl = Some(key);
-                        locals += [i.clk, i.cen, i.sr].iter().filter(|n| n.is_some()).count();
+                        for n in i.fabric_ctrl.iter().flatten() {
+                            if !a[..na].contains(&Some(*n)) {
+                                a[na] = Some(*n);
+                                na += 1;
+                            }
+                        }
                     }
                     Some(k) if k != key => return false,
                     _ => {}
                 }
             }
+            for n in i.class_a.iter().flatten() {
+                if !a[..na].contains(&Some(*n)) {
+                    a[na] = Some(*n);
+                    na += 1;
+                }
+            }
+            for n in i.class_b.iter().flatten() {
+                if !b[..nb].contains(&Some(*n)) {
+                    b[nb] = Some(*n);
+                    nb += 1;
+                }
+            }
         }
-        locals <= self.opts.max_locals
+        let half = self.opts.max_locals / 2;
+        na <= half && nb <= half
     }
 
     fn cell_xy(&self, c: CellId) -> (i16, i16) {
