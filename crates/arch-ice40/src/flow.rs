@@ -78,7 +78,8 @@ fn run(
     crate::place::place_ios(&arch, &nl, pins, &mut fixed, log)?;
     crate::place::assign_globals(&arch, &mut nl, &mut fixed, log)?;
     // Each retry also leaves tiles room on their local tracks (contested
-    // local tracks in full tiles are what fails to route) and anneals longer.
+    // local tracks in full tiles are what fails to route), anneals longer
+    // and starts from another seed, not to meet the same conflict again.
     let attempts = [
         (opts.timing_weight, 32, opts.place_effort),
         (opts.timing_weight / 2.0, 30, opts.place_effort),
@@ -88,7 +89,7 @@ fn run(
     for (attempt, &(w, max_locals, effort)) in attempts.iter().enumerate() {
         let t = Instant::now();
         let popts = PlaceOptions {
-            seed: opts.seed,
+            seed: opts.seed.wrapping_add(attempt as u64),
             effort,
             timing_weight: w,
             max_locals,

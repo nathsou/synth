@@ -105,7 +105,7 @@ pub enum RouteError {
     Unroutable { net: usize, sink: u32 },
     /// Congestion could not be resolved within the iteration limit. From
     /// the iteration with the least overuse: the overused nodes and the nets
-    /// using them.
+    /// using them (those on the first node first).
     Congested { overused_nodes: usize, nodes: Vec<u32>, nets: Vec<usize> },
 }
 
@@ -287,14 +287,17 @@ pub fn route_with(
         }
         if best.as_ref().is_none_or(|b: &(Vec<u32>, Vec<usize>)| overused.len() < b.0.len()) {
             let set: std::collections::HashSet<usize> = overused.iter().copied().collect();
-            let users = (0..nets.len())
-                .filter(|&i| {
-                    routes[i]
-                        .edges
-                        .iter()
-                        .any(|&e| set.contains(&(graph.edge_dst[e as usize] as usize)))
-                })
+            let uses = |i: usize, f: &dyn Fn(usize) -> bool| {
+                routes[i].edges.iter().any(|&e| f(graph.edge_dst[e as usize] as usize))
+            };
+            // Nets on the first overused node first, then the others.
+            let first = overused.first().copied();
+            let mut users: Vec<usize> =
+                (0..nets.len()).filter(|&i| uses(i, &|d| Some(d) == first)).collect();
+            let rest: Vec<usize> = (0..nets.len())
+                .filter(|&i| !users.contains(&i) && uses(i, &|d| set.contains(&d)))
                 .collect();
+            users.extend(rest);
             best = Some((overused.iter().map(|&k| k as u32).collect(), users));
             best_iter = iter;
         }
