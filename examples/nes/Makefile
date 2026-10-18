@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: CERN-OHL-W-2.0
+SYNTH ?= ../../target/release/synth
+VERILATOR ?= verilator
+BUILD ?= ../../work/nes
+JOBS ?= 4
+TEST_ROMS ?= ../../work/nes-test-roms
+BUILD := $(abspath $(BUILD))
+SOURCES := nes.weft cpu.weft decode.weft ppu.weft apu.weft mapper.weft
+
+.PHONY: all sim cpu-test test clean
+all: sim
+sim: $(BUILD)/obj/Vnes
+
+$(BUILD)/nes.v: $(SOURCES) $(SYNTH)
+	mkdir -p $(BUILD)
+	$(SYNTH) elab $(SOURCES) --top nes --verilog $@
+
+$(BUILD)/obj/Vnes: $(BUILD)/nes.v sim/main.cpp
+	$(VERILATOR) --cc --exe --build -j $(JOBS) -Wno-fatal --top-module nes \
+	    --Mdir $(BUILD)/obj $< $(abspath sim/main.cpp)
+
+$(BUILD)/cpu.v: cpu.weft decode.weft $(SYNTH)
+	mkdir -p $(BUILD)
+	$(SYNTH) elab cpu.weft decode.weft --top nes_cpu_test --verilog $@
+
+$(BUILD)/cpu/Vnes_cpu_test: $(BUILD)/cpu.v tests/cpu.cpp
+	$(VERILATOR) --cc --exe --build -j $(JOBS) -Wno-fatal --top-module nes_cpu_test \
+	    --Mdir $(BUILD)/cpu $< $(abspath tests/cpu.cpp)
+
+cpu-test: $(BUILD)/cpu/Vnes_cpu_test
+	$< $(TEST_ROMS)/other/nestest.nes $(TEST_ROMS)/other/nestest.log
+
+test: sim cpu-test
+	python3 tests/run.py --sim $(BUILD)/obj/Vnes --roms $(TEST_ROMS)
+
+clean:
+	rm -rf $(BUILD)/obj $(BUILD)/cpu $(BUILD)/nes.v $(BUILD)/cpu.v

@@ -1,0 +1,327 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Ricoh 2A03 CPU. One enabled edge completes one external bus cycle.
+// The decimal flag is stored, but arithmetic is always binary.
+enum NesOp {
+    BRK, ORA, KIL, SLO, NOP, ASL, PHP, ANC, BPL, CLC,
+    JSR, AND, RLA, BIT, ROL, PLP, BMI, SEC, RTI, EOR,
+    SRE, LSR, PHA, ALR, JMP, BVC, CLI, RTS, ADC, RRA,
+    ROR, PLA, ARR, BVS, SEI, STA, SAX, STY, STX, DEY,
+    TXA, XAA, BCC, AHX, TYA, TXS, TAS, SHY, SHX, LDY,
+    LDA, LDX, LAX, TAY, TAX, BCS, CLV, TSX, LAS, CPY,
+    CMP, DCP, DEC, INY, DEX, AXS, BNE, CLD, CPX, SBC,
+    ISC, INC, INX, BEQ, SED,
+}
+enum NesMode { Imp, Acc, Imm, Zp, Zpx, Zpy, Abs, Abx, Aby, Izx, Izy, Rel, Ind }
+struct NesDecode { op: NesOp, mode: NesMode }
+struct NesAlu { a: uint<8>, x: uint<8>, y: uint<8>, s: uint<8>, p: uint<8>, value: uint<8> }
+
+fn nes_nz(p: uint<8>, v: uint<8>) -> uint<8> {
+    (p & 0x7D) | (v & 0x80) | (if v == 0 { uint<8>(2) } else { uint<8>(0) })
+}
+
+fn nes_alu(op: NesOp, a: uint<8>, x: uint<8>, y: uint<8>, s: uint<8>, p: uint<8>, d: uint<8>) -> NesAlu {
+    var r: NesAlu = NesAlu { a: a, x: x, y: y, s: s, p: p, value: d };
+    var v: uint<8> = d;
+    // The RMW half runs before the ALU half of a combined instruction.
+    match op {
+        .ASL | .SLO => { v = d << 1; r.p = (p & 0xFE) | uint<8>(d[7].bits()); }
+        .LSR | .SRE => { v = d >> 1; r.p = (p & 0xFE) | uint<8>(d[0].bits()); }
+        .ROL | .RLA => { v = (d << 1) | uint<8>(p[0].bits()); r.p = (p & 0xFE) | uint<8>(d[7].bits()); }
+        .ROR | .RRA => { v = concat(p[0], d[7:1]); r.p = (p & 0xFE) | uint<8>(d[0].bits()); }
+        .DEC | .DCP => { v = d -% 1; }
+        .INC | .ISC => { v = d +% 1; }
+        _ => {}
+    }
+    r.value = v;
+    match op {
+        .ORA | .SLO => { r.a = a | v; r.p = nes_nz(r.p, r.a); }
+        .AND | .RLA => { r.a = a & v; r.p = nes_nz(r.p, r.a); }
+        .EOR | .SRE => { r.a = a ^ v; r.p = nes_nz(r.p, r.a); }
+        .ADC | .SBC | .RRA | .ISC => {
+            let sub = op == .SBC || op == .ISC;
+            let operand = if sub { ~v } else { v };
+            let sum: uint<9> = uint<9>(a) +% uint<9>(operand) +% uint<9>(r.p[0].bits());
+            r.a = sum[7:0];
+            let overflow = ((~(a ^ operand)) & (a ^ r.a))[7];
+            r.p = nes_nz((r.p & 0xBE) | uint<8>(sum[8].bits()) | (uint<8>(overflow.bits()) << 6), r.a);
+        }
+        .CMP | .CPX | .CPY | .DCP | .AXS => {
+            let left = match op { .CPX => x, .CPY => y, .AXS => a & x, _ => a };
+            let diff = left -% v;
+            r.p = nes_nz((r.p & 0xFE) | uint<8>((left >= v).bits()), diff);
+            if op == .AXS { r.x = diff; }
+        }
+        .ASL | .LSR | .ROL | .ROR | .INC | .DEC => { r.p = nes_nz(r.p, v); }
+        .LDA => { r.a = v; r.p = nes_nz(p, v); }
+        .LDX => { r.x = v; r.p = nes_nz(p, v); }
+        .LDY => { r.y = v; r.p = nes_nz(p, v); }
+        .LAX => { r.a = v; r.x = v; r.p = nes_nz(p, v); }
+        .LAS => { r.a = v & s; r.x = r.a; r.s = r.a; r.p = nes_nz(p, r.a); }
+        .BIT => { r.p = (p & 0x3D) | (v & 0xC0) | (uint<8>((a & v == 0).bits()) << 1); }
+        .ANC => { r.a = a & v; r.p = nes_nz((p & 0xFE) | uint<8>(r.a[7].bits()), r.a); }
+        .ALR => { let t = a & v; r.a = t >> 1; r.p = nes_nz((p & 0xFE) | uint<8>(t[0].bits()), r.a); }
+        .ARR => {
+            let t = a & v;
+            r.a = concat(p[0], t[7:1]);
+            r.p = nes_nz((p & 0xBE) | uint<8>(r.a[6].bits()) | (uint<8>((r.a[6] ^ r.a[5]).bits()) << 6), r.a);
+        }
+        .XAA => { r.a = x & v; r.p = nes_nz(p, r.a); }
+        .TAX => { r.x = a; r.p = nes_nz(p, a); }
+        .TAY => { r.y = a; r.p = nes_nz(p, a); }
+        .TXA => { r.a = x; r.p = nes_nz(p, x); }
+        .TYA => { r.a = y; r.p = nes_nz(p, y); }
+        .TSX => { r.x = s; r.p = nes_nz(p, s); }
+        .TXS => { r.s = x; }
+        .INX => { r.x = x +% 1; r.p = nes_nz(p, r.x); }
+        .INY => { r.y = y +% 1; r.p = nes_nz(p, r.y); }
+        .DEX => { r.x = x -% 1; r.p = nes_nz(p, r.x); }
+        .DEY => { r.y = y -% 1; r.p = nes_nz(p, r.y); }
+        .CLC => { r.p = p & 0xFE; }
+        .SEC => { r.p = p | 1; }
+        .CLI => { r.p = p & 0xFB; }
+        .SEI => { r.p = p | 4; }
+        .CLD => { r.p = p & 0xF7; }
+        .SED => { r.p = p | 8; }
+        .CLV => { r.p = p & 0xBF; }
+        _ => {}
+    }
+    r
+}
+
+fn nes_store(op: NesOp) -> bool {
+    match op { .STA | .STX | .STY | .SAX | .AHX | .SHX | .SHY | .TAS => true, _ => false }
+}
+fn nes_rmw(op: NesOp) -> bool {
+    match op { .ASL | .LSR | .ROL | .ROR | .INC | .DEC | .SLO | .SRE | .RLA | .RRA | .DCP | .ISC => true, _ => false }
+}
+fn nes_branch(op: NesOp, p: uint<8>) -> bool {
+    match op {
+        .BPL => !p[7], .BMI => p[7], .BVC => !p[6], .BVS => p[6],
+        .BCC => !p[0], .BCS => p[0], .BNE => !p[1], .BEQ => p[1], _ => false,
+    }
+}
+
+enum NesCpuCycle {
+    Reset0, Reset1, Reset2, Reset3, Reset4, VectorLo, VectorHi,
+    Fetch, Operand, ZpIndex, AbsHi, IndexFix, PtrLo, PtrHi, Read,
+    Write, RmwDummy, RmwWrite, Branch, BranchFix,
+    JsrDummy, JsrHi, JsrLo, JsrTarget, JmpLo, JmpHi,
+    Push, PullDummy, Pull, RtsLo, RtsHi, RtsEnd, RtiP, RtiLo, RtiHi,
+    IntDummy, IntHi, IntLo, IntP, Jam,
+}
+
+module nes_cpu(
+    in enable: bool, in nmi: bool, in irq: bool, in data: uint<8>,
+    out address: uint<16>, out write: bool, out write_data: uint<8>,
+    out sync_fetch: bool, out halted: bool,
+    out debug_pc: uint<16>, out debug_a: uint<8>, out debug_x: uint<8>,
+    out debug_y: uint<8>, out debug_s: uint<8>, out debug_p: uint<8>,
+) {
+    reg cycle: NesCpuCycle = .Reset0;
+    reg pc: uint<16> = 0;
+    reg a: uint<8> = 0;
+    reg x: uint<8> = 0;
+    reg y: uint<8> = 0;
+    reg s: uint<8> = 0;
+    reg p: uint<8> = 0x24;
+    reg opcode: uint<8> = 0xEA;
+    reg lo: uint<8> = 0;
+    reg ea: uint<16> = 0;
+    reg partial: uint<16> = 0;
+    reg pointer: uint<8> = 0;
+    reg old_data: uint<8> = 0;
+    reg vector: uint<16> = 0xFFFC;
+    reg software_int: bool = false;
+    reg nmi_prev: bool = false;
+    reg nmi_pending: bool = false;
+    reg irq_sample: bool = false;
+    nmi_prev := nmi;
+    if nmi && !nmi_prev { nmi_pending := true; }
+
+    let dec = nes_decode(opcode);
+    let op = dec.op;
+    let mode = dec.mode;
+    let indexed_y = mode == .Aby || mode == .Izy || mode == .Zpy;
+    let idx = if indexed_y { y } else { x };
+    let alu = nes_alu(op, a, x, y, s, p, if mode == .Acc { a } else { data });
+    let rmw_alu = nes_alu(op, a, x, y, s, p, old_data);
+    let high_mask = partial[15:8] +% 1;
+    let store_byte = match op {
+        .STX => x, .STY => y, .SAX => a & x,
+        .AHX | .TAS => (a & x) & high_mask,
+        .SHX => x & high_mask, .SHY => y & high_mask, _ => a,
+    };
+    let unstable = op == .AHX || op == .TAS || op == .SHX || op == .SHY;
+
+    address = pc;
+    write = false;
+    write_data = 0;
+    sync_fetch = cycle == .Fetch;
+    halted = cycle == .Jam;
+    debug_pc = pc; debug_a = a; debug_x = x; debug_y = y; debug_s = s; debug_p = p;
+    match cycle {
+        .Reset2 | .Reset3 | .Reset4 | .JsrDummy | .PullDummy => { address = concat(0x01, s); }
+        .VectorLo => { address = if nmi_pending && vector != 0xFFFC { 0xFFFA } else { vector }; }
+        .VectorHi => { address = vector +% 1; }
+        .ZpIndex | .PtrLo => { address = uint<16>(pointer); }
+        .PtrHi => { address = uint<16>(pointer +% 1); }
+        .IndexFix | .BranchFix => { address = partial; }
+        .Read | .RmwDummy | .RmwWrite => { address = ea; }
+        .Write => {
+            address = if unstable && ea[15:8] != partial[15:8] { concat(store_byte, ea[7:0]) } else { ea };
+            write = true; write_data = store_byte;
+        }
+        .JmpLo => { address = ea; }
+        .JmpHi => { address = concat(ea[15:8], ea[7:0] +% 1); }
+        .Push | .JsrHi | .JsrLo | .IntHi | .IntLo | .IntP => {
+            address = concat(0x01, s); write = true;
+            write_data = match cycle {
+                .JsrHi | .IntHi => pc[15:8], .JsrLo | .IntLo => pc[7:0],
+                .IntP => (p & 0xEF) | (if software_int { uint<8>(0x30) } else { uint<8>(0x20) }),
+                _ => if op == .PHA { a } else { p | 0x30 },
+            };
+        }
+        .Pull | .RtsLo | .RtsHi | .RtiP | .RtiLo | .RtiHi => { address = concat(0x01, s); }
+        _ => {}
+    }
+    if cycle == .RmwDummy { write = true; write_data = old_data; }
+    if cycle == .RmwWrite { write = true; write_data = rmw_alu.value; }
+
+    if enable {
+        irq_sample := irq && !p[2];
+        match cycle {
+            .Reset0 => { cycle := .Reset1; }
+            .Reset1 => { cycle := .Reset2; }
+            .Reset2 => { s := s -% 1; cycle := .Reset3; }
+            .Reset3 => { s := s -% 1; cycle := .Reset4; }
+            .Reset4 => { s := s -% 1; cycle := .VectorLo; }
+            .VectorLo => {
+                lo := data; cycle := .VectorHi;
+                if nmi_pending && vector != 0xFFFC { vector := 0xFFFA; nmi_pending := false; }
+            }
+            .VectorHi => { pc := concat(data, lo); cycle := .Fetch; irq_sample := false; }
+            .Fetch => {
+                if nmi_pending || irq_sample {
+                    software_int := false;
+                    vector := if nmi_pending { 0xFFFA } else { 0xFFFE };
+                    if nmi_pending { nmi_pending := false; }
+                    cycle := .IntDummy;
+                } else {
+                    opcode := data; pc := pc +% 1; cycle := .Operand;
+                }
+            }
+            .Operand => {
+                match mode {
+                    .Imp | .Acc => {
+                        a := alu.a; x := alu.x; y := alu.y; s := alu.s; p := alu.p;
+                        if mode == .Acc { a := alu.value; }
+                        cycle := .Fetch;
+                        match op {
+                            .BRK => { pc := pc +% 1; software_int := true; vector := 0xFFFE; cycle := .IntHi; }
+                            .KIL => { cycle := .Jam; }
+                            .PHA | .PHP => { cycle := .Push; }
+                            .PLA | .PLP | .RTS | .RTI => { cycle := .PullDummy; }
+                            _ => {}
+                        }
+                    }
+                    .Imm => { a := alu.a; x := alu.x; y := alu.y; s := alu.s; p := alu.p; pc := pc +% 1; cycle := .Fetch; }
+                    .Rel => {
+                        let next = pc +% 1;
+                        // Explicit sign extension of the relative displacement.
+                        let dest: uint<16> = next +% concat(data[7].bits().replicate(8), data);
+                        pc := next; ea := dest; partial := concat(next[15:8], dest[7:0]);
+                        cycle := if nes_branch(op, p) { .Branch } else { .Fetch };
+                    }
+                    .Zp | .Zpx | .Zpy | .Izx | .Izy => {
+                        pc := pc +% 1; pointer := data; ea := uint<16>(data);
+                        cycle := if mode == .Izx || mode == .Zpx || mode == .Zpy { .ZpIndex }
+                                 else if mode == .Izy { .PtrLo }
+                                 else if nes_store(op) { .Write } else { .Read };
+                    }
+                    _ => { lo := data; pc := pc +% 1; cycle := if op == .JSR { .JsrDummy } else { .AbsHi }; }
+                }
+            }
+            .ZpIndex => {
+                pointer := pointer +% idx; ea := uint<16>(pointer +% idx);
+                cycle := if mode == .Izx { .PtrLo } else if nes_store(op) { .Write } else { .Read };
+            }
+            .AbsHi => {
+                let base = concat(data, lo);
+                let dest = base +% uint<16>(idx);
+                pc := pc +% 1; ea := base; partial := base;
+                if op == .JMP && mode == .Abs { pc := base; cycle := .Fetch; }
+                else if mode == .Ind { cycle := .JmpLo; }
+                else if mode == .Abx || mode == .Aby {
+                    ea := dest; partial := concat(data, dest[7:0]);
+                    cycle := if nes_store(op) || nes_rmw(op) || dest[15:8] != data { .IndexFix } else { .Read };
+                } else { cycle := if nes_store(op) { .Write } else { .Read }; }
+            }
+            .PtrLo => { lo := data; cycle := .PtrHi; }
+            .PtrHi => {
+                let base = concat(data, lo);
+                let dest = base +% uint<16>(y);
+                ea := base; partial := base;
+                if mode == .Izy {
+                    ea := dest; partial := concat(data, dest[7:0]);
+                    cycle := if nes_store(op) || nes_rmw(op) || dest[15:8] != data { .IndexFix } else { .Read };
+                } else { cycle := if nes_store(op) { .Write } else { .Read }; }
+            }
+            .IndexFix => { cycle := if nes_store(op) { .Write } else { .Read }; }
+            .Read => {
+                if nes_rmw(op) { old_data := data; cycle := .RmwDummy; }
+                else { a := alu.a; x := alu.x; y := alu.y; s := alu.s; p := alu.p; cycle := .Fetch; }
+            }
+            .Write => { if op == .TAS { s := a & x; } cycle := .Fetch; }
+            .RmwDummy => { cycle := .RmwWrite; }
+            .RmwWrite => { a := rmw_alu.a; x := rmw_alu.x; y := rmw_alu.y; s := rmw_alu.s; p := rmw_alu.p; cycle := .Fetch; }
+            .Branch => {
+                pc := ea;
+                cycle := if pc[15:8] != ea[15:8] { .BranchFix } else { .Fetch };
+            }
+            .BranchFix => { cycle := .Fetch; }
+            .JsrDummy => { cycle := .JsrHi; }
+            .JsrHi => { s := s -% 1; cycle := .JsrLo; }
+            .JsrLo => { s := s -% 1; cycle := .JsrTarget; }
+            .JsrTarget => { pc := concat(data, lo); cycle := .Fetch; }
+            .JmpLo => { lo := data; cycle := .JmpHi; }
+            .JmpHi => { pc := concat(data, lo); cycle := .Fetch; }
+            .Push => { s := s -% 1; cycle := .Fetch; }
+            .PullDummy => {
+                s := s +% 1;
+                cycle := if op == .RTS { .RtsLo } else if op == .RTI { .RtiP } else { .Pull };
+            }
+            .Pull => {
+                if op == .PLA { a := data; p := nes_nz(p, data); }
+                else { p := (data & 0xEF) | 0x20; }
+                cycle := .Fetch;
+            }
+            .RtsLo => { lo := data; s := s +% 1; cycle := .RtsHi; }
+            .RtsHi => { pc := concat(data, lo); cycle := .RtsEnd; }
+            .RtsEnd => { pc := pc +% 1; cycle := .Fetch; }
+            .RtiP => { p := (data & 0xEF) | 0x20; s := s +% 1; cycle := .RtiLo; }
+            .RtiLo => { lo := data; s := s +% 1; cycle := .RtiHi; }
+            .RtiHi => { pc := concat(data, lo); cycle := .Fetch; }
+            .IntDummy => { cycle := .IntHi; }
+            .IntHi => { s := s -% 1; cycle := .IntLo; }
+            .IntLo => { s := s -% 1; cycle := .IntP; }
+            .IntP => { s := s -% 1; p := p | 4; cycle := .VectorLo; }
+            .Jam => {}
+        }
+    }
+}
+
+module nes_cpu_test(
+    in clk: clock, in reset: bool @clk, in enable: bool @clk,
+    in nmi: bool @clk, in irq: bool @clk, in data: uint<8> @clk,
+    out address: uint<16>, out write: bool, out write_data: uint<8>,
+    out sync_fetch: bool, out halted: bool, out debug_pc: uint<16>,
+    out debug_a: uint<8>, out debug_x: uint<8>, out debug_y: uint<8>,
+    out debug_s: uint<8>, out debug_p: uint<8>,
+) {
+    default domain sys { clock: clk, reset: reset }
+    inst cpu = nes_cpu(enable: enable, nmi: nmi, irq: irq, data: data);
+    address = cpu.address; write = cpu.write; write_data = cpu.write_data;
+    sync_fetch = cpu.sync_fetch; halted = cpu.halted;
+    debug_pc = cpu.debug_pc; debug_a = cpu.debug_a; debug_x = cpu.debug_x;
+    debug_y = cpu.debug_y; debug_s = cpu.debug_s; debug_p = cpu.debug_p;
+}

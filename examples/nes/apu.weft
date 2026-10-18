@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// NTSC 2A03 audio: two pulse channels, triangle, noise and DMC.
+const NES_LENGTH: [uint<8>; 32] = [
+    10,254,20,2,40,4,80,6,160,8,60,10,14,12,26,14,
+    12,16,24,18,48,20,96,22,192,24,72,26,16,28,32,30,
+];
+const NES_NOISE_PERIOD: [uint<12>; 16] = [4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068];
+const NES_DMC_PERIOD: [uint<9>; 16] = [428,380,340,320,286,254,226,214,190,160,142,128,106,84,72,54];
+
+module nes_envelope(
+    in tick: bool, in quarter: bool, in restart: bool,
+    in volume: uint<4>, in loop_envelope: bool, in constant_volume: bool,
+    out level: uint<4>,
+) {
+    reg start: bool = false;
+    reg divider: uint<4> = 0;
+    reg decay: uint<4> = 0;
+    if tick {
+        if quarter {
+            if start { start := false; decay := 15; divider := volume; }
+            else if divider != 0 { divider := divider -% 1; }
+            else {
+                divider := volume;
+                if decay != 0 { decay := decay -% 1; }
+                else if loop_envelope { decay := 15; }
+            }
+        }
+        if restart { start := true; }
+    }
+    level = if constant_volume { volume } else { decay };
+}
+
+module nes_pulse<FIRST: int>(
+    in tick: bool, in timer_tick: bool, in quarter: bool, in half: bool,
+    in enabled: bool, in write: bool, in address: uint<2>, in data: uint<8>,
+    out sample: uint<4>, out active: bool,
+) {
+    reg control: uint<8> = 0;
+    reg sweep: uint<8> = 0;
+    reg sweep_reload: bool = false;
+    reg sweep_divider: uint<3> = 0;
+    reg period: uint<11> = 0;
+    reg timer: uint<11> = 0;
+    reg sequence: uint<3> = 0;
+    reg length: uint<8> = 0;
+    let delta: uint<11> = period >> sweep[2:0];
+    let target: uint<12> = if sweep[3] {
+        uint<12>(period) -% uint<12>(delta) -% (if FIRST == 1 { 1 } else { 0 })
+    } else { uint<12>(period) +% uint<12>(delta) };
+    let muted = period < 8 || (!sweep[3] && target[11]);
+    inst envelope = nes_envelope(tick: tick, quarter: quarter, restart: write && address == 3,
+        volume: control[3:0], loop_envelope: control[5], constant_volume: control[4]);
+    let duty: uint<8> = match control[7:6] { 0 => 0x02, 1 => 0x06, 2 => 0x1E, 3 => 0xF9 };
+    sample = if length != 0 && !muted && duty[sequence] { envelope.level } else { 0 };
+    active = length != 0;
+    if tick {
+        if timer_tick {
+            if timer == 0 { timer := period; sequence := sequence +% 1; }
+            else { timer := timer -% 1; }
+        }
+        if half {
+            if length != 0 && !control[5] { length := length -% 1; }
+            if sweep_divider == 0 && sweep[7] && sweep[2:0] != 0 && !muted { period := target[10:0]; }
+            if sweep_divider == 0 || sweep_reload { sweep_divider := sweep[6:4]; sweep_reload := false; }
+            else { sweep_divider := sweep_divider -% 1; }
+        }
+        if !enabled { length := 0; }
+        if write {
+            match address {
+                0 => { control := data; }
+                1 => { sweep := data; sweep_reload := true; }
+                2 => { period[7:0] := data; }
+                3 => {
+                    period[10:8] := data[2:0]; sequence := 0;
+                    if enabled && (!half || length == 0) { length := NES_LENGTH[data[7:3]]; }
+                }
+            }
+        }
+    }
+}
+
+module nes_triangle(
+    in tick: bool, in quarter: bool, in half: bool, in enabled: bool,
+    in write: bool, in address: uint<2>, in data: uint<8>,
+    out sample: uint<4>, out active: bool,
+) {
+    reg control: uint<8> = 0;
+    reg period: uint<11> = 0;
+    reg timer: uint<11> = 0;
+    reg length: uint<8> = 0;
+    reg linear: uint<7> = 0;
+    reg reload: bool = false;
+    reg sequence: uint<5> = 0;
+    sample = if sequence[4] { sequence[3:0] } else { ~sequence[3:0] };
+    active = length != 0;
+    if tick {
+        if timer == 0 {
+            timer := period;
+            if length != 0 && linear != 0 { sequence := sequence +% 1; }
+        } else { timer := timer -% 1; }
+        if quarter {
+            if reload { linear := control[6:0]; }
+            else if linear != 0 { linear := linear -% 1; }
+            if !control[7] { reload := false; }
+        }
+        if half && length != 0 && !control[7] { length := length -% 1; }
+        if !enabled { length := 0; }
+        if write {
+            match address {
+                0 => { control := data; }
+                2 => { period[7:0] := data; }
+                3 => {
+                    period[10:8] := data[2:0]; reload := true;
+                    if enabled && (!half || length == 0) { length := NES_LENGTH[data[7:3]]; }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+module nes_noise(
+    in tick: bool, in quarter: bool, in half: bool, in enabled: bool,
+    in write: bool, in address: uint<2>, in data: uint<8>,
+    out sample: uint<4>, out active: bool,
+) {
+    reg control: uint<8> = 0;
+    reg period: uint<4> = 0;
+    reg short_mode: bool = false;
+    reg timer: uint<12> = 0;
+    reg shift: uint<15> = 1;
+    reg length: uint<8> = 0;
+    inst envelope = nes_envelope(tick: tick, quarter: quarter, restart: write && address == 3,
+        volume: control[3:0], loop_envelope: control[5], constant_volume: control[4]);
+    sample = if length != 0 && !shift[0] { envelope.level } else { 0 };
+    active = length != 0;
+    if tick {
+        if timer == 0 {
+            timer := NES_NOISE_PERIOD[period] -% 1;
+            shift := concat(shift[0] ^ (if short_mode { shift[6] } else { shift[1] }), shift[14:1]);
+        } else { timer := timer -% 1; }
+        if half && length != 0 && !control[5] { length := length -% 1; }
+        if !enabled { length := 0; }
+        if write {
+            match address {
+                0 => { control := data; }
+                2 => { period := data[3:0]; short_mode := data[7]; }
+                3 => { if enabled && (!half || length == 0) { length := NES_LENGTH[data[7:3]]; } }
+                _ => {}
+            }
+        }
+    }
+}
+
+module nes_dmc(
+    in tick: bool, in write: bool, in address: uint<2>, in data: uint<8>,
+    in enable_write: bool, in enabled: bool,
+    in dma_ack: bool, in dma_data: uint<8>,
+    out dma_request: bool, out dma_address: uint<16>,
+    out sample: uint<7>, out active: bool, out irq: bool,
+) {
+    reg control: uint<8> = 0;
+    reg start: uint<8> = 0;
+    reg size: uint<8> = 0;
+    reg current: uint<16> = 0xC000;
+    reg remaining: uint<12> = 0;
+    reg level: uint<7> = 0;
+    reg buffer: uint<8> = 0;
+    reg buffer_full: bool = false;
+    reg shift: uint<8> = 0;
+    reg bits_left: uint<3> = 7;
+    reg silence: bool = true;
+    reg timer: uint<9> = 0;
+    reg irq_flag: bool = false;
+    dma_request = !buffer_full && remaining != 0;
+    dma_address = current;
+    sample = level; active = remaining != 0; irq = irq_flag;
+    if tick {
+        if timer == 0 {
+            timer := NES_DMC_PERIOD[control[3:0]] -% 1;
+            if !silence {
+                if shift[0] && level <= 125 { level := level +% 2; }
+                if !shift[0] && level >= 2 { level := level -% 2; }
+            }
+            shift := shift >> 1;
+            bits_left := bits_left -% 1;
+            if bits_left == 0 {
+                shift := buffer; silence := !buffer_full; buffer_full := false;
+            }
+        } else { timer := timer -% 1; }
+        if dma_ack {
+            buffer := dma_data; buffer_full := true;
+            current := if current == 0xFFFF { 0x8000 } else { current +% 1 };
+            remaining := remaining -% 1;
+            if remaining == 1 {
+                if control[6] { current := concat(0b11, start, 0b000000); remaining := concat(size, 0b0000) +% 1; }
+                else if control[7] { irq_flag := true; }
+            }
+        }
+        if write {
+            match address {
+                0 => { control := data; if !data[7] { irq_flag := false; } }
+                1 => { level := data[6:0]; }
+                2 => { start := data; }
+                3 => { size := data; }
+            }
+        }
+        if enable_write {
+            irq_flag := false;
+            if !enabled { remaining := 0; }
+            else if remaining == 0 { current := concat(0b11, start, 0b000000); remaining := concat(size, 0b0000) +% 1; }
+        }
+    }
+}
+
+module nes_apu(
+    in tick: bool, in access: bool, in write: bool, in address: uint<5>, in data: uint<8>,
+    in dma_ack: bool, in dma_data: uint<8>,
+    out read_data: uint<8>, out irq: bool, out dma_request: bool, out dma_address: uint<16>,
+    out pulse1: uint<4>, out pulse2: uint<4>, out triangle: uint<4>, out noise: uint<4>, out dmc: uint<7>,
+) {
+    reg parity: bool = false;
+    reg counter: uint<16> = 0;
+    reg five_step: bool = false;
+    reg inhibit_irq: bool = false;
+    reg frame_irq: bool = false;
+    reg reset_delay: uint<3> = 0;
+    reg enables: uint<4> = 0;
+    let frame_write = access && write && address == 0x17;
+    let status_write = access && write && address == 0x15;
+    let restarting = reset_delay == 1;
+    let end4 = !five_step && counter == 29828;
+    let end5 = five_step && counter == 37280;
+    let quarter = counter == 7456 || counter == 14912 || counter == 22370 || end4 || end5 || (restarting && five_step);
+    let half = counter == 14912 || end4 || end5 || (restarting && five_step);
+    let new_enables = if status_write { data[3:0] } else { enables };
+    inst p1 = nes_pulse<FIRST: 1>(tick: tick, timer_tick: parity, quarter: quarter, half: half,
+        enabled: new_enables[0], write: access && write && address[4:2] == 0, address: address[1:0], data: data);
+    inst p2 = nes_pulse<FIRST: 0>(tick: tick, timer_tick: parity, quarter: quarter, half: half,
+        enabled: new_enables[1], write: access && write && address[4:2] == 1, address: address[1:0], data: data);
+    inst tri = nes_triangle(tick: tick, quarter: quarter, half: half, enabled: new_enables[2],
+        write: access && write && address[4:2] == 2, address: address[1:0], data: data);
+    inst noi = nes_noise(tick: tick, quarter: quarter, half: half, enabled: new_enables[3],
+        write: access && write && address[4:2] == 3, address: address[1:0], data: data);
+    inst delta = nes_dmc(tick: tick, write: access && write && address[4:2] == 4,
+        address: address[1:0], data: data, enable_write: status_write, enabled: data[4], dma_ack: dma_ack, dma_data: dma_data);
+    read_data = concat(delta.irq, frame_irq, false, delta.active, noi.active, tri.active, p2.active, p1.active);
+    irq = frame_irq || delta.irq;
+    dma_request = delta.dma_request; dma_address = delta.dma_address;
+    pulse1 = p1.sample; pulse2 = p2.sample; triangle = tri.sample; noise = noi.sample; dmc = delta.sample;
+    if tick {
+        parity := !parity;
+        counter := counter +% 1;
+        if (!five_step && counter == 29829) || (five_step && counter == 37281) { counter := 0; }
+        if !five_step && counter >= 29827 && counter <= 29829 && !inhibit_irq { frame_irq := true; }
+        if reset_delay != 0 { reset_delay := reset_delay -% 1; }
+        if restarting { counter := 0; }
+        if access && !write && address == 0x15 { frame_irq := false; }
+        if status_write { enables := data[3:0]; }
+        if frame_write {
+            five_step := data[7]; inhibit_irq := data[6];
+            reset_delay := if parity { 2 } else { 3 };
+            if data[6] { frame_irq := false; }
+        }
+    }
+}

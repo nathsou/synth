@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Cartridge address/IRQ logic. ROM and battery/CHR RAM live at the boundary.
+// Supported boards: NROM, MMC1B (up to 256 KiB PRG), UxROM, CNROM, MMC3B, AxROM.
+module nes_mapper(
+    in mapper: uint<8>, in prg_mask: uint<8>, in chr_mask: uint<8>,
+    in vertical: bool, in four_screen: bool,
+    in cpu_tick: bool, in cpu_address: uint<16>, in cpu_write: bool, in cpu_data: uint<8>,
+    in ppu_address: uint<14>,
+    out prg_address: uint<21>, out chr_address: uint<18>,
+    out mirroring: uint<3>, out ram_enable: bool, out ram_write: bool, out irq: bool,
+) {
+    reg bank: uint<8> = 0;
+    reg serial: uint<5> = 0x10;
+    reg control: uint<5> = 0x0C;
+    reg chr0: uint<5> = 0;
+    reg chr1: uint<5> = 0;
+    reg prg: uint<5> = 0;
+    reg previous_write: bool = false;
+    reg select: uint<8> = 0;
+    reg mmc_banks: [uint<8>; 8] = [0; 8];
+    reg horizontal: bool = false;
+    reg ram_control: uint<8> = 0x80;
+    reg irq_latch: uint<8> = 0;
+    reg irq_count: uint<8> = 0;
+    reg irq_reload: bool = false;
+    reg irq_enabled: bool = false;
+    reg irq_flag: bool = false;
+    reg a12_previous: bool = false;
+    reg a12_low: uint<4> = 0;
+    a12_previous := ppu_address[12];
+    if !ppu_address[12] {
+        if a12_low != 15 { a12_low := a12_low +% 1; }
+    } else { a12_low := 0; }
+    if mapper == 4 && ppu_address[12] && !a12_previous && a12_low >= 8 {
+        let next_count = if irq_count == 0 || irq_reload { irq_latch } else { irq_count -% 1 };
+        irq_count := next_count; irq_reload := false;
+        if next_count == 0 && irq_enabled { irq_flag := true; }
+    }
+
+    if cpu_tick {
+        previous_write := cpu_write;
+        if cpu_write && cpu_address >= 0x8000 {
+            match mapper {
+                1 => if !previous_write {
+                    if cpu_data[7] { serial := 0x10; control := control | 0x0C; }
+                    else {
+                        let shifted = concat(cpu_data[0], serial[4:1]);
+                        serial := shifted;
+                        if serial[0] {
+                            serial := 0x10;
+                            match cpu_address[14:13] {
+                                0 => { control := shifted; }
+                                1 => { chr0 := shifted; }
+                                2 => { chr1 := shifted; }
+                                3 => { prg := shifted; }
+                            }
+                        }
+                    }
+                }
+                4 => match concat(cpu_address[14:13], cpu_address[0]) {
+                    0 => { select := cpu_data; }
+                    1 => { mmc_banks[select[2:0]] := cpu_data; }
+                    2 => { horizontal := cpu_data[0]; }
+                    3 => { ram_control := cpu_data; }
+                    4 => { irq_latch := cpu_data; }
+                    5 => { irq_reload := true; }
+                    6 => { irq_enabled := false; irq_flag := false; }
+                    7 => { irq_enabled := true; }
+                }
+                _ => { bank := cpu_data; }
+            }
+        }
+    }
+
+    wire prg_bank: uint<8>;
+    wire chr_bank: uint<8>;
+    prg_bank = uint<8>(cpu_address[14:13]);
+    chr_bank = uint<8>(ppu_address[12:10]);
+    mirroring = if vertical { 2 } else { 3 };
+    ram_enable = true; ram_write = true;
+    irq = mapper == 4 && irq_flag;
+    match mapper {
+        1 => {
+            mirroring = uint<3>(control[1:0]);
+            // MMC1 encoding: 0/1 one-screen, 2 vertical, 3 horizontal.
+            ram_enable = !prg[4]; ram_write = !prg[4];
+            let prg_mode = control[3:2];
+            let chosen: uint<8> = concat(0b000, prg[3:0], cpu_address[13]);
+            prg_bank = if prg_mode < 2 { concat(0b000, prg[3:1], cpu_address[14:13]) }
+                       else if prg_mode == 2 && !cpu_address[14] { uint<8>(cpu_address[13].bits()) }
+                       else if prg_mode == 3 && cpu_address[14] { prg_mask -% 1 +% uint<8>(cpu_address[13].bits()) }
+                       else { chosen };
+            chr_bank = if control[4] {
+                concat(0b0, if ppu_address[12] { chr1 } else { chr0 }, ppu_address[11:10])
+            } else { concat(0b0, chr0[4:1], ppu_address[12:10]) };
+        }
+        2 => { prg_bank = if cpu_address[14] { prg_mask -% 1 +% uint<8>(cpu_address[13].bits()) }
+                         else { concat(bank[6:0], cpu_address[13]) }; }
+        3 => { chr_bank = concat(bank[4:0], ppu_address[12:10]); }
+        4 => {
+            ram_enable = ram_control[7]; ram_write = ram_control[7] && !ram_control[6];
+            mirroring = if horizontal { 3 } else { 2 };
+            prg_bank = match cpu_address[14:13] {
+                0 => if select[6] { prg_mask -% 1 } else { mmc_banks[6] & 0x3F },
+                1 => mmc_banks[7] & 0x3F,
+                2 => if select[6] { mmc_banks[6] & 0x3F } else { prg_mask -% 1 },
+                3 => prg_mask,
+            };
+            let chr_slot = ppu_address[12:10] ^ (if select[7] { uint<3>(4) } else { uint<3>(0) });
+            chr_bank = match chr_slot {
+                0 | 1 => (mmc_banks[0] & 0xFE) | uint<8>(chr_slot[0].bits()),
+                2 | 3 => (mmc_banks[1] & 0xFE) | uint<8>(chr_slot[0].bits()),
+                4 => mmc_banks[2], 5 => mmc_banks[3], 6 => mmc_banks[4], 7 => mmc_banks[5],
+            };
+        }
+        7 => { prg_bank = concat(bank[5:0], cpu_address[14:13]); mirroring = uint<3>(bank[4].bits()); }
+        _ => {}
+    }
+    if four_screen { mirroring = 4; }
+    prg_address = concat(prg_bank & prg_mask, cpu_address[12:0]);
+    chr_address = concat(chr_bank & chr_mask, ppu_address[9:0]);
+}

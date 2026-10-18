@@ -1,0 +1,273 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// NTSC RP2C02 digital picture generator. Clock at one edge per PPU dot.
+fn nes_palette_index(address: uint<5>) -> uint<5> {
+    if address[1:0] == 0 { address & 0x0F } else { address }
+}
+fn nes_nametable_index(address: uint<14>, mirroring: uint<3>) -> uint<12> {
+    let page: uint<2> = match mirroring {
+        0 => 0, 1 => 1, 2 => uint<2>(address[10].bits()),
+        3 => uint<2>(address[11].bits()), _ => address[11:10],
+    };
+    concat(page, address[9:0])
+}
+fn nes_scroll_x(v: uint<15>) -> uint<15> {
+    if v[4:0] == 31 { (v & 0x7FE0) ^ 0x0400 } else { v +% 1 }
+}
+fn nes_scroll_y(v: uint<15>) -> uint<15> {
+    var r: uint<15> = v;
+    if v[14:12] != 7 { r = v +% 0x1000; }
+    else {
+        r = v & 0x0FFF;
+        if v[9:5] == 29 { r = (r & 0x7C1F) ^ 0x0800; }
+        else if v[9:5] == 31 { r = r & 0x7C1F; }
+        else { r = r +% 0x20; }
+    }
+    r
+}
+
+module nes_ppu(
+    in cpu_access: bool, in cpu_write: bool, in cpu_register: uint<3>, in cpu_data: uint<8>,
+    in mirroring: uint<3>, in chr_data: uint<8>,
+    out cpu_read: uint<8>, out nmi: bool,
+    out memory_address: uint<14>, out chr_write: bool, out chr_write_data: uint<8>,
+    out pixel: uint<6>, out emphasis: uint<3>, out pixel_valid: bool,
+    out pixel_x: uint<8>, out pixel_y: uint<8>, out frame: bool,
+    out debug_dot: uint<9>, out debug_line: uint<9>,
+) {
+    reg dot: index<341> = 0;
+    reg line: index<262> = 0;
+    reg odd: bool = false;
+    reg ctrl: uint<8> = 0;
+    reg mask: uint<8> = 0;
+    reg v: uint<15> = 0;
+    reg t: uint<15> = 0;
+    reg fine_x: uint<3> = 0;
+    reg second_write: bool = false;
+    reg vblank: bool = false;
+    reg sprite_hit: bool = false;
+    reg overflow: bool = false;
+    reg suppress_vblank: bool = false;
+    reg io_latch: uint<8> = 0;
+    reg read_buffer: uint<8> = 0;
+    reg oam_address: uint<8> = 0;
+    mem oam: [uint<8>; 256];
+    mem vram: [uint<8>; 4096];
+    mem palette: [uint<6>; 32];
+    reg secondary: [uint<8>; 32] = [0xFF; 32];
+    reg secondary_zero: [bool; 8] = [false; 8];
+    reg eval_n: uint<6> = 0;
+    reg eval_m: uint<2> = 0;
+    reg eval_count: uint<4> = 0;
+    reg eval_data: uint<8> = 0xFF;
+    reg eval_done: bool = false;
+    reg sprite_low: [uint<8>; 8] = [0; 8];
+    reg sprite_high: [uint<8>; 8] = [0; 8];
+    reg sprite_x: [uint<8>; 8] = [0xFF; 8];
+    reg sprite_attr: [uint<8>; 8] = [0; 8];
+    reg sprite_zero: [bool; 8] = [false; 8];
+    reg sprite_active: [bool; 8] = [false; 8];
+    reg sprite_fetch_low: uint<8> = 0;
+    reg name_latch: uint<8> = 0;
+    reg attr_latch: uint<2> = 0;
+    reg low_latch: uint<8> = 0;
+    reg bg_low: uint<16> = 0;
+    reg bg_high: uint<16> = 0;
+    reg attr_low: uint<16> = 0;
+    reg attr_high: uint<16> = 0;
+
+    let rendering = mask[3] || mask[4];
+    let render_line = line < 240 || line == 261;
+    let fetching = rendering && render_line;
+    let bg_fetch = (dot >= 1 && dot <= 256) || (dot >= 321 && dot <= 336);
+    let sprite_fetch = dot >= 257 && dot <= 320;
+    let phase: uint<3> = uint<9>(dot)[2:0];
+    let sprite_slot: uint<3> = (uint<9>(dot) -% 257)[5:3];
+    let sy = secondary[concat(sprite_slot, 0b00)];
+    let tile = secondary[concat(sprite_slot, 0b01)];
+    let attr = secondary[concat(sprite_slot, 0b10)];
+    let sx = secondary[concat(sprite_slot, 0b11)];
+    let sprite_row = uint<9>(line)[7:0] -% sy;
+    let flipped_row = sprite_row ^ (if attr[7] { uint<8>(if ctrl[5] { 15 } else { 7 }) } else { uint<8>(0) });
+    let sprite_pattern: uint<13> = if ctrl[5] {
+        concat(tile[0], tile[7:1], flipped_row[3], false, flipped_row[2:0])
+    } else { concat(ctrl[3], tile, false, flipped_row[2:0]) };
+    let bg_pattern: uint<14> = concat(false, ctrl[4], name_latch, false, v[14:12]);
+    let name_address: uint<14> = concat(0b10, v[11:0]);
+    let attr_address: uint<14> = concat(0b10, v[11:10], 0b1111, v[9:7], v[4:2]);
+    wire fetch_address: uint<14>;
+    fetch_address = v[13:0];
+    if fetching {
+        fetch_address = name_address;
+        if bg_fetch {
+            fetch_address = match phase {
+                1 | 2 => name_address, 3 | 4 => attr_address,
+                5 | 6 => bg_pattern, 7 | 0 => bg_pattern | 8,
+            };
+        } else if sprite_fetch {
+            if phase == 5 || phase == 6 { fetch_address = uint<14>(sprite_pattern); }
+            if phase == 7 || phase == 0 { fetch_address = uint<14>(sprite_pattern) | 8; }
+        }
+    }
+    let data_access = cpu_access && cpu_register == 7;
+    // Palette reads also fill the buffer from the nametable under the palette.
+    memory_address = if data_access { v[13:0] & (if !cpu_write && v[13:8] == 0x3F { uint<14>(0x2FFF) } else { uint<14>(0x3FFF) }) }
+                     else { fetch_address };
+    let nt_index = nes_nametable_index(memory_address, mirroring);
+    let bus_data = if memory_address[13] { vram[nt_index] } else { chr_data };
+    chr_write = data_access && cpu_write && v[13:0] < 0x2000;
+    chr_write_data = cpu_data;
+    let pal_index = nes_palette_index(v[4:0]);
+    let palette_read: uint<8> = (io_latch & 0xC0) | uint<8>(palette[pal_index] & (if mask[0] { uint<6>(0x30) } else { uint<6>(0x3F) }));
+    let status = concat(vblank, sprite_hit, overflow, io_latch[4:0]);
+    let oam_read = if fetching { if dot <= 64 { uint<8>(0xFF) } else { eval_data } }
+                   else { oam[oam_address] };
+    cpu_read = match cpu_register {
+        2 => status,
+        4 => if oam_address[1:0] == 2 { oam_read & 0xE3 } else { oam_read },
+        7 => if v[13:8] == 0x3F { palette_read } else { read_buffer },
+        _ => io_latch,
+    };
+    nmi = vblank && ctrl[7];
+
+    // Priority is the first opaque sprite in OAM order, even behind background.
+    wire chosen: bool;
+    wire sp_bits: uint<2>;
+    wire sp_palette: uint<2>;
+    wire sp_behind: bool;
+    wire sp_zero: bool;
+    chosen = false; sp_bits = 0; sp_palette = 0; sp_behind = false; sp_zero = false;
+    for i in 0..8 {
+        const J = 7 - i;
+        let bits = concat(sprite_high[J][7], sprite_low[J][7]);
+        if sprite_active[J] && sprite_x[J] == 0 && bits != 0 {
+            chosen = true; sp_bits = bits; sp_palette = sprite_attr[J][1:0];
+            sp_behind = sprite_attr[J][5]; sp_zero = sprite_zero[J];
+        }
+    }
+    let bit_pos: uint<4> = 15 - fine_x;
+    let bg_bits: uint<2> = if mask[3] && (dot > 8 || mask[1]) { concat(bg_high[bit_pos], bg_low[bit_pos]) } else { 0 };
+    let bg_pal = concat(attr_high[bit_pos], attr_low[bit_pos]);
+    let sp_visible = chosen && mask[4] && (dot > 8 || mask[2]);
+    let use_sprite = sp_visible && (bg_bits == 0 || !sp_behind);
+    let output_index: uint<5> = if use_sprite { concat(true, sp_palette, sp_bits) }
+                              else if bg_bits != 0 { concat(false, bg_pal, bg_bits) } else { 0 };
+    let forced_index = if !rendering && v[13:8] == 0x3F { pal_index } else { output_index };
+    pixel = palette[nes_palette_index(forced_index)] & (if mask[0] { uint<6>(0x30) } else { uint<6>(0x3F) });
+    emphasis = mask[7:5];
+    pixel_valid = line < 240 && dot >= 1 && dot <= 256;
+    pixel_x = (uint<9>(dot) -% 1)[7:0]; pixel_y = uint<9>(line)[7:0];
+    frame = line == 241 && dot == 1;
+    debug_dot = dot; debug_line = line;
+
+    dot := dot +% 1;
+    if dot == 340 { line := line +% 1; if line == 261 { odd := !odd; } }
+    if line == 261 && dot == 339 && odd && rendering { dot := 0; line := 0; odd := !odd; }
+    if line == 241 && dot == 1 { vblank := !suppress_vblank; suppress_vblank := false; }
+    if line == 261 && dot == 1 { vblank := false; sprite_hit := false; overflow := false; suppress_vblank := false; }
+
+    if pixel_valid && bg_bits != 0 && sp_visible && sp_zero && dot != 256 { sprite_hit := true; }
+    if fetching {
+        if bg_fetch {
+            bg_low := bg_low << 1; bg_high := bg_high << 1;
+            attr_low := attr_low << 1; attr_high := attr_high << 1;
+            match phase {
+                2 => { name_latch := bus_data; }
+                4 => { attr_latch := (bus_data >> concat(v[6], v[1], false))[1:0]; }
+                6 => { low_latch := bus_data; }
+                0 => {
+                    bg_low := concat(bg_low[14:7], low_latch);
+                    bg_high := concat(bg_high[14:7], bus_data);
+                    attr_low := concat(attr_low[14:7], attr_latch[0].bits().replicate(8));
+                    attr_high := concat(attr_high[14:7], attr_latch[1].bits().replicate(8));
+                    v := nes_scroll_x(v);
+                }
+                _ => {}
+            }
+        }
+        if dot == 256 { v := nes_scroll_y(nes_scroll_x(v)); }
+        if dot == 257 { v := (v & 0x7BE0) | (t & 0x041F); }
+        if line == 261 && dot >= 280 && dot <= 304 { v := (v & 0x041F) | (t & 0x7BE0); }
+        if dot >= 1 && dot <= 256 {
+            for i in 0..8 {
+                if sprite_x[i] != 0 { sprite_x[i] := sprite_x[i] -% 1; }
+                else { sprite_low[i] := sprite_low[i] << 1; sprite_high[i] := sprite_high[i] << 1; }
+            }
+        }
+        if dot == 1 { eval_n := 0; eval_m := 0; eval_count := 0; eval_done := false; secondary_zero := [false; 8]; }
+        if dot >= 1 && dot <= 64 && !phase[0] { secondary[(uint<9>(dot) -% 1)[5:1]] := 0xFF; }
+        if dot >= 65 && dot <= 256 && !eval_done && line < 240 {
+            if phase[0] { eval_data := oam[concat(eval_n, eval_m)]; }
+            else {
+                let row = uint<9>(line)[7:0] -% eval_data;
+                let in_range = row < (if ctrl[5] { 16 } else { 8 });
+                if eval_count < 8 {
+                    if eval_m != 0 || in_range {
+                        secondary[concat(eval_count[2:0], eval_m)] := eval_data;
+                        if eval_m == 0 { secondary_zero[eval_count[2:0]] := eval_n == 0; }
+                        eval_m := eval_m +% 1;
+                        if eval_m == 3 { eval_count := eval_count +% 1; eval_n := eval_n +% 1; if eval_n == 63 { eval_done := true; } }
+                    } else { eval_n := eval_n +% 1; if eval_n == 63 { eval_done := true; } }
+                } else {
+                    if in_range { overflow := true; }
+                    eval_n := eval_n +% 1; eval_m := eval_m +% 1;
+                    if eval_n == 63 { eval_done := true; }
+                }
+            }
+        }
+        if sprite_fetch {
+            oam_address := 0;
+            if phase == 1 {
+                sprite_x[sprite_slot] := sx; sprite_attr[sprite_slot] := attr;
+                sprite_zero[sprite_slot] := secondary_zero[sprite_slot];
+                sprite_active[sprite_slot] := uint<4>(sprite_slot) < eval_count;
+            }
+            if phase == 6 { sprite_fetch_low := if attr[6] { bus_data.reverse() } else { bus_data }; }
+            if phase == 0 {
+                sprite_low[sprite_slot] := sprite_fetch_low;
+                sprite_high[sprite_slot] := if attr[6] { bus_data.reverse() } else { bus_data };
+            }
+        }
+    }
+
+    if cpu_access {
+        if cpu_write {
+            io_latch := cpu_data;
+            match cpu_register {
+                0 => { ctrl := cpu_data; t := (t & 0x73FF) | (uint<15>(cpu_data[1:0]) << 10); }
+                1 => { mask := cpu_data; }
+                3 => { oam_address := cpu_data; }
+                4 => {
+                    if !fetching {
+                        oam[oam_address] := if oam_address[1:0] == 2 { cpu_data & 0xE3 } else { cpu_data };
+                        oam_address := oam_address +% 1;
+                    } else { oam_address := oam_address +% 4; }
+                }
+                5 => {
+                    second_write := !second_write;
+                    if !second_write { t := (t & 0x7FE0) | uint<15>(cpu_data[7:3]); fine_x := cpu_data[2:0]; }
+                    else { t := (t & 0x0C1F) | (uint<15>(cpu_data[7:3]) << 5) | (uint<15>(cpu_data[2:0]) << 12); }
+                }
+                6 => {
+                    second_write := !second_write;
+                    if !second_write { t := (t & 0x00FF) | (uint<15>(cpu_data[5:0]) << 8); }
+                    else { t := (t & 0x7F00) | uint<15>(cpu_data); v := (t & 0x7F00) | uint<15>(cpu_data); }
+                }
+                7 => {
+                    if v[13:8] == 0x3F { palette[pal_index] := cpu_data[5:0]; }
+                    else if v[13] { vram[nt_index] := cpu_data; }
+                }
+                _ => {}
+            }
+        } else {
+            if cpu_register == 2 {
+                io_latch := status; vblank := false; second_write := false;
+                if line == 241 && dot <= 1 { suppress_vblank := true; }
+            }
+            if cpu_register == 4 { io_latch := cpu_read; }
+            if cpu_register == 7 { io_latch := cpu_read; read_buffer := bus_data; }
+        }
+        if cpu_register == 7 {
+            v := if fetching { nes_scroll_y(nes_scroll_x(v)) } else { v +% (if ctrl[2] { 32 } else { 1 }) };
+        }
+    }
+}

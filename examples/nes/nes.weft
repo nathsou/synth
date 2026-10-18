@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Board-independent NTSC NES. clk is the 5.369318 MHz PPU dot clock.
+// All inputs are synchronous to clk. External memories are combinational-read
+// with writes accepted on the rising edge when the corresponding strobe is set.
+enum NesOamDma { Idle, Halt, Align, Get, Put }
+enum NesDmcDma { Idle, Dummy, Align, Get }
+
+module nes(
+    in clk: clock, in reset: bool @clk,
+    in mapper: uint<8> @clk, in prg_mask: uint<8> @clk, in chr_mask: uint<8> @clk,
+    in vertical: bool @clk, in four_screen: bool @clk, in chr_ram: bool @clk,
+    in prg_data: uint<8> @clk, out prg_address: uint<21>,
+    in ram_data: uint<8> @clk, out ram_address: uint<13>, out ram_write: bool, out ram_write_data: uint<8>,
+    in chr_data: uint<8> @clk, out chr_address: uint<18>, out chr_write: bool, out chr_write_data: uint<8>,
+    in pad1: uint<8> @clk, in pad2: uint<8> @clk,
+    out pixel: uint<6>, out emphasis: uint<3>, out pixel_valid: bool,
+    out pixel_x: uint<8>, out pixel_y: uint<8>, out frame: bool,
+    out audio_pulse1: uint<4>, out audio_pulse2: uint<4>, out audio_triangle: uint<4>,
+    out audio_noise: uint<4>, out audio_dmc: uint<7>, out audio_valid: bool,
+    out debug_cpu_tick: bool, out debug_fetch: bool, out debug_pc: uint<16>,
+    out debug_a: uint<8>, out debug_x: uint<8>, out debug_y: uint<8>, out debug_s: uint<8>, out debug_p: uint<8>,
+    out debug_address: uint<16>, out debug_write: bool, out debug_data: uint<8>,
+    out debug_dot: uint<9>, out debug_line: uint<9>, out halted: bool,
+) {
+    default domain sys { clock: clk, reset: reset }
+    reg divider: index<3> = 0;
+    reg parity: bool = false;
+    reg open_bus: uint<8> = 0;
+    mem ram: [uint<8>; 2048];
+    reg strobe: bool = false;
+    reg shift1: uint<8> = 0;
+    reg shift2: uint<8> = 0;
+    reg oam_dma: NesOamDma = .Idle;
+    reg oam_page: uint<8> = 0;
+    reg oam_index: uint<8> = 0;
+    reg oam_byte: uint<8> = 0;
+    reg dmc_dma: NesDmcDma = .Idle;
+    let tick = divider == 2;
+    divider := divider +% 1;
+    if tick { parity := !parity; }
+
+    wire bus_address: uint<16>;
+    wire bus_write: bool;
+    wire bus_write_data: uint<8>;
+    wire bus_read_data: uint<8>;
+    let dmc_halt = dmc_dma == .Idle && apu.dma_request && !cpu.write && oam_dma == .Idle;
+    let dmc_busy = dmc_dma != .Idle || dmc_halt;
+    let cpu_running = (oam_dma == .Idle || (oam_dma == .Halt && cpu.write)) && !dmc_busy;
+    let dmc_get = dmc_dma == .Get;
+    inst cpu = nes_cpu(enable: tick && cpu_running, nmi: ppu.nmi, irq: apu.irq || cart.irq, data: bus_read_data);
+    inst ppu = nes_ppu(cpu_access: tick && bus_address >= 0x2000 && bus_address < 0x4000,
+        cpu_write: bus_write, cpu_register: bus_address[2:0], cpu_data: bus_write_data,
+        mirroring: cart.mirroring, chr_data: chr_data);
+    inst apu = nes_apu(tick: tick, access: bus_address >= 0x4000 && bus_address <= 0x4017,
+        write: bus_write, address: bus_address[4:0], data: bus_write_data,
+        dma_ack: dmc_get, dma_data: bus_read_data);
+    inst cart = nes_mapper(mapper: mapper, prg_mask: prg_mask, chr_mask: chr_mask, vertical: vertical,
+        four_screen: four_screen, cpu_tick: tick, cpu_address: bus_address, cpu_write: bus_write,
+        cpu_data: bus_write_data, ppu_address: ppu.memory_address);
+
+    bus_address = cpu.address; bus_write = cpu.write; bus_write_data = cpu.write_data;
+    if oam_dma == .Get { bus_address = concat(oam_page, oam_index); bus_write = false; }
+    if oam_dma == .Put { bus_address = 0x2004; bus_write = true; bus_write_data = oam_byte; }
+    if dmc_busy { bus_address = if dmc_get { apu.dma_address } else { cpu.address }; bus_write = false; }
+
+    bus_read_data = open_bus;
+    if bus_address < 0x2000 { bus_read_data = ram[bus_address[10:0]]; }
+    else if bus_address < 0x4000 { bus_read_data = ppu.cpu_read; }
+    else if bus_address == 0x4015 { bus_read_data = apu.read_data | (open_bus & 0x20); }
+    else if bus_address == 0x4016 { bus_read_data = (open_bus & 0xE0) | uint<8>((if strobe { pad1[0] } else { shift1[0] }).bits()); }
+    else if bus_address == 0x4017 { bus_read_data = (open_bus & 0xE0) | uint<8>((if strobe { pad2[0] } else { shift2[0] }).bits()); }
+    else if bus_address >= 0x6000 && bus_address < 0x8000 && cart.ram_enable { bus_read_data = ram_data; }
+    else if bus_address >= 0x8000 { bus_read_data = prg_data; }
+
+    if tick {
+        open_bus := if bus_write { bus_write_data } else { bus_read_data };
+        if strobe { shift1 := pad1; shift2 := pad2; }
+        if bus_write {
+            if bus_address < 0x2000 { ram[bus_address[10:0]] := bus_write_data; }
+            if bus_address == 0x4016 {
+                strobe := bus_write_data[0];
+                if bus_write_data[0] { shift1 := pad1; shift2 := pad2; }
+            }
+            if bus_address == 0x4014 { oam_dma := .Halt; oam_page := bus_write_data; oam_index := 0; }
+        } else if !strobe {
+            if bus_address == 0x4016 { shift1 := concat(true, shift1[7:1]); }
+            if bus_address == 0x4017 { shift2 := concat(true, shift2[7:1]); }
+        }
+        if dmc_halt { dmc_dma := .Dummy; }
+        match dmc_dma {
+            .Idle => {}
+            .Dummy => { dmc_dma := if parity { .Get } else { .Align }; }
+            .Align => { dmc_dma := .Get; }
+            .Get => { dmc_dma := .Idle; }
+        }
+        if !dmc_busy {
+            match oam_dma {
+                .Idle => {}
+                .Halt => if !cpu.write { oam_dma := if parity { .Get } else { .Align }; }
+                .Align => { oam_dma := .Get; }
+                .Get => { oam_byte := bus_read_data; oam_dma := .Put; }
+                .Put => {
+                    oam_index := oam_index +% 1;
+                    oam_dma := if oam_index == 255 { .Idle } else { .Get };
+                }
+            }
+        }
+    }
+    prg_address = cart.prg_address;
+    ram_address = bus_address[12:0]; ram_write_data = bus_write_data;
+    ram_write = tick && bus_write && bus_address >= 0x6000 && bus_address < 0x8000 && cart.ram_write;
+    chr_address = cart.chr_address; chr_write = ppu.chr_write && chr_ram; chr_write_data = ppu.chr_write_data;
+    pixel = ppu.pixel; emphasis = ppu.emphasis; pixel_valid = ppu.pixel_valid;
+    pixel_x = ppu.pixel_x; pixel_y = ppu.pixel_y; frame = ppu.frame;
+    audio_pulse1 = apu.pulse1; audio_pulse2 = apu.pulse2; audio_triangle = apu.triangle;
+    audio_noise = apu.noise; audio_dmc = apu.dmc; audio_valid = tick;
+    debug_cpu_tick = tick; debug_fetch = cpu.sync_fetch && cpu_running;
+    debug_pc = cpu.debug_pc; debug_a = cpu.debug_a; debug_x = cpu.debug_x; debug_y = cpu.debug_y;
+    debug_s = cpu.debug_s; debug_p = cpu.debug_p;
+    debug_address = bus_address; debug_write = bus_write; debug_data = if bus_write { bus_write_data } else { bus_read_data };
+    debug_dot = ppu.debug_dot; debug_line = ppu.debug_line; halted = cpu.halted;
+}
