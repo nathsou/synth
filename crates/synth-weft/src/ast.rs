@@ -169,8 +169,18 @@ pub enum GenArgValue {
 
 #[derive(Clone, Debug)]
 pub struct GenArg {
-    pub name: Ident,
+    /// `None` for a positional argument (only for a single parameter).
+    pub name: Option<Ident>,
     pub value: GenArgValue,
+}
+
+impl GenArgValue {
+    pub fn span(&self) -> Span {
+        match self {
+            GenArgValue::Type(t) => t.span,
+            GenArgValue::Expr(e) => e.span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

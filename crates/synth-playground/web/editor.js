@@ -33,7 +33,7 @@ export class Editor {
     this.code = h('pre', { class: 'code', 'aria-hidden': 'true' });
     this.codeInner = h('div');
     this.code.append(this.codeInner);
-    this.ta = h('textarea', { spellcheck: false, autocapitalize: 'off', autocomplete: 'off', wrap: 'off', 'aria-label': 'Source code' });
+    this.ta = h('textarea', { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off', autocomplete: 'off', wrap: 'off', 'aria-label': 'Source code' });
     this.scroller.append(this.marks, this.code, this.ta);
     this.el.append(this.gutter, this.scroller);
     host.append(this.el);

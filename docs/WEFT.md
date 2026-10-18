@@ -1152,10 +1152,13 @@ module fifo<T: type, DEPTH: int = 16>(
 ) { … }
 
 inst q = fifo<T: uint<8>, DEPTH: 64>(push: p, data: d, pop: r);
+inst tick = divider<25_000_000>();   // one parameter: the name is optional
 ```
 
 Generic parameters have kind `int`, `bool`, `string` or `type`, and may have a
-default. Arguments are given by name and must be compile-time constants.
+default. Arguments are given by name and must be compile-time constants. A
+module or function with a single generic parameter may take its argument
+without the name: `divider<25_000_000>()` is `divider<N: 25_000_000>()`.
 
 Generic modules and functions are checked for each set of arguments they are
 used with, as C++ templates are; errors show the instantiation chain. Items
@@ -1496,7 +1499,7 @@ const_decl  = "const" ident [ ":" type ] "=" expr ";" ;
 generics    = "<" generic { "," generic } [ "," ] ">" ;
 generic     = ident ":" ( "int" | "bool" | "string" | "type" ) [ "=" expr ] ;
 gen_args    = "<" gen_arg { "," gen_arg } [ "," ] ">" ;
-gen_arg     = ident ":" ( type | expr ) ;
+gen_arg     = [ ident ":" ] ( type | expr ) ;   (* the name only when a single parameter *)
 
 port        = { attribute }
               ( ( "in" | "out" ) ident ":" type [ dom ] [ "=" expr ]
@@ -1561,8 +1564,9 @@ literal     = int_lit | "true" | "false" | string ;
 
 Struct literals are not allowed directly in `if`, `match` and `for` headers
 (parenthesize them), as in Rust. A name followed by `<` starts generic
-arguments only when the next two tokens are an identifier and `:`; otherwise
-`<` is a comparison. `uint`, `sint` and `index` are keywords, so `uint<8>(x)` is
+arguments when what follows parses as `gen_args` and is followed by `(`, or
+when the next two tokens are an identifier and `:`; otherwise `<` is a
+comparison. `uint`, `sint` and `index` are keywords, so `uint<8>(x)` is
 unambiguous.
 
 ---

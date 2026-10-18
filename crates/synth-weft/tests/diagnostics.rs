@@ -427,3 +427,11 @@ fn several_errors_are_reported_at_once() {
     );
     has(&e, &["`<=` is a comparison", "expected `;`"]);
 }
+
+#[test]
+fn unnamed_generic_argument_with_several_parameters() {
+    let out = errors(
+        "module m<A: int, B: int>(out y: uint<8>) { y = A + B; }\nmodule top(out y: uint<8>) { inst u = m<1, B: 2>(); y = u.y; }\n",
+    );
+    has(&out, &["`m` has 2 generic parameters: name this argument", "write `A: ...`"]);
+}

@@ -1753,14 +1753,8 @@ impl<'a> ModCx<'a> {
         // Explicit generic arguments.
         let mut given: HashMap<String, Value> = HashMap::new();
         for a in generics {
-            let Some(g) = f.generics.iter().find(|g| g.name.name == a.name.name) else {
-                return d.err(
-                    Diagnostic::error(
-                        a.name.span,
-                        format!("`{}` has no generic parameter `{}`", f.name.name, a.name.name),
-                    )
-                    .with_label("unknown parameter"),
-                );
+            let Some(g) = super::generic_param(d, &f.generics, &f.name.name, a) else {
+                return Err(());
             };
             let v = self.eval_generic_arg(d, g, &a.value)?;
             given.insert(g.name.name.clone(), v);
