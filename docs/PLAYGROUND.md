@@ -25,6 +25,10 @@ tools/build_playground.sh                  # writes target/playground/
 python3 -m http.server -d target/playground
 ```
 
+Every push to `main` publishes this static build to GitHub Pages
+(`.github/workflows/pages.yml`; enable it once in the repository's settings,
+Pages → Source: GitHub Actions).
+
 The page uses the WebAssembly build when `synth_playground.wasm` is next to it,
 and the `synth playground` server's API otherwise. It needs a browser with
 WebGL2.
