@@ -1,4 +1,4 @@
-//! RAMB18E1 TDP legalization, site pins and configuration.
+//! RAMB18E1 TDP and 36-bit SDP legalization, site pins and configuration.
 use crate::{
     device::Device,
     pack::{Packed, param},
@@ -7,8 +7,21 @@ use crate::{
 use std::collections::BTreeSet;
 use synth_netlist::{Bit, CellId, Dir, NetId, Netlist};
 pub fn validate(nl: &Netlist, c: CellId) -> Result<(), String> {
-    if nl.param(c, "RAM_MODE").and_then(|p| p.as_str()).is_some_and(|m| m != "TDP") {
-        return Err("physical RAMB18 currently supports TDP mode".into());
+    let mode = nl.param(c, "RAM_MODE").and_then(|p| p.as_str()).unwrap_or("TDP");
+    if mode == "SDP" {
+        // Start with the native mapper's symmetric, unregistered SDP mode.
+        // Reject mixed widths and optional output registers until legalized.
+        if param(nl, c, "READ_WIDTH_A", 0) != 36
+            || param(nl, c, "WRITE_WIDTH_B", 0) != 36
+            || ["READ_WIDTH_B", "WRITE_WIDTH_A", "DOA_REG", "DOB_REG"]
+                .iter()
+                .any(|p| param(nl, c, p, 0) != 0)
+        {
+            return Err("physical SDP RAMB18 requires unregistered 36-bit read/write ports".into());
+        }
+        return Ok(());
+    } else if mode != "TDP" {
+        return Err("invalid RAMB18 RAM_MODE".into());
     }
     for p in ["READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A", "WRITE_WIDTH_B"] {
         if !matches!(param(nl, c, p, 0), 0 | 1 | 2 | 4 | 9 | 18) {
@@ -40,10 +53,11 @@ pub fn inputs(nl: &Netlist, c: CellId, p: &Packed) -> Result<Vec<(String, NetId)
     for (port, count, base) in [("A", 4, "WEA"), ("B", 8, "WEBWE")] {
         let width = param(nl, c, &format!("WRITE_WIDTH_{port}"), 0) as usize;
         for i in 0..count {
-            let n = if width == 0 || port == "B" && i >= 4 {
+            let n = if width == 0 || port == "B" && width != 36 && i >= 4 {
                 zero
             } else {
-                let logical = if port == "A" { i / 2 } else { i };
+                // SDP's four byte enables each drive two physical WEBWE pins.
+                let logical = if port == "A" || width == 36 { i / 2 } else { i };
                 let used = (width / 9).max(1);
                 nl.pin_net(c, &format!("{base}[{}]", logical % used)).unwrap_or(zero)
             };
@@ -77,8 +91,26 @@ pub fn features(
         f.insert(format!("{prefix}.{s}"));
     };
     add("IN_USE".into());
-    for p in ["READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A", "WRITE_WIDTH_B"] {
-        add(format!("{p}_{}", param(nl, c, p, 0).max(1)));
+    if param(nl, c, "READ_WIDTH_A", 0) == 36 {
+        // SDP spans both data sides even though the opposite logical widths
+        // are zero. Width-1 defaults would disable half the word. The upper
+        // site's A read marker is asymmetric in the Series-7 encoding.
+        for p in [
+            "SDP_READ_WIDTH_36",
+            "SDP_WRITE_WIDTH_36",
+            "READ_WIDTH_B_18",
+            "WRITE_WIDTH_A_18",
+            "WRITE_WIDTH_B_18",
+        ] {
+            add(p.into());
+        }
+        if y == 1 {
+            add("READ_WIDTH_A_18".into());
+        }
+    } else {
+        for p in ["READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A", "WRITE_WIDTH_B"] {
+            add(format!("{p}_{}", param(nl, c, p, 0).max(1)));
+        }
     }
     for p in ["DOA_REG", "DOB_REG"] {
         if param(nl, c, p, 0) != 0 {
@@ -160,4 +192,42 @@ pub fn features(
         }
     }
     Ok(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synth_netlist::Param;
+
+    #[test]
+    fn sdp_routes_all_four_byte_enables_to_paired_site_pins() {
+        let mut nl = Netlist::new();
+        let c = nl.add_cell("ram", "RAMB18E1");
+        nl.set_param(c, "RAM_MODE", Param::Str("SDP".into()));
+        nl.set_param(c, "READ_WIDTH_A", Param::Int(36));
+        nl.set_param(c, "WRITE_WIDTH_B", Param::Int(36));
+        let enables: Vec<_> = (0..4)
+            .map(|i| {
+                let n = nl.add_net(&format!("enable{i}"));
+                nl.add_pin(c, &format!("WEBWE[{i}]"), Dir::Input, Some(n)).unwrap();
+                n
+            })
+            .collect();
+        validate(&nl, c).unwrap();
+        let packed = crate::pack::pack(&mut nl).unwrap();
+        let pins: std::collections::BTreeMap<_, _> =
+            inputs(&nl, c, &packed).unwrap().into_iter().collect();
+        for (i, enable) in enables.iter().enumerate() {
+            assert_eq!(pins[&format!("WEBWE{}", 2 * i)], *enable);
+            assert_eq!(pins[&format!("WEBWE{}", 2 * i + 1)], *enable);
+        }
+        for i in 0..4 {
+            assert!(!packed.constants[&pins[&format!("WEA{i}")]]);
+        }
+        for (key, value) in [("DOA_REG", 1), ("READ_WIDTH_B", 18), ("WRITE_WIDTH_B", 18)] {
+            let mut invalid = nl.clone();
+            invalid.set_param(c, key, Param::Int(value));
+            assert!(validate(&invalid, c).is_err(), "{key}");
+        }
+    }
 }

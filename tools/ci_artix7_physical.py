@@ -77,6 +77,9 @@ def oracle(a, part, fasm, bit, prefix):
 def constraints(a, part, ports, clocks=(), single_io=False):
     with (a.db / part / "package_pins.csv").open() as f:
         pins = list(csv.DictReader(f))
+    # The package CSV also lists dedicated XADC VP/VN pads. They are not
+    # LVCMOS user I/O; wider test interfaces can reach them in CSV order.
+    pins = [p for p in pins if p["site"].startswith("IOB_")]
     if single_io:
         pins = [p for p in pins if "_SING_" in p["tile"]]
     chosen = {}
@@ -99,6 +102,7 @@ def main():
     p.add_argument("--synth", type=Path, default=Path(os.environ.get("SYNTH", ROOT / "target/release/synth")))
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--part", choices=PARTS, action="append")
+    p.add_argument("--design", action="append", help="select a routed case by name; repeat to select several")
     p.add_argument("--euler", action="store_true", help="also implement the Euler 31 and 97 solvers")
     p.add_argument("--full-luts", action="store_true", help="randomize every LUT in the fabric")
     a = p.parse_args()
@@ -128,11 +132,18 @@ def main():
         ("sharedcarry", "module top(input [7:0] a,b,input cin,output [7:0] x,y,d,output lt); assign x=a+b; assign y=(~a)+(~b)+cin; assign d=a-b; assign lt=a<b; endmodule", ["cin","lt"]+[f"{p}[{i}]" for p in ["a","b","x","y","d"] for i in range(8)], []),
         ("dsp", "module top(input [11:0] a,b,c,d,output [23:0] y); assign y=a*b+c*d; endmodule", [f"{p}[{i}]" for p,n in [("a",12),("b",12),("c",12),("d",12),("y",24)] for i in range(n)], []),
         ("ram", "module top(input clk,we,input [8:0] addr,input [7:0] din,output reg [7:0] q=8'h93); reg [7:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^8'hA5; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",8),("q",8)] for i in range(n)], ["clk"]),
+        ("ram_sdp", "module top(input clk,we,input [8:0] addr,input [36:0] din,output reg [36:0] q=37'h179abcde01); reg [36:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^37'h12a5b3c6d7; always @(negedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",37),("q",37)] for i in range(n)], ["clk"]),
+        ("ram_sdp_banked", "module top(input clk,we,input [10:0] addr,input [35:0] din,output reg [35:0] q=36'h79abcde01); reg [35:0] mem[0:1099]; integer i; initial for(i=0;i<1100;i=i+1) mem[i]=i^36'h2a5b3c6d7; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",11),("din",36),("q",36)] for i in range(n)], ["clk"]),
     ]
     if a.euler:
         for n, width in [(31, 17), (97, 34)]:
             source = (ROOT / f"tests/designs/euler/p0{n}.v").read_text().replace(f"module euler{n}", "module top")
             cases.append((f"euler{n}",source,["clk","rst","start","done"]+[f"answer[{i}]" for i in range(width)],["clk"]))
+    if a.design:
+        unknown = set(a.design) - {c[0] for c in cases}
+        if unknown:
+            p.error(f"unknown or disabled designs: {sorted(unknown)}")
+        cases = [c for c in cases if c[0] in a.design]
     for part in a.part or PARTS:
         out = a.out / part
         out.mkdir(exist_ok=True)
@@ -145,6 +156,9 @@ def main():
             cmd = [a.synth,"build",v,"--family","artix7","--top","top","--db",a.db,
                    "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
             run(cmd + ["--timing-allow-fail"], prefix.with_suffix(".log"))
+            if name.startswith("ram_sdp"):
+                assert "SDP_READ_WIDTH_36" in fasm.read_text()
+                assert "SDP_WRITE_WIDTH_36" in fasm.read_text()
             count = oracle(a, part, fasm, bit, prefix)
             if name == "invert":
                 invalid = prefix.with_suffix(".invalid.xdc")

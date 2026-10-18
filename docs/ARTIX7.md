@@ -27,8 +27,11 @@ The new `arch-xc7` crate emits:
   priority preserved. Enable-priority synchronous resets are gated before
   mapping because Xilinx reset/preset overrides CE.
 - RAMB18E1 for memories with synchronous reads and at most one write port.
-  Widths 1, 2, 4, 9 and 18 use data and parity initialization; width/depth
-  splitting, read-port replication, independent bit enables, read enables,
+  Widths 1, 2, 4, 9 and 18 use TDP mode; width 36 uses simple dual-port
+  (SDP) mode with 512 words per block. The mapper minimizes the number of
+  blocks across width and depth, preserving independent write enables by
+  splitting into narrower blocks when necessary. Data and parity initialization,
+  read-port replication, read enables,
   falling-edge clocks, nonzero address offsets and read-register initialization
   are supported. Same-clock transparency is implemented with bypass logic.
   Out-of-range writes are disabled rather than aliased into a valid word.
@@ -94,7 +97,7 @@ Implemented components:
   use hundreds of MB, not the roadmap's tens-of-MB target.
 - Four LUT6 and four primary FF slots per slice, common clock/enable/reset
   legality, contiguous carry-chain macros, direct FF input bypasses, carry
-  output legalization, RAMB18E1 TDP and combinational DSP48E1 placement. The
+  output legalization, RAMB18E1 TDP/36-bit SDP and combinational DSP48E1 placement. The
   second FF bank, LUT5 sharing, RAMB36, SRL, LUTRAM and wide-mux packing are
   not implemented. Unsupported DSP register/control modes fail explicitly.
 - Deterministic seeded macro placement with HPWL annealing, RAM/DSP placement,
@@ -142,7 +145,8 @@ Python dependencies are pinned in `tools/xc7-test-requirements.txt`.
 These are test dependencies only. See [THIRD_PARTY.md](../THIRD_PARTY.md).
 
 The suite implements an inverter, clocked counter, mixed reset/enable/clock
-edge registers, shared carry-propagate functions, initialized block RAM,
+edge registers, shared carry-propagate functions, initialized TDP and SDP block RAM
+(including a three-bank design covering both RAMB18 site variants),
 paired DSP multipliers, single-site
 boundary I/O, and optionally
 Euler 31 and 97 on both 35T and 100T. For each routed design, independent X-Ray FASM
@@ -152,9 +156,11 @@ same bits, including ECC, from both streams. Counter builds also check
 byte-for-byte repeatability and the timing-failure gate. `--full-luts`
 randomizes every LUT INIT in the fabric to exercise configuration addressing.
 Sources, XDC, FASM, bitstreams, frames and reports are retained. The latest
-local [physical validation report](ARTIX7_PHYSICAL.json) records 20 passing
+local [physical validation report](ARTIX7_PHYSICAL.json) records 24 passing
 checks, source/constraint hashes and independent tool revisions. The updated
-workspace passes 125 tests, warnings-denied Clippy and Rust 1.88 checks.
+workspace passes 193 tests, warnings-denied Clippy and Rust 1.88 checks. The
+merged playground also passes WebAssembly Clippy and web app tests; the Weft
+blinky example synthesizes to Artix-7 primitives.
 
 A 35T full-fabric run covered 1,044,018 enabled LUT INIT bits and all 5,408
 frames. The raw native startup/frame stream with CRC packets disabled also
@@ -164,6 +170,13 @@ encoding agreement, **not functional correctness of the placed circuit**.
 There has been no hardware execution or independent vendor timing validation;
 no Vivado installer or validation runner was available in the development
 environment. The CI job retains the generated artifacts for further validation.
+
+The branch includes main's selective CI policy. Artix-7 simulations share
+the single optimized `ci` profile build with the other simulation suites,
+reuse cached pinned device data/oracles, and run only for relevant changes
+after the PR leaves draft (or on a manual run). Crate tests still run on draft
+PRs. The merged Weft/playground path retains its optimization-stage observer
+and WebAssembly-compatible clock.
 
 ## Validation
 
@@ -222,7 +235,7 @@ reports the native packer's resource counts, including legalization and
 replication; there is no matched Yosys packing baseline. No placed area or
 Fmax is claimed.
 
-Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `25354ca`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
+Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `5714ca0` (including main at `67504cb`), using a frozen `ci` profile binary. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
 
 | Design | LUTs incl. INV | FFs | CARRY4 | BRAM18 equivalents | DSP48 |
 |---|---:|---:|---:|---:|---:|
@@ -231,12 +244,24 @@ Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f9
 | Euler 31 | 198 / 297 | 402 / 404 | 65 / 54 | 6 / 6 | 0 / 0 |
 | Euler 43 | 3819 / 3404 | 1497 / 1517 | 339 / 320 | 0 / 0 | 0 / 0 |
 | Euler 48 | 3230 / 3336 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 |
-| Euler 57 | 1073 / 1070 | 857 / 1114 | 291 / 224 | 16 / 0 | 0 / 0 |
+| Euler 57 | 1073 / 1070 | 857 / 1114 | 291 / 224 | 8 / 0 | 0 / 0 |
 | Euler 58 | 4027 / 4769 | 2158 / 2030 | 192 / 225 | 0 / 0 | 0 / 0 |
-| Euler 92 | 910 / 948 | 2807 / 2660 | 173 / 181 | 11 / 7 | 0 / 1 |
+| Euler 92 | 910 / 948 | 2807 / 2660 | 173 / 181 | 7 / 7 | 0 / 1 |
 | Euler 97 | 547 / 621 | 445 / 445 | 126 / 125 | 0 / 0 | 3 / 3 |
 
-LUT count is lower on seven of nine designs, but two regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
+LUT count is lower on seven of nine designs, but two regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 8 RAMB18E1 blocks. Euler 92 matches the BRAM count but still uses more FFs. **These results do not meet the requested QoR criterion.**
+
+The 36-bit SDP experiment reduces Euler 57 from 16 to 8 RAMB18 blocks
+and Euler 92 from 11 to 7, matching Yosys's BRAM count on Euler 92. The other
+seven designs' BRAM counts, and every design's LUT/FF/carry/DSP and native
+packed slice/LUT/carry counts, are unchanged. The change uses both data and
+parity buses and maps all four write-enable lanes to paired site pins.
+Vendor-model simulation covers 24/32/35/36/37-bit words, initialization,
+falling edges, masks, read-port replication and a three-bank memory. Physical
+encoding covers width splitting and depth banking on both supported parts,
+following the pinned nextpnr-Xilinx/X-Ray references; it still needs
+hardware validation. This is a general RAM geometry choice, with no
+benchmark-specific rules or changes to Yosys settings.
 
 Exact LUT sharing reduces Euler 48 from 3,548 to 3,230 LUTs (9.0%) and
 Euler 97 from 600 to 547 (8.8%), with unchanged FF/CARRY4/BRAM/DSP counts.

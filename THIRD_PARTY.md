@@ -8,7 +8,8 @@ when redistributing the data. No Xilinx proprietary device files are included.
 The Series-7 ECC algorithm, packet startup sequence, frame address progression,
 and FASM bit addressing were cross-checked against Project X-Ray at
 `c9f02d8576042325425824647ab5555b1bc77833` (https://github.com/f4pga/prjxray).
-Site mux and clock configuration were cross-checked against nextpnr-xilinx at
+Site mux, clock configuration, and SDP RAM width/write-enable encoding were
+cross-checked against nextpnr-xilinx at
 `bc9b234634cf80756b04ad4ea5f8e7a83293c425`
 (https://github.com/openXC7/nextpnr-xilinx). The Rust implementation references
 these ISC-licensed projects; neither executable is a runtime dependency.

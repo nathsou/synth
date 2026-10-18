@@ -152,6 +152,30 @@ fn async_memory_does_not_absorb_an_address_register_on_another_clock() {
 }
 
 #[test]
+fn bram_width_selection_minimizes_blocks_across_depth_boundaries() {
+    for (width, depth, count, mode) in [
+        (24, 512, 1, "SDP"),
+        (36, 512, 1, "SDP"),
+        (36, 513, 2, "TDP"),
+        (36, 1100, 3, "SDP"),
+        (37, 512, 2, "SDP"),
+    ] {
+        let nl = synth(&format!(
+            "module top(input clk,we,input [15:0] a,input [{}:0] d,output reg [{}:0] q); reg [{}:0] mem[0:{}]; always @(posedge clk) begin if(we) mem[a]<=d; q<=mem[a]; end endmodule",
+            width - 1,
+            width - 1,
+            width - 1,
+            depth - 1
+        ));
+        let brams: Vec<_> = nl.live_cells().filter(|&c| nl.cell_kind(c) == "RAMB18E1").collect();
+        assert_eq!(brams.len(), count, "{width}x{depth}");
+        for c in brams {
+            assert_eq!(nl.param(c, "RAM_MODE").and_then(Param::as_str), Some(mode));
+        }
+    }
+}
+
+#[test]
 fn packing_preserves_carry_arithmetic_and_lut_semantics() {
     for width in [3, 4, 5, 8, 9, 17] {
         let src = format!(

@@ -112,11 +112,15 @@ def main():
         # writes, falling edges, read enables, initialization and read/write collision.
         for w, d, offset, neg, mask in [(1, 1024, 0, 0, 0), (2, 512, 3, 1, 0),
                 (4, 256, 0, 0, 0), (9, 128, 3, 1, 0), (18, 128, 0, 0, 0),
-                (18, 1100, 5, 0, 0), (35, 128, 0, 1, 0), (4, 256, 0, 0, 1)]:
+                (18, 1100, 5, 0, 0), (35, 128, 0, 1, 0), (4, 256, 0, 0, 1),
+                (24, 512, 0, 0, 0), (32, 128, 3, 1, 0), (36, 512, 0, 0, 0),
+                (36, 1100, 5, 1, 0), (37, 512, 0, 0, 0), (36, 128, 0, 0, 1)]:
             name = f"memory-{w}-{d}-{offset}-{neg}-{mask}"
             params = [f"W={w}", f"D={d}", f"OFFSET={offset}", f"NEG={neg}", f"MASK={mask}"]
             net = synth(SRC / "memory.v", "memory", out / name, params)
             assert "RAMB18E1" in net.read_text(), name
+            if w >= 24 and not mask:
+                assert '.RAM_MODE("SDP")' in net.read_text(), name
             tb = out / f"{name}.tb.v"
             tb.write_text(f'''`timescale 1ns/1ps
     module tb;
@@ -140,7 +144,7 @@ def main():
           ra={offset}+(i*41)%{d}; wa=(i%4 == 0) ? ra : {offset}+(i*17)%{d};
           if (i%11 == 0) wa=65535;
           re=(i%7 != 0); we=(i%3 == 0) ? (i*13+1) : 0;
-          d=(i*937)^(i<<13);
+          d={{$random,$random}};
         end
         $display("PASS memory"); $finish;
       end
