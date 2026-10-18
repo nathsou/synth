@@ -59,6 +59,12 @@ pub const BOARDS: &[Board] = &[
         pcf: "# Lattice iCEstick (iCE40 HX1K TQ144)\nset_io clk 21\nset_io led[0] 99\nset_io led[1] 98\nset_io led[2] 97\nset_io led[3] 96\nset_io led[4] 95\nset_io rx 9\nset_io tx 8\n",
     },
     Board {
+        name: "Lattice iCE40-HX8K Breakout Board",
+        part: "hx8k",
+        package: "ct256",
+        pcf: "# Lattice iCE40-HX8K Breakout Board (iCE40 HX8K CT256, 12 MHz)\nset_io clk J3\nset_io led[0] B5\nset_io led[1] B4\nset_io led[2] A2\nset_io led[3] A1\nset_io led[4] C5\nset_io led[5] C4\nset_io led[6] B3\nset_io led[7] C3\nset_io rx B10\nset_io tx B12\n",
+    },
+    Board {
         name: "Alchitry Cu",
         part: "hx8k",
         package: "cb132",
@@ -79,6 +85,8 @@ pub fn board_pcf(part: &str, package: &str) -> String {
 }
 
 const UART: &str = include_str!("../../../examples/weft/uart.weft");
+const RV32I: &str = include_str!("../../../examples/weft/rv32i.weft");
+const RV_PROGRAM: &str = include_str!("../../../examples/weft/rv_program.weft");
 
 pub const EXAMPLES: &[Example] = &[
     Example {
@@ -118,6 +126,64 @@ pub const EXAMPLES: &[Example] = &[
         files: &[("blinky_ram.weft", include_str!("../../../examples/weft/blinky_ram.weft"))],
         part: "hx1k",
         package: "vq100",
+    },
+    Example {
+        id: "breathe",
+        title: "Breathing LEDs",
+        description: "Pulse-width modulation through a gamma table computed at compile time",
+        files: &[("breathe.weft", include_str!("../../../examples/weft/breathe.weft"))],
+        part: "hx1k",
+        package: "vq100",
+    },
+    Example {
+        id: "life",
+        title: "Game of Life",
+        description: "Conway's Game of Life on an 8×8 torus, drawn over a UART",
+        files: &[
+            ("life.weft", include_str!("../../../examples/weft/life.weft")),
+            ("uart.weft", UART),
+        ],
+        part: "hx1k",
+        package: "vq100",
+    },
+    Example {
+        id: "rv_single",
+        title: "RISC-V, single-cycle",
+        description: "An RV32I core that runs each instruction in one cycle",
+        files: &[
+            ("rv_single.weft", include_str!("../../../examples/weft/rv_single.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
+    },
+    Example {
+        id: "rv_multi",
+        title: "RISC-V, multi-cycle",
+        description: "An RV32I core that runs each instruction in five cycles, one per step",
+        files: &[
+            ("rv_multi.weft", include_str!("../../../examples/weft/rv_multi.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
+    },
+    Example {
+        id: "rv_pipe",
+        title: "RISC-V, pipelined",
+        description: "An RV32I core in five pipeline stages, with forwarding",
+        files: &[
+            ("rv_pipe.weft", include_str!("../../../examples/weft/rv_pipe.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
     },
     Example {
         id: "blinky_ram_v",
