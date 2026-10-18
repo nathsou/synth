@@ -20,6 +20,7 @@ COMMANDS:
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
     playground Serve the playground web app (--port <n>, default 8080)
     help       Print this message
@@ -81,6 +82,7 @@ fn main() -> ExitCode {
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),
+        Some("fmt") => cmd_fmt(&argv[1..]),
         Some("lsp") => {
             let prelude =
                 vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
@@ -183,6 +185,29 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
         write(&out, synth_netlist::verilog::write(&nl, &name).as_bytes())?;
     }
     Ok(())
+}
+
+fn cmd_fmt(argv: &[String]) -> Result<(), String> {
+    let a = Args::parse(argv, &[], &["--check"])?;
+    let check = a.flag("--check");
+    let mut unformatted = Vec::new();
+    for i in 0.. {
+        let Ok(p) = a.positional(i, "file") else { break };
+        let src = read(&p)?;
+        let out = synth_weft::fmt::format(&src);
+        if out != src {
+            if check {
+                unformatted.push(p);
+            } else {
+                write(&p, out.as_bytes())?;
+            }
+        }
+    }
+    if unformatted.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("not formatted: {}", unformatted.join(", ")))
+    }
 }
 
 fn cmd_playground(argv: &[String]) -> Result<(), String> {

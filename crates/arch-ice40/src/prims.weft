@@ -4,20 +4,20 @@
 /// top module. Registered modes are not declared here.
 extern module SB_IO<PIN_TYPE: int = 0, PULLUP: int = 0, NEG_TRIGGER: int = 0, IO_STANDARD: string = "SB_LVCMOS">(
     inout PACKAGE_PIN: bool,
-    in OUTPUT_ENABLE: bool @async = false,
-    in D_OUT_0: bool @async = false,
-    out D_IN_0: bool @async,
+    in    OUTPUT_ENABLE: bool @async = false,
+    in    D_OUT_0: bool @async = false,
+    out   D_IN_0: bool @async,
 );
 
 /// A global buffer: drives a global network (a clock) from fabric logic.
 extern module SB_GB(
-    in USER_SIGNAL_TO_GLOBAL_BUFFER: bool @async,
+    in  USER_SIGNAL_TO_GLOBAL_BUFFER: bool @async,
     out GLOBAL_BUFFER_OUTPUT: clock,
 );
 
 /// An IO cell that also drives a global network from its pin.
 extern module SB_GB_IO<PIN_TYPE: int = 1, PULLUP: int = 0, IO_STANDARD: string = "SB_LVCMOS">(
     inout PACKAGE_PIN: bool,
-    out GLOBAL_BUFFER_OUTPUT: clock,
-    out D_IN_0: bool @async,
+    out   GLOBAL_BUFFER_OUTPUT: clock,
+    out   D_IN_0: bool @async,
 );

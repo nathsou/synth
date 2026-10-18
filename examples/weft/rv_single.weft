@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// A single-cycle RV32I core: every instruction is fetched, decoded, executed
+// and written back in one clock cycle. It runs rv_program.weft, which prints
+// over the UART (115200 8N1). Build with rv32i.weft, rv_program.weft and
+// uart.weft.
+//
+// The ROM and the register file are block RAMs, whose reads take a cycle:
+// both are read for the *next* instruction, as soon as the next PC is known,
+// so that the instruction and its operands are there when it starts. For the
+// register numbers of that instruction, a copy of the ROM is read by logic
+// (synthesis keeps only those 10 bits of it). A register written in the same
+// cycle is read before the write, so its new value is kept aside and used
+// instead. The small data RAM is read by logic too, so it becomes
+// flip-flops.
+
+/// CLKS_PER_BIT: the clock frequency divided by 115200. DELAY: the pause
+/// between two runs of the program (see rv_program.weft).
+module top<CLKS_PER_BIT: int = 104, DELAY: int = 1000>(in clk: clock, out tx: bool, out led: uint<8>) {
+    const ROM: [uint<32>; 128] = program<128>(DELAY);
+    mem rom: [uint<32>; 128] init ROM;
+
+    reg pc: uint<32> = 0;
+    reg instr: uint<32> init ROM[0];
+    let d = decode(instr);
+
+    // Two copies of the register file, one per read port.
+    mem regs1: [uint<32>; 32];
+    mem regs2: [uint<32>; 32];
+    reg read1: uint<32> init 0;
+    reg read2: uint<32> init 0;
+    reg bypass1: bool init false;
+    reg bypass2: bool init false;
+    reg written: uint<32> init 0;
+    let rs1 = if bypass1 { written } else { read1 };
+    let rs2 = if bypass2 { written } else { read2 };
+
+    // Execute.
+    let a = if d.a_pc { pc } else { rs1 };
+    let b = if d.b_imm { d.imm } else { rs2 };
+    let result = alu(d.alu, a, b);
+    let link = pc +% 4;
+    let target = if d.jalr { (rs1 +% d.imm) & ~uint<32>(1) } else { pc +% d.imm };
+    let jump = d.jal || d.jalr || (d.branch && branch_taken(d.funct3, rs1, rs2));
+    let next_pc = if jump { target } else { link };
+
+    // Memory: loads and stores address rs1 + imm, which is `result`.
+    mem ram: [uint<32>; 16];
+    inst dev = devices<CLKS_PER_BIT>();
+    let offset = result[1:0];
+    let to_device = is_device(result);
+    let word = if to_device { dev.rdata } else { ram[result[5:2]] };
+    dev.write = d.store && to_device;
+    dev.uart_port = result[2];
+    dev.wdata = rs2;
+    if d.store && !to_device {
+        let lanes = store_lanes(d.funct3, rs2);
+        let mask = store_mask(d.funct3, offset);
+        for i in 0..4 {
+            if mask[i] { ram[result[5:2]][i * 8 + 7:i * 8] := lanes[i * 8 + 7:i * 8]; }
+        }
+    }
+
+    // Write back, and read the operands of the next instruction.
+    let value = if d.jal || d.jalr { link } else if d.load { load_value(d.funct3, offset, word) } else { result };
+    if d.writes {
+        regs1[d.rd] := value;
+        regs2[d.rd] := value;
+    }
+    instr := rom[next_pc[8:2]];
+    let next = decode(ROM[next_pc[8:2]]);
+    read1 := regs1[next.rs1];
+    read2 := regs2[next.rs2];
+    bypass1 := d.writes && d.rd == next.rs1;
+    bypass2 := d.writes && d.rd == next.rs2;
+    written := value;
+    pc := next_pc;
+
+    tx = dev.tx;
+    led = dev.led;
+}

@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// The program the RISC-V examples run, written with the assembler functions
+// of rv32i.weft and assembled at compile time. Over the UART, it prints the
+// results of a few instructions, the Fibonacci numbers up to 610 and their
+// sum, all in hexadecimal, one per line; the LEDs show each Fibonacci number
+// as it is printed. Then it waits `delay` × 4096 rounds of a 3-instruction
+// loop and starts again.
+//
+// The expected output:
+//   ffffff9c ffffffe7 ffffff8b 0000f00d f00d000d fffff00d 000000f0 00000e20
+//   00000000 00000001 00000001 00000002 … 00000262 (16 numbers), 0000063c
+
+const PROGRAM_LEN: int = 73;
+
+/// The instructions; the address of each is in the comment before it.
+fn code(delay: uint<20>) -> [uint<32>; PROGRAM_LEN] {
+    [
+        // start:
+        /* 000 */ lui(T0, 0x10000), // t0 = 0x1000_0000: the LEDs; t0 + 4: the UART
+
+        // A few results, printed as they are computed.
+        /* 004 */ lui(A6, 0x8badf),
+        /* 008 */ addi(A6, A6, 0x00d), // a6 = 8badf00d
+        /* 00c */ lui(A5, 0x10), // a5 = 0x0001_0000: the RAM
+        /* 010 */ addi(A0, ZERO, -100), // ffffff9c
+        /* 014 */ sw(A6, A5, 0), // a6 is from 3 instructions before: a test of the pipeline
+        /* 018 */ jal(RA, 188), // to print_hex
+        /* 01c */ srai(A0, A0, 2), // ffffffe7: -25
+        /* 020 */ jal(RA, 180), // to print_hex
+        /* 024 */ lb(A0, A5, 3), // ffffff8b
+        /* 028 */ jal(RA, 172), // to print_hex
+        /* 02c */ lhu(A0, A5, 0), // 0000f00d
+        /* 030 */ jal(RA, 164), // to print_hex
+        /* 034 */ sb(ZERO, A5, 1), // the word is 8bad000d
+        /* 038 */ sh(A6, A5, 2), // f00d000d
+        /* 03c */ lw(A0, A5, 0), // f00d000d
+        /* 040 */ jal(RA, 148), // to print_hex
+        /* 044 */ lh(A0, A5, 2), // fffff00d
+        /* 048 */ jal(RA, 140), // to print_hex
+        /* 04c */ lbu(A0, A5, 3), // 000000f0
+        /* 050 */ jal(RA, 132), // to print_hex
+        /* 054 */ slt(A7, A6, ZERO), // a7 = 1: a6 is negative
+        /* 058 */ sltu(A1, ZERO, A6), // a1 = 1
+        /* 05c */ slli(A1, A1, 4),
+        /* 060 */ or(A0, A7, A1), // 0x11
+        /* 064 */ xori(A0, A0, 0x700), // 0x711
+        /* 068 */ sub(A0, A0, A7), // 0x710
+        /* 06c */ sll(A0, A0, A7), // 00000e20
+        /* 070 */ auipc(A1, 0), // a call through a register
+        /* 074 */ jalr(RA, A1, 100), // to print_hex: 070 + 100
+
+        // The Fibonacci numbers below 1000: on the LEDs, printed and kept in RAM.
+        /* 078 */ addi(A0, ZERO, 0),
+        /* 07c */ addi(A1, ZERO, 1),
+        /* 080 */ addi(A2, ZERO, 16), // how many
+        /* 084 */ addi(A3, A5, 0), // where they go
+
+        // fib:
+        /* 088 */ sw(A0, T0, 0),
+        /* 08c */ sw(A0, A3, 0),
+        /* 090 */ addi(A3, A3, 4),
+        /* 094 */ jal(RA, 64), // to print_hex
+        /* 098 */ add(A4, A0, A1),
+        /* 09c */ addi(A0, A1, 0),
+        /* 0a0 */ addi(A1, A4, 0),
+        /* 0a4 */ addi(A2, A2, -1),
+        /* 0a8 */ bne(A2, ZERO, -32), // to fib
+
+        // Their sum, read back from the RAM: 0000063c.
+        /* 0ac */ addi(A0, ZERO, 0),
+
+        // sum:
+        /* 0b0 */ addi(A3, A3, -4),
+        /* 0b4 */ lw(A4, A3, 0),
+        /* 0b8 */ add(A0, A0, A4),
+        /* 0bc */ bltu(A5, A3, -12), // to sum
+        /* 0c0 */ jal(RA, 20), // to print_hex
+
+        // Wait, then start again.
+        /* 0c4 */ lui(A4, delay),
+
+        // wait:
+        /* 0c8 */ beq(A4, ZERO, -200), // to start
+        /* 0cc */ addi(A4, A4, -1),
+        /* 0d0 */ jal(ZERO, -8), // to wait
+
+        // Prints a0 as eight hexadecimal digits and a line break.
+        // print_hex:
+        /* 0d4 */ addi(T1, ZERO, 28), // t1: the shift of the next digit
+
+        // digit:
+        /* 0d8 */ srl(T2, A0, T1),
+        /* 0dc */ andi(T2, T2, 15),
+        /* 0e0 */ sltiu(T3, T2, 10),
+        /* 0e4 */ bne(T3, ZERO, 8), // to decimal
+        /* 0e8 */ addi(T2, T2, 39), // 'a' - '0' - 10
+
+        // decimal:
+        /* 0ec */ addi(T2, T2, 48), // '0'
+        /* 0f0 */ jal(T5, 32), // to putc
+        /* 0f4 */ addi(T1, T1, -4),
+        /* 0f8 */ bge(T1, ZERO, -32), // to digit
+        /* 0fc */ addi(T2, ZERO, 13),
+        /* 100 */ jal(T5, 16), // to putc
+        /* 104 */ addi(T2, ZERO, 10),
+        /* 108 */ jal(T5, 8), // to putc
+        /* 10c */ jalr(ZERO, RA, 0),
+
+        // Sends t2 once the UART is free; returns through t5.
+        // putc:
+        /* 110 */ lw(T4, T0, 4),
+        /* 114 */ andi(T4, T4, 1),
+        /* 118 */ bne(T4, ZERO, -8), // to putc
+        /* 11c */ sb(T2, T0, 4),
+        /* 120 */ jalr(ZERO, T5, 0),
+    ]
+}
+
+/// The program in a ROM of `N` words, the rest filled with no-ops.
+fn program<N: int>(delay: uint<20>) -> [uint<32>; N] {
+    assert(N >= PROGRAM_LEN, "the ROM is too small for the program");
+    let c = code(delay);
+    var rom: [uint<32>; N] = [addi(ZERO, ZERO, 0); N];
+    for i in 0..PROGRAM_LEN { rom[i] = c[i]; }
+    rom
+}

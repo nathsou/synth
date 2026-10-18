@@ -119,6 +119,19 @@ fn session() {
     ));
     assert!(result(&out).at(&["data"]).as_array().len() >= 5 * 6);
 
+    // Formatting aligns the port directions of lib.weft's module.
+    let lib = "module pulse(\n    in x: bool,\n    out y: bool,\n) {\n    y = x;\n}\n";
+    let doc = Json::obj().with("uri", lib_uri.as_str()).with("text", lib);
+    s.handle(&note("textDocument/didOpen", Json::obj().with("textDocument", doc)));
+    let out = s.handle(&req(
+        10,
+        "textDocument/formatting",
+        Json::obj().with("textDocument", Json::obj().with("uri", lib_uri.as_str())),
+    ));
+    let edits = result(&out).as_array();
+    assert_eq!(edits.len(), 1);
+    assert!(edits[0].at(&["newText"]).as_str().unwrap().contains("    in  x: bool,"));
+
     let out = s.handle(&req(9, "shutdown", Json::Null));
     assert!(result(&out).is_null());
     s.handle(&note("exit", Json::Null));
