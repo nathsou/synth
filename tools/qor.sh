@@ -15,7 +15,8 @@
 #
 # Needs yosys, nextpnr-ice40 and icetime on PATH; ICETIME_CHIPDB names
 # icetime's chip database directory if it doesn't find its own.
-# DESIGNS="a b" selects designs; FLOW=synth stops after synthesis;
+# DESIGNS="a b" selects designs; FLOW=synth stops after synthesis, FLOW=pnr
+# skips the synthesis table;
 # QOR_LOG=dir keeps every tool's output there.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -119,6 +120,7 @@ load() {
   yread="read_verilog -defer ${incs[*]} $ydefs ${files[*]}; $ycmds hierarchy -top $top;"
 }
 
+if [ "${FLOW:-}" != pnr ]; then
 printf "Synthesis: iCE40 cells, time (s) and peak memory (MB)\n"
 printf "%-14s %6s %6s %5s %4s %6s %5s   %6s %6s %5s %4s %6s %5s\n" "" LUT4 CARRY FF RAM time mem LUT4 CARRY FF RAM time mem
 printf "%-14s %-38s   %s\n" "design" "synth" "yosys"
@@ -143,6 +145,8 @@ for n in "${names[@]}"; do
   fi
   printf "%-14s %s   %s\n" "$n" "$ours" "$yos"
 done
+
+fi
 
 [ "${FLOW:-}" = synth ] && exit 0
 seeds=(${SEEDS:-1 2 3})
