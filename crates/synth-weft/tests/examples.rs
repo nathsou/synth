@@ -138,7 +138,10 @@ fn serv_port_matches_its_verilog_original() {
 #[test]
 fn sources_are_formatted() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut files = vec![root.join("crates/synth-weft/src/std.weft"), root.join("crates/arch-ice40/src/prims.weft")];
+    let mut files = vec![
+        root.join("crates/synth-weft/src/std.weft"),
+        root.join("crates/arch-ice40/src/prims.weft"),
+    ];
     for e in std::fs::read_dir(root.join("examples/weft")).unwrap().flatten() {
         if e.path().extension().is_some_and(|x| x == "weft") {
             files.push(e.path());
@@ -146,6 +149,11 @@ fn sources_are_formatted() {
     }
     for f in files {
         let src = std::fs::read_to_string(&f).unwrap();
-        assert_eq!(synth_weft::fmt::format(&src), src, "{} is not formatted (synth fmt)", f.display());
+        assert_eq!(
+            synth_weft::fmt::format(&src),
+            src,
+            "{} is not formatted (synth fmt)",
+            f.display()
+        );
     }
 }

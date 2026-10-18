@@ -76,7 +76,12 @@ struct Scan {
 
 /// Updates the bracket stack with a line's code (outside strings and
 /// comments).
-fn scan(text: &str, stack: &mut Vec<(char, bool)>, depth: &mut usize, mut in_comment: bool) -> Scan {
+fn scan(
+    text: &str,
+    stack: &mut Vec<(char, bool)>,
+    depth: &mut usize,
+    mut in_comment: bool,
+) -> Scan {
     let b = text.as_bytes();
     let mut code = String::new();
     let mut i = 0;
@@ -123,9 +128,8 @@ fn scan(text: &str, stack: &mut Vec<(char, bool)>, depth: &mut usize, mut in_com
                 *depth += 1;
             }
             '}' | ')' | ']' => {
-                if stack.pop().is_some() {
-                    *depth = depth.saturating_sub(1);
-                }
+                stack.pop();
+                *depth = stack.len();
             }
             _ => {}
         }
@@ -186,7 +190,9 @@ fn direction(line: &str) -> Option<(usize, &'static str)> {
 fn align_ports(lines: &mut [String]) {
     let mut i = 0;
     while i < lines.len() {
-        if !lines[i].trim_end().ends_with('(') || !is_port_list(lines[i].trim_end().trim_end_matches('(')) {
+        if !lines[i].trim_end().ends_with('(')
+            || !is_port_list(lines[i].trim_end().trim_end_matches('('))
+        {
             i += 1;
             continue;
         }
@@ -197,7 +203,12 @@ fn align_ports(lines: &mut [String]) {
             end += 1;
         }
         let ports: Vec<usize> = (start..end).filter(|&k| direction(&lines[k]).is_some()).collect();
-        let width = ports.iter().filter_map(|&k| direction(&lines[k])).map(|(_, d)| d.len()).max().unwrap_or(0);
+        let width = ports
+            .iter()
+            .filter_map(|&k| direction(&lines[k]))
+            .map(|(_, d)| d.len())
+            .max()
+            .unwrap_or(0);
         for k in ports {
             let (indent, d) = direction(&lines[k]).unwrap();
             let after = lines[k][indent + d.len()..].trim_start().to_string();
