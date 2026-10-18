@@ -20,6 +20,7 @@ dependencies = [
  "arch-ice40",
  "synth-core",
  "synth-elab",
+ "synth-lsp",
  "synth-netlist",
  "synth-rtl",
  "synth-rtlil",
@@ -53,6 +54,15 @@ version = "0.1.0"
 dependencies = [
  "synth-core",
  "synth-rtl",
+]
+
+[[package]]
+name = "synth-lsp"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-verilog",
+ "synth-weft",
 ]
 
 [[package]]

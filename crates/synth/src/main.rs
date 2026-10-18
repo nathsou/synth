@@ -20,6 +20,7 @@ COMMANDS:
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    lsp        Run the Weft language server on stdin/stdout
     help       Print this message
     version    Print version information
 
@@ -75,6 +76,18 @@ fn main() -> ExitCode {
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
+        Some("lsp") => {
+            let prelude =
+                vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
+            return match synth_lsp::serve(prelude) {
+                Ok(0) => ExitCode::SUCCESS,
+                Ok(_) => ExitCode::FAILURE,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
     match result {
@@ -431,7 +444,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         }
         Some(src)
     };
-    let opts = synth_weft::Options { top: a.value("--top"), params };
+    let opts = synth_weft::Options { top: a.value("--top"), params, ..Default::default() };
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {

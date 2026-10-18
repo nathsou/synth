@@ -16,6 +16,7 @@ arch-ice40 = { path = "crates/arch-ice40" }
 synth-dbgen = { path = "crates/synth-dbgen" }
 synth-elab = { path = "crates/synth-elab" }
 synth-logic = { path = "crates/synth-logic" }
+synth-lsp = { path = "crates/synth-lsp" }
 synth-netlist = { path = "crates/synth-netlist" }
 synth-rtl = { path = "crates/synth-rtl" }
 synth-rtlil = { path = "crates/synth-rtlil" }

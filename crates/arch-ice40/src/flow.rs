@@ -1,6 +1,6 @@
 //! The iCE40 implementation flow: pack, place, route, generate bitstream.
 
-use std::time::Instant;
+use synth_core::time::Instant;
 
 use synth_netlist::Netlist;
 
@@ -40,6 +40,17 @@ pub struct FlowResult {
 /// over the checkpointed run's is replaced by fresh place and route.
 const MAX_SLOWDOWN: f64 = 1.05;
 
+/// The physical design at the end of a run, for inspection.
+#[derive(Debug)]
+pub struct Implementation {
+    pub arch: Arch,
+    /// The packed netlist, with LUT inputs permuted as routed.
+    pub netlist: Netlist,
+    pub placement: crate::place::Placement,
+    pub routing: crate::route::Routing,
+    pub timing: crate::timing::TimingReport,
+}
+
 /// Packs, places and routes a netlist of iCE40 primitives. On failure the
 /// error message starts with the log so far (one `info:` line per entry).
 pub fn implement(
@@ -48,6 +59,27 @@ pub fn implement(
     opts: &FlowOptions,
 ) -> Result<FlowResult, String> {
     implement_with_checkpoint(nl, pins, opts, None, false)
+}
+
+/// [`implement`], also returning the physical design.
+pub fn implement_detailed(
+    nl: Netlist,
+    pins: &PinConstraints,
+    opts: &FlowOptions,
+) -> Result<(FlowResult, Implementation), String> {
+    let mut log = Vec::new();
+    let mut detail = None;
+    match run(nl, pins, opts, &mut log, None, false, &mut detail) {
+        Ok((config, timing_met, checkpoint)) => {
+            let detail = detail.expect("a successful run records its implementation");
+            Ok((FlowResult { config, log, timing_met, checkpoint }, detail))
+        }
+        Err(e) => {
+            let mut msg: String = log.iter().map(|l| format!("info: {l}\n")).collect();
+            msg.push_str(&e);
+            Err(msg)
+        }
+    }
 }
 
 /// Implements the current netlist, using a previous checkpoint as a hint,
@@ -69,7 +101,7 @@ fn implement_with_checkpoint(
     save: bool,
 ) -> Result<FlowResult, String> {
     let mut log = Vec::new();
-    match run(nl, pins, opts, &mut log, previous, save) {
+    match run(nl, pins, opts, &mut log, previous, save, &mut None) {
         Ok((config, timing_met, checkpoint)) => {
             Ok(FlowResult { config, log, timing_met, checkpoint })
         }
@@ -88,6 +120,7 @@ fn run(
     log: &mut Vec<String>,
     previous: Option<&Checkpoint>,
     save: bool,
+    detail: &mut Option<Implementation>,
 ) -> Result<(Config, bool, Option<Checkpoint>), String> {
     let t0 = Instant::now();
     let arch = Arch::new(opts.part, &opts.package)?;
@@ -250,7 +283,7 @@ fn run(
 
     if incremental && !met {
         log.push("incremental result misses timing targets; using fresh PnR".into());
-        return run(fresh_input.unwrap(), pins, opts, log, None, save);
+        return run(fresh_input.unwrap(), pins, opts, log, None, save, detail);
     }
     // Quality: no clock may get much slower than in the checkpointed run.
     if let Some(previous) = previous.filter(|_| incremental) {
@@ -264,7 +297,7 @@ fn run(
                 c.period_ns,
                 previous.period(&c.clock).unwrap_or(0.0) / 1000.0
             ));
-            return run(fresh_input.unwrap(), pins, opts, log, None, save);
+            return run(fresh_input.unwrap(), pins, opts, log, None, save, detail);
         }
     }
     if let Some(c) = checkpoint.as_mut() {
@@ -273,5 +306,6 @@ fn run(
 
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
+    *detail = Some(Implementation { arch, netlist: nl, placement, routing, timing });
     Ok((config, met, checkpoint))
 }
