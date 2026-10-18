@@ -42,6 +42,28 @@ jobs:
       - name: Check
         run: cargo check --workspace --all-targets
 
+  playground:
+    name: playground (WebAssembly and web app)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: Clippy (wasm32)
+        run: cargo clippy -p synth-playground --target wasm32-unknown-unknown
+      - name: Build the static site
+        run: tools/build_playground.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Web app syntax
+        run: for f in crates/synth-playground/web/*.js editors/vscode/*.js; do node --check "$f"; done
+      - name: Web app unit tests
+        run: node --test crates/synth-playground/web/tests/web.test.mjs
+
   bitsim:
     name: bitstream simulation
     runs-on: ubuntu-latest

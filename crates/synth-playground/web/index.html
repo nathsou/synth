@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>synth playground</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><svg viewBox="0 0 24 24" class="logo" aria-hidden="true"><use href="#i-chip"/></svg><span>synth</span><span class="muted">playground</span></div>
+  <div class="tb-group">
+    <label class="tb-field" title="Load an example design"><span>Example</span><select id="example"></select></label>
+    <label class="tb-field" title="Device"><span>Device</span><select id="part"></select></label>
+    <label class="tb-field" title="Package"><span>Package</span><select id="package"></select></label>
+    <button id="run-options" class="icon-btn" title="Run options"><svg><use href="#i-sliders"/></svg></button>
+  </div>
+  <div class="tb-group grow">
+    <button id="run" class="primary" title="Run the whole flow (Ctrl+Enter)"><svg><use href="#i-play"/></svg><span>Run</span></button>
+    <div id="status" class="status" role="status"></div>
+  </div>
+  <div class="tb-group">
+    <button id="share" class="icon-btn" title="Copy a link to this design"><svg><use href="#i-link"/></svg></button>
+    <button id="download" class="icon-btn" title="Download the bitstream (.bin)" disabled><svg><use href="#i-download"/></svg></button>
+    <button id="theme" class="icon-btn" title="Toggle light and dark theme"><svg><use href="#i-moon"/></svg></button>
+    <button id="settings" class="icon-btn" title="Settings"><svg><use href="#i-gear"/></svg></button>
+  </div>
+</header>
+
+<main id="main" class="main">
+  <section id="left" class="pane left">
+    <div class="tabs files" id="file-tabs"></div>
+    <div id="editor" class="editor-host"></div>
+    <div class="split-h" id="split-bottom" title="Drag to resize"></div>
+    <div class="bottom">
+      <div class="tabs" id="bottom-tabs">
+        <button data-tab="problems" class="active">Problems <span class="badge" id="problem-count"></span></button>
+        <button data-tab="log">Log</button>
+      </div>
+      <div class="tab-body" id="bottom-body">
+        <div data-pane="problems" id="problems" class="list"></div>
+        <div data-pane="log" id="log" class="log" hidden></div>
+      </div>
+    </div>
+  </section>
+  <div class="split-v" id="split-main" title="Drag to resize"></div>
+  <section id="right" class="pane right">
+    <div class="tabs views" id="view-tabs">
+      <button data-view="pipeline" class="active"><svg><use href="#i-flow"/></svg>Pipeline</button>
+      <button data-view="schematic"><svg><use href="#i-graph"/></svg>Schematic</button>
+      <button data-view="chip"><svg><use href="#i-chip"/></svg>Chip</button>
+      <button data-view="timing"><svg><use href="#i-clock"/></svg>Timing</button>
+      <button data-view="bitstream"><svg><use href="#i-bits"/></svg>Bitstream</button>
+    </div>
+    <div class="views-body">
+      <div data-view-pane="pipeline" id="pipeline" class="view scroll"></div>
+      <div data-view-pane="schematic" id="schematic" class="view" hidden></div>
+      <div data-view-pane="chip" id="chip" class="view" hidden></div>
+      <div data-view-pane="timing" id="timing" class="view scroll" hidden></div>
+      <div data-view-pane="bitstream" id="bitstream" class="view" hidden></div>
+      <div id="empty" class="empty-state">
+        <svg><use href="#i-play"/></svg>
+        <p>Press <kbd>Run</kbd> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to elaborate, synthesise, place, route and generate a bitstream.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="tooltip" class="tooltip" hidden></div>
+<div id="popover-host"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9.5" y="9.5" width="5" height="5" fill="currentColor"/><path d="M9 2v3M12 2v3M15 2v3M9 19v3M12 19v3M15 19v3M2 9h3M2 12h3M2 15h3M19 9h3M19 12h3M19 15h3" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5a7.4 7.4 0 0 0-2.6 1.5l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 3l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.4 7.4 0 0 0 2.6-1.5l2.4 1 2-3.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 19.5h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="16" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="10" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="18" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-flow" viewBox="0 0 24 24"><rect x="2.5" y="9" width="5" height="6" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="9.5" y="9" width="5" height="6" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="16.5" y="9" width="5" height="6" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7.5 12h2M14.5 12h2" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-graph" viewBox="0 0 24 24"><rect x="2.5" y="4" width="6" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="2.5" y="15" width="6" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="15.5" y="9.5" width="6" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.5 6.5c4 0 3 5.5 7 5.5M8.5 17.5c4 0 3-5.5 7-5.5" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-bits" viewBox="0 0 24 24"><path d="M4 4h4v4H4zM10 4h4v4h-4zM16 10h4v4h-4zM4 10h4v4H4zM10 16h4v4h-4zM16 16h4v4h-4z" fill="currentColor" opacity=".85"/><path d="M16 4h4v4h-4zM10 10h4v4h-4zM4 16h4v4H4z" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3 2.5 8 12 13l9.5-5zM2.5 12.5 12 17.5l9.5-5M2.5 16.5 12 21.5l9.5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 3 2 20.5h20z" fill="currentColor"/><path d="M12 10v5M12 17.5v.5" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 11v6M12 7.5v.5" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></symbol>
+</svg>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

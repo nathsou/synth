@@ -17,6 +17,7 @@ synth-elab.workspace = true
 synth-rtl.workspace = true
 synth-weft.workspace = true
 synth-lsp.workspace = true
+synth-playground.workspace = true
 arch-ice40.workspace = true
 
 [lints]

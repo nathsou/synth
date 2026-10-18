@@ -21,6 +21,7 @@ COMMANDS:
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     lsp        Run the Weft language server on stdin/stdout
+    playground Serve the playground web app (--port <n>, default 8080)
     help       Print this message
     version    Print version information
 
@@ -76,6 +77,7 @@ fn main() -> ExitCode {
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
+        Some("playground") => cmd_playground(&argv[1..]),
         Some("lsp") => {
             let prelude =
                 vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
@@ -165,6 +167,14 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
         write(&out, synth_netlist::verilog::write(&nl, &name).as_bytes())?;
     }
     Ok(())
+}
+
+fn cmd_playground(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let port = a.value("--port").unwrap_or_else(|| "8080".into());
+    let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    a.finish()?;
+    synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
 
 fn cmd_build(argv: &[String]) -> Result<(), String> {

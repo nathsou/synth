@@ -1798,6 +1798,7 @@ impl<'a> ModCx<'a> {
     pub fn run(&mut self, d: &mut Design<'a>) -> R<()> {
         let body = self.body;
         let errors = d.diags.error_count();
+        let (first_cell, first_wire) = (d.out.cells.len(), d.out.wires.len());
         let ok = self.walk_module(d, body).is_ok();
         // Resolve whatever the walk did not reach (only after errors).
         let names: Vec<String> = self.lazy.keys().cloned().collect();
@@ -1811,6 +1812,20 @@ impl<'a> ModCx<'a> {
             self.index_decls(d);
         }
         let fin = self.finish(d, errors);
+        // Anonymous cells and wires carry the instance path, like named ones.
+        if !self.prefix.is_empty() {
+            let prefix = &self.prefix;
+            for c in &mut d.out.cells.as_mut_slice()[first_cell..] {
+                if c.name.starts_with('$') {
+                    c.name.insert_str(0, prefix);
+                }
+            }
+            for w in &mut d.out.wires.as_mut_slice()[first_wire..] {
+                if w.name.starts_with('$') {
+                    w.name.insert_str(0, prefix);
+                }
+            }
+        }
         if ok && fin.is_ok() { Ok(()) } else { Err(()) }
     }
 

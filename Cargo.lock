@@ -22,6 +22,7 @@ dependencies = [
  "synth-elab",
  "synth-lsp",
  "synth-netlist",
+ "synth-playground",
  "synth-rtl",
  "synth-rtlil",
  "synth-verilog",
@@ -70,6 +71,20 @@ name = "synth-netlist"
 version = "0.1.0"
 dependencies = [
  "synth-core",
+]
+
+[[package]]
+name = "synth-playground"
+version = "0.1.0"
+dependencies = [
+ "arch-ice40",
+ "synth-core",
+ "synth-elab",
+ "synth-logic",
+ "synth-netlist",
+ "synth-rtl",
+ "synth-verilog",
+ "synth-weft",
 ]
 
 [[package]]

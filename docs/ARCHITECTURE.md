@@ -142,9 +142,12 @@ compile times stay reasonable and dependencies stay acyclic.
 | `synth-route` | Router (negotiated congestion, timing-driven), global clock routing |
 | `synth-timing` | STA engine, SDC/XDC constraint model, reports |
 | `arch-ice40`, `arch-ecp5`, `arch-xc7` | Primitive libraries, lowering rules, packing and legality, timing glue, bitstream assembler and disassembler |
+| `synth-lsp` | Weft language server (`synth lsp`) |
+| `synth-playground` | The flow as data for the web playground (`synth playground`, or WebAssembly), and the web app itself |
 
 Other top-level directories: `boards/` (board catalog, TOML), `tests/` (designs and
-golden outputs), `bench/` (QoR suite and harness), `docs/`.
+golden outputs), `bench/` (QoR suite and harness), `editors/` (editor
+integrations), `docs/`.
 
 ---
 

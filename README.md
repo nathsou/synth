@@ -48,6 +48,26 @@ target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf
 See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
 modules can be used from Weft through `extern module` declarations.
 
+`synth lsp` is a language server for Weft: diagnostics as you type, hover with
+types, ranges and clock domains, go to definition, references, rename,
+outline, completion and semantic highlighting. See [editor support](docs/EDITORS.md)
+for VS Code (an extension is in [`editors/vscode`](editors/vscode)), Neovim,
+Helix and Emacs.
+
+## Playground
+
+`synth playground` opens the whole flow in the browser: edit Weft or Verilog
+and see the design after every pass as a schematic, from the module level down
+to gates and LUTs, then the cells and routed wires on the actual iCE40 die,
+the critical paths and every configuration bit, decoded.
+
+```sh
+target/release/synth playground        # http://127.0.0.1:8080/
+tools/build_playground.sh              # or a static site, the flow in WebAssembly
+```
+
+See [docs/PLAYGROUND.md](docs/PLAYGROUND.md).
+
 ## Incremental builds
 
 Add `--incremental` to reuse the previous placement and routing after edits:

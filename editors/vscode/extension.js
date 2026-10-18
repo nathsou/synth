@@ -46,7 +46,7 @@ class Connection {
       let msg;
       try {
         msg = JSON.parse(body);
-      } catch (e) {
+      } catch {
         this.log.appendLine(`invalid message: ${body}`);
         continue;
       }
