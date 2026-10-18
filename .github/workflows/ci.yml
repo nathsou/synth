@@ -1,6 +1,6 @@
 name: CI
 
-# Pull requests run the jobs their changes can affect, except macOS; the
+# Pull requests run the jobs their changes can affect; the
 # slow simulation job waits until the PR is ready for review. A push to main
 # (after the PR already passed) only runs the fast tests. The weekly run and
 # manual runs cover everything and refresh the caches.
