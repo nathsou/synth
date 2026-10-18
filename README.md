@@ -65,6 +65,9 @@ contents, added/removed logic, carry-chain and pin changes (requires the CI refe
 tools). `cargo test --workspace` also checks checkpoint corruption, allocation-ID
 changes, routing invalidation, automatic selection and repeated saves.
 
+See [the incremental benchmark](docs/INCREMENTAL_BENCHMARK.md) for small and
+structural edits across four designs, including slowdowns and timing tradeoffs.
+
 ## Status
 
 **iCE40 works end to end.** Verilog-2005 elaboration, logic synthesis (AIG

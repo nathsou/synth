@@ -1,0 +1,160 @@
+Edited outputs (initial run)
+============================
+
+VALIDATE blinky_ram/small
+output toggles: led 10, tx 6663
+PASS 10000 cycles
+VALIDATE blinky_ram/large
+output toggles: led 10000, tx 6663
+PASS 10000 cycles
+VALIDATE picosoc/small
+output toggles: tx 281, led 408
+PASS 200000 cycles
+VALIDATE picosoc/large
+output toggles: tx 281, led 497
+PASS 200000 cycles
+VALIDATE picosoc/multiply
+output toggles: tx 281, led 408
+PASS 200000 cycles
+VALIDATE euler31/small
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 396: usb_tx rtl=1 chip=0
+cycle 397: usb_tx rtl=1 chip=0
+cycle 398: usb_tx rtl=1 chip=0
+cycle 399: usb_tx rtl=1 chip=0
+cycle 1260: usb_tx rtl=0 chip=1
+output toggles: usb_tx 57, led 1
+FAIL 34504 mismatches
+
+Euler31 fresh-flow controls, 2000 cycles
+========================================
+
+VALIDATE euler31/unchanged/fresh
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 396: usb_tx rtl=1 chip=0
+cycle 397: usb_tx rtl=1 chip=0
+cycle 398: usb_tx rtl=1 chip=0
+cycle 399: usb_tx rtl=1 chip=0
+cycle 1260: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+VALIDATE euler31/unchanged/incremental
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 396: usb_tx rtl=1 chip=0
+cycle 397: usb_tx rtl=1 chip=0
+cycle 398: usb_tx rtl=1 chip=0
+cycle 399: usb_tx rtl=1 chip=0
+cycle 1260: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+VALIDATE euler31/small/fresh
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 396: usb_tx rtl=1 chip=0
+cycle 397: usb_tx rtl=1 chip=0
+cycle 398: usb_tx rtl=1 chip=0
+cycle 399: usb_tx rtl=1 chip=0
+cycle 1260: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+VALIDATE euler31/small/incremental
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 396: usb_tx rtl=1 chip=0
+cycle 397: usb_tx rtl=1 chip=0
+cycle 398: usb_tx rtl=1 chip=0
+cycle 399: usb_tx rtl=1 chip=0
+cycle 1260: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+VALIDATE euler31/large/fresh
+cycle 388: usb_tx rtl=1 chip=0
+cycle 389: usb_tx rtl=1 chip=0
+cycle 390: usb_tx rtl=1 chip=0
+cycle 391: usb_tx rtl=1 chip=0
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 1256: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+VALIDATE euler31/large/incremental
+cycle 388: usb_tx rtl=1 chip=0
+cycle 389: usb_tx rtl=1 chip=0
+cycle 390: usb_tx rtl=1 chip=0
+cycle 391: usb_tx rtl=1 chip=0
+cycle 392: usb_tx rtl=1 chip=0
+cycle 393: usb_tx rtl=1 chip=0
+cycle 394: usb_tx rtl=1 chip=0
+cycle 395: usb_tx rtl=1 chip=0
+cycle 1256: usb_tx rtl=0 chip=1
+output toggles: usb_tx 3, led 1
+FAIL 16 mismatches
+Failed bitstream comparisons: euler31/unchanged/fresh, euler31/unchanged/incremental, euler31/small/fresh, euler31/small/incremental, euler31/large/fresh, euler31/large/incremental
+
+Euler48 fresh-flow controls, 60000 cycles
+=========================================
+
+VALIDATE euler48/small/fresh
+cycle 22932: usb_tx rtl=1 chip=0
+cycle 22933: usb_tx rtl=1 chip=0
+cycle 22934: usb_tx rtl=1 chip=0
+cycle 22935: usb_tx rtl=1 chip=0
+cycle 22936: usb_tx rtl=1 chip=0
+cycle 22937: usb_tx rtl=1 chip=0
+cycle 22938: usb_tx rtl=1 chip=0
+cycle 22939: usb_tx rtl=1 chip=0
+cycle 22940: usb_tx rtl=1 chip=0
+output toggles: usb_tx 24, led 1
+FAIL 6304 mismatches
+VALIDATE euler48/small/incremental
+cycle 22932: usb_tx rtl=1 chip=0
+cycle 22933: usb_tx rtl=1 chip=0
+cycle 22934: usb_tx rtl=1 chip=0
+cycle 22935: usb_tx rtl=1 chip=0
+cycle 22936: usb_tx rtl=1 chip=0
+cycle 22937: usb_tx rtl=1 chip=0
+cycle 22938: usb_tx rtl=1 chip=0
+cycle 22939: usb_tx rtl=1 chip=0
+cycle 22940: usb_tx rtl=1 chip=0
+output toggles: usb_tx 24, led 1
+FAIL 6304 mismatches
+VALIDATE euler48/large/fresh
+cycle 45506: usb_tx rtl=1 chip=0
+cycle 45507: usb_tx rtl=1 chip=0
+cycle 45508: usb_tx rtl=1 chip=0
+cycle 45509: usb_tx rtl=1 chip=0
+cycle 45510: usb_tx rtl=1 chip=0
+cycle 45511: usb_tx rtl=1 chip=0
+cycle 45512: usb_tx rtl=1 chip=0
+cycle 45513: usb_tx rtl=1 chip=0
+cycle 45514: usb_tx rtl=1 chip=0
+output toggles: usb_tx 11, led 1
+FAIL 1808 mismatches
+VALIDATE euler48/large/incremental
+cycle 45506: usb_tx rtl=1 chip=0
+cycle 45507: usb_tx rtl=1 chip=0
+cycle 45508: usb_tx rtl=1 chip=0
+cycle 45509: usb_tx rtl=1 chip=0
+cycle 45510: usb_tx rtl=1 chip=0
+cycle 45511: usb_tx rtl=1 chip=0
+cycle 45512: usb_tx rtl=1 chip=0
+cycle 45513: usb_tx rtl=1 chip=0
+cycle 45514: usb_tx rtl=1 chip=0
+output toggles: usb_tx 11, led 1
+FAIL 1808 mismatches
+Failed bitstream comparisons: euler48/small/fresh, euler48/small/incremental, euler48/large/fresh, euler48/large/incremental
