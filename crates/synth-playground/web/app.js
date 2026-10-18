@@ -71,6 +71,7 @@ class App {
     return {
       example: ex.id,
       files: [...ex.files.map((f) => ({ ...f })), { name: 'pins.pcf', text: ex.pcf }],
+      pcfAuto: true,
       active: ex.files[0].name,
       part: ex.part,
       package: ex.package,
@@ -120,13 +121,12 @@ class App {
     $('part').addEventListener('change', (e) => {
       this.project.part = e.target.value;
       this.fillDevices();
-      this.save();
-      this.run();
+      this.devicePins();
     });
     $('package').addEventListener('change', (e) => {
       this.project.package = e.target.value;
-      this.save();
-      this.run();
+      this.fillDevices();
+      this.devicePins();
     });
     $('run').addEventListener('click', () => this.run());
     $('settings').addEventListener('click', () => openSettings());
@@ -201,8 +201,34 @@ class App {
     if (!this.devices.find((d) => d.part === this.project.part)) this.project.part = 'hx1k';
     part.replaceChildren(...this.devices.map((d) => h('option', { value: d.part, selected: d.part === this.project.part }, d.part.toUpperCase())));
     const dev = this.devices.find((d) => d.part === this.project.part);
-    if (!dev.packages.includes(this.project.package)) this.project.package = dev.packages[0];
-    pkg.replaceChildren(...dev.packages.map((p) => h('option', { value: p, selected: p === this.project.package }, p)));
+    // A new part starts on a package a board uses, when there is one.
+    if (!dev.packages.includes(this.project.package)) {
+      this.project.package = Object.keys(dev.boards || {})[0] || dev.packages[0];
+    }
+    const label = (p) => (dev.boards?.[p] ? `${p} · ${dev.boards[p]}` : p);
+    pkg.replaceChildren(...dev.packages.map((p) => h('option', { value: p, selected: p === this.project.package }, label(p))));
+  }
+
+  /** After a device change: the pins of the new package's board, then run. */
+  devicePins() {
+    const dev = this.devices.find((d) => d.part === this.project.part);
+    const pcf = dev?.pcf?.[this.project.package];
+    const file = this.project.files.find((f) => f.name.endsWith('.pcf'));
+    if (pcf !== undefined) {
+      const where = dev.boards?.[this.project.package] || `${this.project.part.toUpperCase()} ${this.project.package}`;
+      if (!file) {
+        this.project.files.push({ name: 'pins.pcf', text: pcf });
+        this.project.pcfAuto = true;
+        this.renderFiles();
+      } else if (file.text !== pcf && (this.project.pcfAuto || confirm(`Replace ${file.name} with the pins for the ${where}?`))) {
+        file.text = pcf;
+        this.project.pcfAuto = true;
+        if (this.project.active === file.name) this.editor.setDoc(file.name, pcf);
+        toast(`Pins: ${dev.boards?.[this.project.package] ? `the ${where}` : 'chosen by the placer'}`);
+      }
+    }
+    this.save();
+    this.run();
   }
 
   runOptions(anchor) {
@@ -334,6 +360,7 @@ class App {
     const f = this.file(this.project.active);
     if (!f) return;
     f.text = text;
+    if (f.name.endsWith('.pcf')) this.project.pcfAuto = false;
     this.modified();
     if (settings.get('liveCheck')) this.scheduleAnalyze();
     if (settings.get('autoRun')) this.scheduleRun();
