@@ -20,6 +20,8 @@ COMMANDS:
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    lsp        Run the Weft language server on stdin/stdout
+    playground Serve the playground web app (--port <n>, default 8080)
     help       Print this message
     version    Print version information
 
@@ -34,10 +36,8 @@ BUILD OPTIONS:
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
               [--carry-min-width <bits>]
               [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
-              --carry-min-width: force a minimum adder width for hard carry
-              chains; variable comparators use two more bits. By default,
-              compare thresholds 3 and 8 and keep a shallower candidate only
-              when it uses no more packed logic cells.
+              --carry-min-width: minimum adder width for hard carry chains
+              (default 3); variable comparators use two more bits.
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
@@ -80,6 +80,19 @@ fn main() -> ExitCode {
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
+        Some("playground") => cmd_playground(&argv[1..]),
+        Some("lsp") => {
+            let prelude =
+                vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
+            return match synth_lsp::serve(prelude) {
+                Ok(0) => ExitCode::SUCCESS,
+                Ok(_) => ExitCode::FAILURE,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
     match result {
@@ -120,7 +133,6 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
             .filter(|&w| w > 0 && w.checked_add(2).is_some())
             .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
         synth_opts.lower.carry_min_width = Some(width);
-        synth_opts.explore_carry = false;
     }
     let (nl, log) = arch_ice40::synth::synthesize(m, &synth_opts)?;
     for l in &log {
@@ -171,6 +183,14 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
         write(&out, synth_netlist::verilog::write(&nl, &name).as_bytes())?;
     }
     Ok(())
+}
+
+fn cmd_playground(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let port = a.value("--port").unwrap_or_else(|| "8080".into());
+    let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    a.finish()?;
+    synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
 
 fn cmd_build(argv: &[String]) -> Result<(), String> {
@@ -334,12 +354,9 @@ fn checkpoint_path(
                 .collect();
         key.write(format!("{name} {values:?}\n").as_bytes());
     }
-    // Keep fixed policies and automatic exploration in separate checkpoint
-    // namespaces, including checkpoints from the old fixed-width default.
+    // Explicit carry thresholds must not reuse a different mapping policy.
     if let Some(width) = a.value("--carry-min-width") {
         key.write(format!("carry-min-width {width}\n").as_bytes());
-    } else {
-        key.write(b"carry-policy auto-v1\n");
     }
     key.write(format!("{opts:?}").as_bytes());
     let dir = ".synth/checkpoints";
@@ -458,7 +475,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         }
         Some(src)
     };
-    let opts = synth_weft::Options { top: a.value("--top"), params };
+    let opts = synth_weft::Options { top: a.value("--top"), params, ..Default::default() };
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {

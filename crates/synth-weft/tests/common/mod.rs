@@ -22,6 +22,7 @@ pub fn compile_with(
     let opts = synth_weft::Options {
         top: top.map(String::from),
         params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        ..Default::default()
     };
     let (m, diags) = synth_weft::compile(&mut sm, &[f], &[], None, &opts);
     let text = diags.render(&sm);
@@ -408,6 +409,7 @@ pub fn compile_files(
     let opts = synth_weft::Options {
         top: top.map(String::from),
         params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        ..Default::default()
     };
     let (m, diags) = synth_weft::compile(&mut sm, &ids, &[], src.as_ref(), &opts);
     let text = diags.render(&sm);

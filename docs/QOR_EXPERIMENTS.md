@@ -1,3 +1,5 @@
+> Historical experiment: automatic threshold selection was withdrawn after review. The current default again uses one synthesis pass with carry threshold 3. The measurements below describe the withdrawn policy.
+
 # Default QoR: carry mapping and placement experiments
 
 The default now explores carry thresholds 3 and 8 before place-and-route. It accepts threshold 8 only when the mapped critical path is **strictly shallower** and the packed logic-cell count does not increase. Otherwise it retains the original netlist. RTL simplification and memory mapping are shared; only one netlist is placed and routed. `--carry-min-width 3` forces the previous policy, and an explicit threshold disables exploration.

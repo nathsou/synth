@@ -113,6 +113,8 @@ impl<'a> ModCx<'a> {
         };
         self.check_fresh(d, name)?;
         let sym = self.declare(d, st, false)?;
+        self.scopes.last_mut().unwrap().decls.insert(name.name.clone(), name.span);
+        self.note_sym(d, name, &sym);
         self.scopes.last_mut().unwrap().syms.insert(name.name.clone(), sym);
         Ok(())
     }
@@ -580,6 +582,9 @@ impl<'a> ModCx<'a> {
             );
         }
         d.elaborated.insert(m.name.name.clone());
+        if d.indexing {
+            d.note(callee.span, Some(m.name.span), RefKind::Module, d.module_hover(m));
+        }
         let mut child = ModCx::new(m, format!("{iname}."), false);
         child.bind_generic_list(
             d,
@@ -613,6 +618,12 @@ impl<'a> ModCx<'a> {
                     ast::Ident { name: inputs[0].name.clone(), span: a.value.span }
                 }
             };
+            if d.indexing
+                && a.name.is_some()
+                && let Some(port) = m.ports.iter().find(|p| p.name.name == pname.name)
+            {
+                d.note(pname.span, Some(port.name.span), RefKind::Port, d.port_hover(m, port));
+            }
             let Some(p) = ports.iter().find(|p| p.name == pname.name) else {
                 let mut dg = Diagnostic::error(
                     pname.span,
@@ -1110,7 +1121,10 @@ impl<'a> ModCx<'a> {
                     }
                     self.check_fresh(d, name)?;
                     let s = self.declare(d, st, false)?;
-                    self.scopes.last_mut().unwrap().syms.insert(name.name.clone(), s.clone());
+                    let sc = self.scopes.last_mut().unwrap();
+                    sc.syms.insert(name.name.clone(), s.clone());
+                    sc.decls.insert(name.name.clone(), name.span);
+                    self.note_sym(d, name, &s);
                     s
                 };
                 if let Sym::Inst(i) = sym {
@@ -1143,10 +1157,10 @@ impl<'a> ModCx<'a> {
                 let g_then = d.out.and1(guard, bit);
                 let nb = d.out.not1(bit);
                 let g_else = d.out.and1(guard, nb);
-                self.scopes.push(Scope { syms: HashMap::new(), narrow: tn });
+                self.scopes.push(Scope { narrow: tn, ..Default::default() });
                 let t = self.walk(d, then, g_then, &gt, true, false);
                 self.scopes.pop();
-                self.scopes.push(Scope { syms: HashMap::new(), narrow: en });
+                self.scopes.push(Scope { narrow: en, ..Default::default() });
                 let e = match els {
                     Some(b) => self.walk(d, b, g_else, &gt, true, false),
                     None => Ok(DefSet::new()),
@@ -1250,6 +1264,7 @@ impl<'a> ModCx<'a> {
                 while i < b {
                     let mut sc = Scope::default();
                     sc.syms.insert(var.name.clone(), Sym::Value(Value::Int(i.clone(), None)));
+                    sc.decls.insert(var.name.clone(), var.span);
                     self.scopes.push(sc);
                     self.loop_names.push(format!("[{i}]"));
                     let r = self.walk(d, body, guard, gtags, runtime, false);
@@ -1276,6 +1291,7 @@ impl<'a> ModCx<'a> {
             ExprKind::Paren(x) => self.target(d, x),
             ExprKind::Ident(id) => match self.lookup(d, id)? {
                 Some(Sym::Signal(i)) => {
+                    self.note_sym(d, id, &Sym::Signal(i));
                     let ty = self.signals[i].ty.clone();
                     let w = d.types.width(&ty);
                     Ok(Target::Sig(Place { sig: i, alts: vec![(SigBit::ONE, 0)], width: w, ty, tags: Tags::none() }))
@@ -1327,6 +1343,12 @@ impl<'a> ModCx<'a> {
                         }
                         return d.err(dg);
                     };
+                    if d.indexing {
+                        self.note_sym(d, id, &Sym::Inst(i));
+                        let decl = d.port_of(&inst.module, &name.name).map(|p| p.name.span);
+                        let hover = self.describe_signal(d, si) + &format!("\n\nport of instance `{}` of `{}`", inst.name, inst.module);
+                        d.note(name.span, decl, RefKind::Port, hover);
+                    }
                     let ty = self.signals[si].ty.clone();
                     let w = d.types.width(&ty);
                     return Ok(Target::Sig(Place { sig: si, alts: vec![(SigBit::ONE, 0)], width: w, ty, tags: Tags::none() }));
@@ -1726,6 +1748,8 @@ impl<'a> ModCx<'a> {
         let mut frame = ModCx::global();
         frame.def_name = f.name.name.clone();
         frame.file = f.name.span.file;
+        frame.generic_decls =
+            f.generics.iter().map(|g| (g.name.name.clone(), g.name.span)).collect();
         // Explicit generic arguments.
         let mut given: HashMap<String, Value> = HashMap::new();
         for a in generics {
@@ -1801,6 +1825,11 @@ impl<'a> ModCx<'a> {
                 Some(&args[k].value),
             )?;
             frame.scopes[0].syms.insert(pname.name.clone(), Sym::Value(Value::Hw(h)));
+            frame.scopes[0].decls.insert(pname.name.clone(), pname.span);
+            if d.indexing {
+                let sym = frame.scopes[0].syms[&pname.name].clone();
+                frame.note_sym(d, pname, &sym);
+            }
         }
         let rt = frame.eval_type(d, &f.ret)?;
         d.fn_depth += 1;
@@ -1857,7 +1886,7 @@ impl<'a> ModCx<'a> {
         narrow: HashMap<String, IntTy>,
     ) -> R<Vec<Hw>> {
         let before = self.vars();
-        self.scopes.push(Scope { syms: HashMap::new(), narrow });
+        self.scopes.push(Scope { narrow, ..Default::default() });
         let r = self.exec(d, stmts);
         self.scopes.pop();
         r?;
@@ -1880,7 +1909,9 @@ impl<'a> ModCx<'a> {
             StmtKind::Const(c) => {
                 self.check_fresh(d, &c.name)?;
                 let v = self.const_decl_value(d, c)?;
-                self.scopes.last_mut().unwrap().syms.insert(c.name.name.clone(), Sym::Value(v));
+                let sc = self.scopes.last_mut().unwrap();
+                sc.syms.insert(c.name.name.clone(), Sym::Value(v));
+                sc.decls.insert(c.name.name.clone(), c.name.span);
                 Ok(())
             }
             StmtKind::Var { name, ty, value } => {
@@ -1914,7 +1945,9 @@ impl<'a> ModCx<'a> {
                         h
                     }
                 };
-                self.scopes.last_mut().unwrap().syms.insert(name.name.clone(), Sym::Var(h));
+                let sc = self.scopes.last_mut().unwrap();
+                sc.syms.insert(name.name.clone(), Sym::Var(h));
+                sc.decls.insert(name.name.clone(), name.span);
                 Ok(())
             }
             StmtKind::Assign { target, op, value } => {
@@ -2005,6 +2038,7 @@ impl<'a> ModCx<'a> {
                 while i < b {
                     let mut sc = Scope::default();
                     sc.syms.insert(var.name.clone(), Sym::Value(Value::Int(i.clone(), None)));
+                    sc.decls.insert(var.name.clone(), var.span);
                     self.scopes.push(sc);
                     let r = self.exec(d, body);
                     self.scopes.pop();
@@ -2053,6 +2087,12 @@ impl<'a> ModCx<'a> {
                 }
             }
         };
+        if d.indexing
+            && let Some(sym) =
+                self.scopes.iter().rev().find_map(|s| s.syms.get(&root.name)).cloned()
+        {
+            self.note_sym(d, root, &sym);
+        }
         let Some((scope, cur)) =
             self.scopes.iter().enumerate().rev().find_map(|(k, s)| match s.syms.get(&root.name) {
                 Some(Sym::Var(h)) => Some((k, h.clone())),

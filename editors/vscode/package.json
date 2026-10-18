@@ -1,0 +1,51 @@
+{
+  "name": "weft",
+  "displayName": "Weft",
+  "description": "Weft hardware description language: highlighting and the synth language server",
+  "version": "0.1.0",
+  "publisher": "synth",
+  "license": "EUPL-1.2",
+  "repository": { "type": "git", "url": "https://github.com/nathsou/synth" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "weft",
+        "aliases": ["Weft", "weft"],
+        "extensions": [".weft"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "weft", "scopeName": "source.weft", "path": "./syntaxes/weft.tmLanguage.json" }
+    ],
+    "commands": [
+      { "command": "weft.restartServer", "title": "Weft: Restart Language Server" },
+      { "command": "weft.showOutput", "title": "Weft: Show Language Server Output" }
+    ],
+    "configuration": {
+      "title": "Weft",
+      "properties": {
+        "weft.server.path": {
+          "type": "string",
+          "default": "synth",
+          "description": "The synth executable (its `lsp` command is the language server)."
+        },
+        "weft.server.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["lsp"],
+          "description": "Arguments that start the language server."
+        },
+        "weft.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log every message exchanged with the server."
+        }
+      }
+    }
+  }
+}

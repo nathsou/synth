@@ -48,22 +48,35 @@ target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf
 See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
 modules can be used from Weft through `extern module` declarations.
 
+`synth lsp` is a language server for Weft: diagnostics as you type, hover with
+types, ranges and clock domains, go to definition, references, rename,
+outline, completion and semantic highlighting. See [editor support](docs/EDITORS.md)
+for VS Code (an extension is in [`editors/vscode`](editors/vscode)), Neovim,
+Helix and Emacs.
+
+## Playground
+
+`synth playground` opens the whole flow in the browser: edit Weft or Verilog
+and see the design after every pass as a schematic, from the module level down
+to gates and LUTs, then the cells and routed wires on the actual iCE40 die,
+the critical paths and every configuration bit, decoded.
+
+```sh
+target/release/synth playground        # http://127.0.0.1:8080/
+tools/build_playground.sh              # or a static site, the flow in WebAssembly
+```
+
+See [docs/PLAYGROUND.md](docs/PLAYGROUND.md).
+
 ## Carry mapping
 
-Synthesis compares minimum hard-carry adder widths of 3 and 8 when short
-carry chains are present. It keeps the higher threshold only when the mapped
-critical path is shallower and the packed logic-cell count does not grow.
-This avoids changing placement for small area savings with no predicted timing
-gain. Only the selected netlist is placed and routed. The comparison adds
-synthesis work; mapped depth is an estimate, so routed timing can still vary.
-
-`--carry-min-width <bits>` on `synth build` or `synth synth` forces a fixed
-policy and disables that comparison. Use `--carry-min-width 3` for the previous
-default or `--carry-min-width 8` to leave more short arithmetic in LUTs.
-Variable comparators use a threshold two bits higher. Automatic incremental
-checkpoints distinguish automatic exploration and each explicit threshold.
-
-See [the QoR study](docs/QOR_EXPERIMENTS.md) for measurements and tradeoffs.
+`--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum
+adder width that uses a hard carry chain (default: 3). Variable comparators use
+a threshold two bits higher. For example, `--carry-min-width 8` leaves short
+arithmetic in LUT logic, which can reduce carry feed-in cells and improve timing
+on designs with many small adders. Compare routed timing and packed cell counts
+for your design; a higher threshold is not always better. Automatic incremental
+checkpoints distinguish explicit carry thresholds.
 
 ## Incremental builds
 
