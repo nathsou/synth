@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Four LEDs that breathe, each a quarter of a breath after the previous one:
+// pulse-width modulation of a brightness that rises and falls, corrected for
+// the eye by a gamma table that is computed at compile time.
+
+/// `(i / 63)²`, scaled to 0..=255: the eye sees this as an even ramp.
+fn gamma() -> [uint<8>; 64] {
+    var t: [uint<8>; 64] = [0; 64];
+    for i in 0..64 { t[i] = (i * i * 255 + 1984) / 3969; }
+    t
+}
+
+/// STEP: the cycles between two of the 128 brightness steps of a breath
+/// (25 MHz on the Go Board: a breath every 2 s).
+module top<STEP: int = 390_625>(in clk: clock, out led: uint<4>) {
+    const GAMMA: [uint<8>; 64] = gamma();
+    inst step = divider<STEP>();
+
+    // The PWM period: 256 cycles, with the LED on while `pwm` is below the
+    // brightness.
+    reg pwm: uint<8> = 0;
+    pwm := pwm +% 1;
+
+    reg phase: uint<7> = 0;
+    if step.tick { phase := phase +% 1; }
+
+    for i in 0..4 {
+        let p = phase +% i * 32;
+        let level = if p[6] { ~p[5:0] } else { p[5:0] }; // up, then down
+        led[i] = pwm < GAMMA[level];
+    }
+}

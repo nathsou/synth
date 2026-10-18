@@ -11,6 +11,7 @@
 //!   and the decoded configuration bits.
 //! - `analyze`: diagnostics and the name index of Weft sources, for the
 //!   editor (hover, go to definition).
+//! - `format`: a Weft source, formatted.
 //! - `examples`, `devices`: what the app offers to start from.
 
 pub mod chip;
@@ -30,14 +31,62 @@ pub struct Example {
     pub title: &'static str,
     pub description: &'static str,
     pub files: &'static [(&'static str, &'static str)],
-    pub pcf: &'static str,
+    /// The device it starts on; its pins come from the board for it.
     pub part: &'static str,
     pub package: &'static str,
 }
 
-const GO_BOARD_PCF: &str = include_str!("../../../examples/weft/go_board.pcf");
-const BLINKY_RAM_PCF: &str = include_str!("../../../tests/designs/blinky_ram/go_board.pcf");
+/// A board, and the pins of every port the examples use on it.
+#[derive(Debug)]
+pub struct Board {
+    pub name: &'static str,
+    pub part: &'static str,
+    pub package: &'static str,
+    pub pcf: &'static str,
+}
+
+pub const BOARDS: &[Board] = &[
+    Board {
+        name: "Nandland Go Board",
+        part: "hx1k",
+        package: "vq100",
+        pcf: "# Nandland Go Board (iCE40 HX1K VQ100)\nset_io clk 15\nset_io sw1 53\nset_io btn 53\nset_io led[0] 56\nset_io led[1] 57\nset_io led[2] 59\nset_io led[3] 60\n# The seven-segment display's segments, for 8-bit outputs.\nset_io led[4] 3\nset_io led[5] 4\nset_io led[6] 7\nset_io led[7] 8\nset_io rx 73\nset_io tx 74\n",
+    },
+    Board {
+        name: "Lattice iCEstick",
+        part: "hx1k",
+        package: "tq144",
+        pcf: "# Lattice iCEstick (iCE40 HX1K TQ144)\nset_io clk 21\nset_io led[0] 99\nset_io led[1] 98\nset_io led[2] 97\nset_io led[3] 96\nset_io led[4] 95\nset_io rx 9\nset_io tx 8\n",
+    },
+    Board {
+        name: "Lattice iCE40-HX8K Breakout Board",
+        part: "hx8k",
+        package: "ct256",
+        pcf: "# Lattice iCE40-HX8K Breakout Board (iCE40 HX8K CT256, 12 MHz)\nset_io clk J3\nset_io led[0] B5\nset_io led[1] B4\nset_io led[2] A2\nset_io led[3] A1\nset_io led[4] C5\nset_io led[5] C4\nset_io led[6] B3\nset_io led[7] C3\nset_io rx B10\nset_io tx B12\n",
+    },
+    Board {
+        name: "Alchitry Cu",
+        part: "hx8k",
+        package: "cb132",
+        pcf: "# Alchitry Cu (iCE40 HX8K CB132)\nset_io clk P7\nset_io sw1 P8\nset_io btn P8\nset_io led[0] J11\nset_io led[1] K11\nset_io led[2] K12\nset_io led[3] K14\nset_io led[4] L12\nset_io led[5] L14\nset_io led[6] M12\nset_io led[7] N14\nset_io rx P14\nset_io tx M9\n",
+    },
+];
+
+/// The pin constraints for a device: its board's, or none (the placer then
+/// chooses the pins).
+pub fn board_pcf(part: &str, package: &str) -> String {
+    match BOARDS.iter().find(|b| b.part == part && b.package == package) {
+        Some(b) => b.pcf.to_string(),
+        None => format!(
+            "# No board is known for the {} {package}: the placer chooses the pins.\n# Add `set_io <port> <pin>` lines to fix them.\n",
+            part.to_uppercase()
+        ),
+    }
+}
+
 const UART: &str = include_str!("../../../examples/weft/uart.weft");
+const RV32I: &str = include_str!("../../../examples/weft/rv32i.weft");
+const RV_PROGRAM: &str = include_str!("../../../examples/weft/rv_program.weft");
 
 pub const EXAMPLES: &[Example] = &[
     Example {
@@ -45,7 +94,6 @@ pub const EXAMPLES: &[Example] = &[
         title: "Blinky",
         description: "A counter on four LEDs",
         files: &[("blinky.weft", include_str!("../../../examples/weft/blinky.weft"))],
-        pcf: GO_BOARD_PCF,
         part: "hx1k",
         package: "vq100",
     },
@@ -57,7 +105,6 @@ pub const EXAMPLES: &[Example] = &[
             ("hello.weft", include_str!("../../../examples/weft/hello.weft")),
             ("uart.weft", UART),
         ],
-        pcf: GO_BOARD_PCF,
         part: "hx1k",
         package: "vq100",
     },
@@ -69,7 +116,6 @@ pub const EXAMPLES: &[Example] = &[
             ("echo.weft", include_str!("../../../examples/weft/echo.weft")),
             ("uart.weft", UART),
         ],
-        pcf: GO_BOARD_PCF,
         part: "hx1k",
         package: "vq100",
     },
@@ -78,16 +124,72 @@ pub const EXAMPLES: &[Example] = &[
         title: "Blinky RAM",
         description: "LEDs driven through an initialized block RAM",
         files: &[("blinky_ram.weft", include_str!("../../../examples/weft/blinky_ram.weft"))],
-        pcf: BLINKY_RAM_PCF,
         part: "hx1k",
         package: "vq100",
+    },
+    Example {
+        id: "breathe",
+        title: "Breathing LEDs",
+        description: "Pulse-width modulation through a gamma table computed at compile time",
+        files: &[("breathe.weft", include_str!("../../../examples/weft/breathe.weft"))],
+        part: "hx1k",
+        package: "vq100",
+    },
+    Example {
+        id: "life",
+        title: "Game of Life",
+        description: "Conway's Game of Life on an 8×8 torus, drawn over a UART",
+        files: &[
+            ("life.weft", include_str!("../../../examples/weft/life.weft")),
+            ("uart.weft", UART),
+        ],
+        part: "hx1k",
+        package: "vq100",
+    },
+    Example {
+        id: "rv_single",
+        title: "RISC-V, single-cycle",
+        description: "An RV32I core that runs each instruction in one cycle",
+        files: &[
+            ("rv_single.weft", include_str!("../../../examples/weft/rv_single.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
+    },
+    Example {
+        id: "rv_multi",
+        title: "RISC-V, multi-cycle",
+        description: "An RV32I core that runs each instruction in five cycles, one per step",
+        files: &[
+            ("rv_multi.weft", include_str!("../../../examples/weft/rv_multi.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
+    },
+    Example {
+        id: "rv_pipe",
+        title: "RISC-V, pipelined",
+        description: "An RV32I core in five pipeline stages, with forwarding",
+        files: &[
+            ("rv_pipe.weft", include_str!("../../../examples/weft/rv_pipe.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
     },
     Example {
         id: "blinky_ram_v",
         title: "Blinky RAM (Verilog)",
         description: "The Verilog original of Blinky RAM",
         files: &[("blinky_ram.v", include_str!("../../../tests/designs/blinky_ram/blinky_ram.v"))],
-        pcf: BLINKY_RAM_PCF,
         part: "hx1k",
         package: "vq100",
     },
@@ -104,6 +206,10 @@ pub fn handle(method: &str, body: &str) -> String {
     let out = match method {
         "run" => run(&req),
         "analyze" => analyze(&req),
+        "format" => {
+            let text = req.at(&["text"]).as_str().unwrap_or("");
+            Json::obj().with("text", synth_weft::fmt::format(text))
+        }
         "examples" => examples(),
         "devices" => devices(),
         other => Json::obj().with("error", format!("unknown method `{other}`")),
@@ -126,7 +232,7 @@ pub fn examples() -> Json {
                     .with("title", e.title)
                     .with("description", e.description)
                     .with("files", files)
-                    .with("pcf", e.pcf)
+                    .with("pcf", board_pcf(e.part, e.package))
                     .with("part", e.part)
                     .with("package", e.package)
             })
@@ -134,7 +240,7 @@ pub fn examples() -> Json {
     )
 }
 
-/// The supported parts and their packages.
+/// The supported parts, their packages, and the pins and board of each.
 pub fn devices() -> Json {
     use arch_ice40::arch::Part;
     Json::Arr(
@@ -142,13 +248,28 @@ pub fn devices() -> Json {
             .iter()
             .map(|p| {
                 let db = arch_ice40::chipdb::ChipDb::get(p.die());
-                let pk: Vec<Json> = db
+                let names: Vec<&str> = db
                     .packages
                     .iter()
                     .filter(|k| arch_ice40::arch::Arch::new(*p, &k.name).is_ok())
-                    .map(|k| k.name.as_str().into())
+                    .map(|k| k.name.as_str())
                     .collect();
-                Json::obj().with("part", p.name()).with("die", p.die().name()).with("packages", pk)
+                let pcf = Json::Obj(
+                    names.iter().map(|k| (k.to_string(), board_pcf(p.name(), k).into())).collect(),
+                );
+                let boards = Json::Obj(
+                    BOARDS
+                        .iter()
+                        .filter(|b| b.part == p.name())
+                        .map(|b| (b.package.to_string(), b.name.into()))
+                        .collect(),
+                );
+                Json::obj()
+                    .with("part", p.name())
+                    .with("die", p.die().name())
+                    .with("packages", names)
+                    .with("pcf", pcf)
+                    .with("boards", boards)
             })
             .collect(),
     )

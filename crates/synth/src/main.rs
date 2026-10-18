@@ -23,6 +23,7 @@ COMMANDS:
     unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
     playground Serve the playground web app (--port <n>, default 8080)
     help       Print this message
@@ -37,7 +38,10 @@ BUILD OPTIONS:
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
+              [--carry-min-width <bits>]
               [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
+              --carry-min-width: minimum adder width for hard carry chains
+              (default 3); variable comparators use two more bits.
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
@@ -100,6 +104,7 @@ fn main() -> ExitCode {
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),
+        Some("fmt") => cmd_fmt(&argv[1..]),
         Some("lsp") => {
             let prelude =
                 vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
@@ -149,8 +154,20 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     let m = load_rtl(a)?;
     eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
     let (nl, log) = if family == "ice40" {
-        arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?
+        let mut synth_opts = arch_ice40::synth::SynthOptions::default();
+        if let Some(value) = a.value("--carry-min-width") {
+            let width = value
+                .parse::<usize>()
+                .ok()
+                .filter(|&w| w > 0 && w.checked_add(2).is_some())
+                .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
+            synth_opts.lower.carry_min_width = Some(width);
+        }
+        arch_ice40::synth::synthesize(m, &synth_opts)?
     } else {
+        if a.value("--carry-min-width").is_some() {
+            return Err("--carry-min-width currently requires --family ice40".into());
+        }
         arch_xc7::synth::synthesize(m)?
     };
     for l in &log {
@@ -190,7 +207,7 @@ fn timing_weight(a: &mut Args) -> Result<f64, String> {
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
-        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family"],
+        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family", "--carry-min-width"],
         &["--pack-stats"],
     )?;
     if a.flag("--pack-stats") && !matches!(a.value("--family").as_deref(), Some("artix7" | "xc7")) {
@@ -222,6 +239,29 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_fmt(argv: &[String]) -> Result<(), String> {
+    let a = Args::parse(argv, &[], &["--check"])?;
+    let check = a.flag("--check");
+    let mut unformatted = Vec::new();
+    for i in 0.. {
+        let Ok(p) = a.positional(i, "file") else { break };
+        let src = read(&p)?;
+        let out = synth_weft::fmt::format(&src);
+        if out != src {
+            if check {
+                unformatted.push(p);
+            } else {
+                write(&p, out.as_bytes())?;
+            }
+        }
+    }
+    if unformatted.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("not formatted: {}", unformatted.join(", ")))
+    }
+}
+
 fn cmd_playground(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
     let port = a.value("--port").unwrap_or_else(|| "8080".into());
@@ -249,6 +289,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--asc",
             "--seed",
             "--effort",
+            "--carry-min-width",
             "--timing-weight",
             "--freq",
             "--route-timing-rounds",
@@ -426,6 +467,10 @@ fn checkpoint_path(
                 })
                 .collect();
         key.write(format!("{name} {values:?}\n").as_bytes());
+    }
+    // Explicit carry thresholds must not reuse a different mapping policy.
+    if let Some(width) = a.value("--carry-min-width") {
+        key.write(format!("carry-min-width {width}\n").as_bytes());
     }
     key.write(format!("{opts:?}").as_bytes());
     let dir = ".synth/checkpoints";

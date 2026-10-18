@@ -41,7 +41,17 @@ lint warnings are underlined, hovering a name shows its type, value range,
 width and clock domain, Ctrl+click (⌘+click) goes to its definition, uses of
 the name under the cursor are highlighted, and `.` after an instance lists its
 ports. Registers, ports, instances and domains are coloured by what they are,
-not only by syntax. The flow runs again shortly after you stop typing.
+not only by syntax. The format button (Shift+Alt+F) lays out a Weft file as
+`synth fmt` does. The flow runs again shortly after you stop typing.
+
+**Examples.** Blinky, a UART greeting and echo, breathing LEDs, Conway's Game
+of Life over a UART, and three RV32I cores running the same program: one
+instruction per cycle, five cycles per instruction, and a five-stage pipeline
+with forwarding. Each starts on a board's device, and its `pins.pcf` is that
+board's. Changing the device or package replaces `pins.pcf` with the pins of a
+board that uses it (Nandland Go Board, iCEstick, iCE40-HX8K Breakout Board,
+Alchitry Cu), or with none, so that the placer chooses them; it asks first if
+the file was edited.
 
 **Pipeline.** Each step of the flow with its statistics and how they changed
 from the previous step: cells by kind after elaboration, after RTL
@@ -103,7 +113,8 @@ fragment, so it is not sent to any server).
 
 - `handle(method, body)` answers the app's requests, JSON in and out: `run`
   (the whole flow), `analyze` (diagnostics and the name index, for the editor),
-  `examples` and `devices`.
+  `format`, `examples` and `devices` (with the boards and pins of each
+  package).
 - `run` elaborates (Weft or Verilog), then synthesises through
   `arch_ice40::synth::synthesize_observed`, which reports the design after each
   pass, then implements it through `arch_ice40::flow::implement_detailed`,

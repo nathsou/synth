@@ -697,11 +697,21 @@ impl<'a> Parser<'a> {
 
     fn const_decl(&mut self) -> R<ConstDecl> {
         let name = self.ident("a constant name")?;
-        let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+        let mut kind = None;
+        let mut ty = None;
+        if self.eat(":") {
+            match self.peek() {
+                Tok::Ident(k) if k == "int" || k == "string" => {
+                    let k = if k == "int" { GenericKind::Int } else { GenericKind::Str };
+                    kind = Some((k, self.bump().span));
+                }
+                _ => ty = Some(self.ty()?),
+            }
+        }
         self.expect("=")?;
         let value = self.expr()?;
         self.expect(";")?;
-        Ok(ConstDecl { name, ty, value })
+        Ok(ConstDecl { name, ty, kind, value })
     }
 
     fn assert_rest(&mut self) -> R<Assert> {
@@ -778,6 +788,18 @@ impl<'a> Parser<'a> {
                     Diagnostic::error(sp, format!("`{k}` is not a type"))
                         .with_label("expected a type")
                         .with_help("types are `bool`, `uint<N>`, `sint<N>`, `index<N>`, arrays, structs and enums; registers are declared with `reg name: type`"),
+                );
+                return Err(());
+            }
+            Tok::Ident(k) if k == "int" || k == "string" || k == "type" => {
+                let sp = self.span();
+                self.error(
+                    Diagnostic::error(sp, format!("`{k}` is a compile-time type, not a hardware type"))
+                        .with_label("not a hardware type")
+                        .with_help(format!(
+                            "`{k}` is only for generic parameters and constants: `fn f<N: {k}>(…)`, `const X: {k} = …;`"
+                        ))
+                        .with_help("for an integer signal, use `uint<N>`, `sint<N>` or `index<N>`"),
                 );
                 return Err(());
             }
@@ -1613,15 +1635,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         let id = self.ident("an expression")?;
-                        if self.is("<")
-                            && matches!(self.peek_at(1), Tok::Ident(_))
-                            && self.is_at(2, ":")
-                        {
-                            let generics = self.gen_args()?;
-                            if !self.is("(") {
-                                self.unexpected("`(`");
-                                return Err(());
-                            }
+                        if let Some(generics) = self.generic_call_args() {
                             let args = self.args()?;
                             let dom = self.dom_opt()?;
                             ExprKind::Call { callee: id, generics, args, dom }
@@ -1670,12 +1684,45 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `<...>` followed by `(` after a name: generic arguments of a call.
+    /// Anything else (a comparison) leaves the position unchanged.
+    fn generic_call_args(&mut self) -> Option<Vec<GenArg>> {
+        if !self.is("<") {
+            return None;
+        }
+        let named = matches!(self.peek_at(1), Tok::Ident(_)) && self.is_at(2, ":");
+        let (save, nd) = (self.pos, self.diags.items.len());
+        match self.gen_args() {
+            Ok(g) if self.is("(") => Some(g),
+            _ if named => {
+                // Clearly meant as generic arguments: keep the errors.
+                if self.diags.items.len() == nd {
+                    self.unexpected("`(`");
+                }
+                Some(Vec::new())
+            }
+            _ => {
+                self.diags.items.truncate(nd);
+                self.pos = save;
+                None
+            }
+        }
+    }
+
     fn gen_args(&mut self) -> R<Vec<GenArg>> {
         self.expect("<")?;
         let mut out = Vec::new();
         while !self.is_close_angle() {
-            let name = self.ident("a generic parameter name")?;
-            self.expect(":")?;
+            // `NAME: value`, or a bare value for a single parameter.
+            let named =
+                matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Punct(":"));
+            let name = if named {
+                let n = self.ident("a generic parameter name")?;
+                self.expect(":")?;
+                Some(n)
+            } else {
+                None
+            };
             let value = self.gen_arg_value()?;
             out.push(GenArg { name, value });
             if !self.eat(",") {

@@ -1,0 +1,29 @@
+diff --git a/crates/synth-logic/src/lutmap.rs b/crates/synth-logic/src/lutmap.rs
+index 796a938..11aed50 100644
+--- a/crates/synth-logic/src/lutmap.rs
++++ b/crates/synth-logic/src/lutmap.rs
+@@ -187,0 +188,22 @@ impl Cut {
++    /// Drop variables whose cofactors are identical. A structural cut
++    /// may contain reconvergent inputs that its truth table does not use.
++    fn minimize_support(&mut self) {
++        for j in (0..self.len as usize).rev() {
++            let step = 1usize << j;
++            let n = 1usize << self.len;
++            if (0..n).filter(|i| i & step == 0)
++                .any(|i| (self.truth >> i ^ self.truth >> (i | step)) & 1 != 0) {
++                continue;
++            }
++            let mut truth = 0;
++            for i in 0..n / 2 {
++                let src = (i & (step - 1)) | ((i & !(step - 1)) << 1);
++                truth |= ((self.truth >> src) & 1) << i;
++            }
++            self.truth = truth;
++            self.leaves.copy_within(j + 1..self.len as usize, j);
++            self.len -= 1;
++        }
++        self.sig = self.leaves().iter().fold(0, |s, l| s | 1 << (l % 64));
++    }
++
+@@ -347,0 +370 @@ impl Mapper<'_> {
++                    c.minimize_support();

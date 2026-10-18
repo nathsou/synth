@@ -1,0 +1,21 @@
+diff --git a/crates/arch-ice40/src/timing.rs b/crates/arch-ice40/src/timing.rs
+index d65dc99..0b326ae 100644
+--- a/crates/arch-ice40/src/timing.rs
++++ b/crates/arch-ice40/src/timing.rs
+@@ -390,0 +391,3 @@ impl TimingGraph {
++                    let init = param(c, "LUT_INIT");
++                    let uses = |j: usize| (0..16).filter(|i| i & (1 << j) == 0)
++                        .any(|i| ((init >> i) ^ (init >> (i | (1 << j)))) & 1 != 0);
+@@ -404,0 +408 @@ impl TimingGraph {
++                                if j < 4 && !uses(j) { continue; }
+@@ -415 +419 @@ impl TimingGraph {
+-                            if i3_is_cin && let Some(s) = setup_time(&arcs, LC, "I3") {
++                            if i3_is_cin && uses(3) && let Some(s) = setup_time(&arcs, LC, "I3") {
+@@ -423 +427,3 @@ impl TimingGraph {
+-                            arc(pin_of(c, p), o, lc_arc(INS[perm[k] as usize], "lcout"));
++                            if uses(k) {
++                                arc(pin_of(c, p), o, lc_arc(INS[perm[k] as usize], "lcout"));
++                            }
+@@ -425 +431 @@ impl TimingGraph {
+-                        if i3_is_cin {
++                        if i3_is_cin && uses(3) {
