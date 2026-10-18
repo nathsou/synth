@@ -113,6 +113,18 @@ fn arithmetic_across_carry4_boundaries() {
 }
 
 #[test]
+fn three_bit_addition_fits_lut6s_without_a_carry_block() {
+    let nl = synth("module top(input [2:0] a,b,output [2:0] y); assign y=a+b; endmodule");
+    assert!(!nl.live_cells().any(|c| nl.cell_kind(c) == "CARRY4"));
+    assert!(nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count() <= 3);
+    for a in 0..8 {
+        for b in 0..8 {
+            assert_eq!(evaluate(&nl, &[("a", a), ("b", b)])["y"], (a + b) & 7);
+        }
+    }
+}
+
+#[test]
 fn lut6_high_truth_bits_and_both_output_polarities() {
     let truth = 0xb6d39a50e7c1842fu64;
     let nl = synth(

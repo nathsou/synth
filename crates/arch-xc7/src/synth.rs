@@ -97,7 +97,87 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
         log.push(format!("{dsps} DSP48E1 multiplier blocks"));
         opt::clean(&mut m)?;
     }
-    let mut net = synth_logic::lower::lower(&m, &Default::default())?;
+    let initial = synth_logic::lower::lower(&m, &Default::default())?;
+    // A three-bit addition fits in LUT6s. Moving short arithmetic out of
+    // carry boxes also exposes its surrounding logic to LUT optimization.
+    // Try nearby thresholds only when they change a chain, and retain a
+    // candidate only if no resource count or estimated delay gets worse.
+    let alternatives: Vec<_> = [4, 5]
+        .into_iter()
+        .filter(|&min| {
+            initial.carries.iter().any(|c| c.a.len() < min + if c.sum.is_empty() { 2 } else { 0 })
+        })
+        .collect();
+    let mut best_log = Vec::new();
+    let (mut best, mut delay) = map_logic(initial, 8, &mut best_log)?;
+    let mut cost = resources(&best);
+    let mut selected = 3;
+    for min in alternatives {
+        let net = synth_logic::lower::lower(
+            &m,
+            &synth_logic::lower::LowerOptions { carry_min_width: Some(min) },
+        )?;
+        let mut candidate_log = Vec::new();
+        let (candidate, candidate_delay) = map_logic(net, 8, &mut candidate_log)?;
+        let candidate_cost = resources(&candidate);
+        if candidate_delay <= delay
+            && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
+            && (candidate_delay < delay || candidate_cost != cost)
+        {
+            (best, delay, cost, best_log, selected) =
+                (candidate, candidate_delay, candidate_cost, candidate_log, min);
+        }
+    }
+    // More cuts can improve LUT6 area, but can also steer area recovery into
+    // a worse local optimum. Retry only the selected arithmetic partition
+    // and keep the existing mapping when any cost increases.
+    let net = synth_logic::lower::lower(
+        &m,
+        &synth_logic::lower::LowerOptions { carry_min_width: Some(selected) },
+    )?;
+    let mut candidate_log = Vec::new();
+    let (candidate, candidate_delay) = map_logic(net, 16, &mut candidate_log)?;
+    let candidate_cost = resources(&candidate);
+    let mut cuts = 8;
+    if candidate_delay <= delay
+        && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
+        && (candidate_delay < delay || candidate_cost != cost)
+    {
+        (best, cost, best_log, cuts) = (candidate, candidate_cost, candidate_log, 16);
+    }
+    log.extend(best_log);
+    log.push(format!(
+        "selected minimum carry width {selected}, {cuts} cuts; LUT/FF/CARRY4/BRAM18/DSP48 {cost:?}"
+    ));
+    Ok((best, log))
+}
+
+fn resources(nl: &Netlist) -> [usize; 5] {
+    let mut counts = [0; 5];
+    for c in nl.live_cells() {
+        let k = nl.cell_kind(c);
+        let index = if crate::pack::is_lut(k) {
+            0
+        } else if crate::pack::is_ff(k) {
+            1
+        } else {
+            match k {
+                "CARRY4" => 2,
+                "RAMB18E1" => 3,
+                "DSP48E1" => 4,
+                _ => continue,
+            }
+        };
+        counts[index] += 1;
+    }
+    counts
+}
+
+fn map_logic(
+    mut net: LogicNet,
+    cuts_per_node: usize,
+    log: &mut Vec<String>,
+) -> Result<(Netlist, u32), String> {
     synth_logic::ff::legalize(
         &mut net,
         &FfRules { init_one: true, srst_with_arst: false, srst_over_en: true },
@@ -113,10 +193,10 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
         }
     }
     net.cleanup();
-    let opts = MapOptions { k: 6, lut_delay: 100, ..Default::default() };
+    let opts = MapOptions { k: 6, cuts_per_node, lut_delay: 100, ..Default::default() };
     let mapping =
-        synth_logic::mapping::optimize(&mut net, &opts, 6, chain_timing, netlist_luts, &mut log)?;
-    Ok((emit(&net, &mapping)?, log))
+        synth_logic::mapping::optimize(&mut net, &opts, 6, chain_timing, netlist_luts, log)?;
+    Ok((emit(&net, &mapping)?, mapping.depth))
 }
 
 // Relative mapping costs, not device STA or an Fmax prediction. Keep paths

@@ -48,6 +48,16 @@ provide hard-block timing and emitted-netlist cost callbacks. The carry/DSP timi
 weights for Artix-7 are **mapping heuristics, not calibrated device delays**;
 the printed LUT-level delay is not an Fmax prediction.
 
+Short arithmetic is evaluated with minimum carry widths of 3, 4 and 5,
+skipping alternatives that cannot change the lowered graph. A candidate is
+retained only when no LUT, FF, CARRY4, BRAM18 or DSP48 count increases, its
+estimated delay does not increase, and at least one measure improves. This
+lets three-bit additions fit directly into LUT6s and exposes neighboring
+logic to optimization. The selected arithmetic partition is also tried with
+16 priority cuts per node instead of 8, under the same acceptance rule. This
+can require up to four mapping runs; these are synthesis heuristics, not
+guarantees about placed timing or slice count.
+
 ## Native physical flow
 
 ```sh
@@ -124,16 +134,16 @@ These are test dependencies only. See [THIRD_PARTY.md](../THIRD_PARTY.md).
 The suite implements an inverter, clocked counter, mixed reset/enable/clock
 edge registers, initialized block RAM, paired DSP multipliers, single-site
 boundary I/O, and optionally
-Euler 31 on both 35T and 100T. For each routed design, independent X-Ray FASM
+Euler 31 and 97 on both 35T and 100T. For each routed design, independent X-Ray FASM
 assembly must match every native configuration frame. X-Ray's C++ packet
 writer generates a second bitstream, and its C++ decoder must recover the
 same bits, including ECC, from both streams. Counter builds also check
 byte-for-byte repeatability and the timing-failure gate. `--full-luts`
 randomizes every LUT INIT in the fabric to exercise configuration addressing.
 Sources, XDC, FASM, bitstreams, frames and reports are retained. The latest
-local [physical validation report](ARTIX7_PHYSICAL.json) records 16 passing
+local [physical validation report](ARTIX7_PHYSICAL.json) records 18 passing
 checks, source/constraint hashes and independent tool revisions. The updated
-workspace passes 119 tests, warnings-denied Clippy and Rust 1.88 checks.
+workspace passes 120 tests, warnings-denied Clippy and Rust 1.88 checks.
 
 A 35T full-fabric run covered 1,044,018 enabled LUT INIT bits and all 5,408
 frames. The raw native startup/frame stream with CRC packets disabled also
@@ -198,21 +208,21 @@ netlists, reports and single-run wall times are recorded. Wall times on a
 shared development machine are indicative, not a controlled speed benchmark.
 No placed area, routing success or Fmax is claimed.
 
-Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `90ca8ae`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
+Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `65bcd4e`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
 
 | Design | LUTs incl. INV | FFs | CARRY4 | BRAM18 equivalents | DSP48 |
 |---|---:|---:|---:|---:|---:|
-| Euler 14 | 2974 / 3222 | 2214 / 2201 | 494 / 592 | 4 / 4 | 0 / 0 |
-| Euler 25 | 549 / 543 | 187 / 187 | 180 / 143 | 0 / 0 | 0 / 0 |
+| Euler 14 | 2968 / 3222 | 2214 / 2201 | 494 / 592 | 4 / 4 | 0 / 0 |
+| Euler 25 | 492 / 543 | 187 / 187 | 125 / 143 | 0 / 0 | 0 / 0 |
 | Euler 31 | 198 / 297 | 402 / 404 | 65 / 54 | 6 / 6 | 0 / 0 |
-| Euler 43 | 3846 / 3404 | 1497 / 1517 | 460 / 320 | 0 / 0 | 0 / 0 |
-| Euler 48 | 3582 / 3336 | 2412 / 2438 | 724 / 731 | 0 / 0 | 13 / 13 |
-| Euler 57 | 1081 / 1070 | 857 / 1114 | 291 / 224 | 16 / 0 | 0 / 0 |
-| Euler 58 | 4044 / 4769 | 2158 / 2030 | 207 / 225 | 0 / 0 | 0 / 0 |
-| Euler 92 | 934 / 948 | 2807 / 2660 | 198 / 181 | 11 / 7 | 0 / 1 |
+| Euler 43 | 3819 / 3404 | 1497 / 1517 | 339 / 320 | 0 / 0 | 0 / 0 |
+| Euler 48 | 3548 / 3336 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 |
+| Euler 57 | 1073 / 1070 | 857 / 1114 | 291 / 224 | 16 / 0 | 0 / 0 |
+| Euler 58 | 4028 / 4769 | 2158 / 2030 | 192 / 225 | 0 / 0 | 0 / 0 |
+| Euler 92 | 921 / 948 | 2807 / 2660 | 173 / 181 | 11 / 7 | 0 / 1 |
 | Euler 97 | 600 / 621 | 445 / 445 | 126 / 125 | 0 / 0 | 3 / 3 |
 
-LUT count is lower on five of nine designs, but four regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
+LUT count is lower on six of nine designs, but three regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
 
 Euler 10 was attempted but its Yosys mapping was stopped after more than ten minutes without a completed result. Its full gate-level simulation was also not completed (the initial run hit a five-minute timeout). It is omitted from the numerical comparison rather than assigned an estimated or zero result. The optional long simulation now has a 30-minute command limit.
 

@@ -99,7 +99,7 @@ def main():
     p.add_argument("--synth", type=Path, default=Path(os.environ.get("SYNTH", ROOT / "target/release/synth")))
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--part", choices=PARTS, action="append")
-    p.add_argument("--euler", action="store_true", help="also implement the Euler 31 solver")
+    p.add_argument("--euler", action="store_true", help="also implement the Euler 31 and 97 solvers")
     p.add_argument("--full-luts", action="store_true", help="randomize every LUT in the fabric")
     a = p.parse_args()
     for key in ["db", "xray", "xray_tools", "synth", "out"]:
@@ -129,8 +129,9 @@ def main():
         ("ram", "module top(input clk,we,input [8:0] addr,input [7:0] din,output reg [7:0] q=8'h93); reg [7:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^8'hA5; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",8),("q",8)] for i in range(n)], ["clk"]),
     ]
     if a.euler:
-        source = (ROOT / "tests/designs/euler/p031.v").read_text().replace("module euler31", "module top")
-        cases.append(("euler31",source,["clk","rst","start","done"]+[f"answer[{i}]" for i in range(17)],["clk"]))
+        for n, width in [(31, 17), (97, 34)]:
+            source = (ROOT / f"tests/designs/euler/p0{n}.v").read_text().replace(f"module euler{n}", "module top")
+            cases.append((f"euler{n}",source,["clk","rst","start","done"]+[f"answer[{i}]" for i in range(width)],["clk"]))
     for part in a.part or PARTS:
         out = a.out / part
         out.mkdir(exist_ok=True)
