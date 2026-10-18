@@ -648,54 +648,58 @@ impl<'a> Annealer<'a> {
                 return Err("not enough logic columns for carry chains".into());
             }
         }
-        // Single cells: scan slots in a random order of tiles.
+        // Single cells: flip-flops grouped by control set (a tile has one),
+        // so each group fills tiles densely; cells without a flip-flop last,
+        // in the slots left. Tiles in a random order, each cell going to
+        // the current tile if it fits there.
         let mut tiles: Vec<(usize, usize)> =
             self.logic_cols.iter().flat_map(|&x| (1..=self.height).map(move |y| (x, y))).collect();
         self.rng.shuffle(&mut tiles);
+        let key = |c: CellId, sa: &Self| {
+            let i = &sa.lc_info[&c];
+            let n = |n: Option<NetId>| n.map_or(0, |n| n.index() + 1);
+            (!i.dff, n(i.clk), n(i.cen), n(i.sr), i.neg_clk)
+        };
+        let mut singles: Vec<CellId> = units
+            .iter()
+            .filter_map(|u| if let Unit::Lc(c) = u { Some(*c) } else { None })
+            .collect();
+        singles.sort_by_key(|&c| (key(c, self), c));
         let mut ti = 0usize;
+        for c in singles {
+            let mut placed = false;
+            'tiles: for attempt in 0..tiles.len() {
+                let (x, y) = tiles[(ti + attempt) % tiles.len()];
+                for z in 0..8 {
+                    let s = self.slot(x, y, z);
+                    if self.lc_occ[s].is_some() {
+                        continue;
+                    }
+                    self.lc_occ[s] = Some(c);
+                    if self.tile_ok(x, y) {
+                        self.pos.insert(c, (x as i16, y as i16, z as u8));
+                        placed = true;
+                        ti = (ti + attempt) % tiles.len();
+                        break 'tiles;
+                    }
+                    self.lc_occ[s] = None;
+                }
+            }
+            if !placed {
+                return Err("design does not fit: no legal location for a logic cell".into());
+            }
+        }
         for unit in &units {
-            match unit {
-                Unit::Lc(c) => {
-                    let mut placed = false;
-                    for attempt in 0..tiles.len() {
-                        let (x, y) = tiles[(ti + attempt) % tiles.len()];
-                        for z in 0..8 {
-                            let s = self.slot(x, y, z);
-                            if self.lc_occ[s].is_some() {
-                                continue;
-                            }
-                            self.lc_occ[s] = Some(*c);
-                            if self.tile_ok(x, y) {
-                                self.pos.insert(*c, (x as i16, y as i16, z as u8));
-                                placed = true;
-                                ti = (ti + attempt) % tiles.len();
-                            } else {
-                                self.lc_occ[s] = None;
-                            }
-                            break;
-                        }
-                        if placed {
-                            break;
-                        }
-                    }
-                    if !placed {
-                        return Err(
-                            "design does not fit: no legal location for a logic cell".into()
-                        );
-                    }
-                }
-                Unit::Ram(c) => {
-                    let slot = self
-                        .ram_occ
-                        .iter()
-                        .position(|o| o.is_none())
-                        .ok_or("design needs more block RAMs than available")?;
-                    self.ram_occ[slot] = Some(*c);
-                    self.cell_ram_slot.insert(*c, slot);
-                    let b = self.arch.bel(self.ram_bels[slot]);
-                    self.pos.insert(*c, (b.x as i16, b.y as i16, 0));
-                }
-                Unit::Chain(_) => {}
+            if let Unit::Ram(c) = unit {
+                let slot = self
+                    .ram_occ
+                    .iter()
+                    .position(|o| o.is_none())
+                    .ok_or("design needs more block RAMs than available")?;
+                self.ram_occ[slot] = Some(*c);
+                self.cell_ram_slot.insert(*c, slot);
+                let b = self.arch.bel(self.ram_bels[slot]);
+                self.pos.insert(*c, (b.x as i16, b.y as i16, 0));
             }
         }
         for n in 0..self.nets.len() {
