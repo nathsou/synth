@@ -38,6 +38,13 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
+# CI's simulation jobs: optimized, but much faster to build than release.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = false
+
 # Place-and-route tests are far too slow unoptimized.
 [profile.test]
 opt-level = 2
