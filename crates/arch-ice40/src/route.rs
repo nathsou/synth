@@ -69,6 +69,167 @@ pub fn sink_node(
     pin_node(arch, nl, placement, cell, pin)
 }
 
+/// Whether physical LUT input `in_<j>` of the logic cell in slot `z` is fed
+/// by class A local tracks (even `local_g0`/`local_g2`, odd
+/// `local_g1`/`local_g3`), which also feed the flip-flop controls; the other
+/// inputs are fed by the 16 class B tracks.
+fn class_a(z: u8, j: usize) -> bool {
+    j % 2 == z as usize % 2
+}
+
+/// Local track classes for nets with several inputs in a logic tile.
+///
+/// The LUT input permutation lets a net reach a cell on inputs of either
+/// class. A net feeding several cells of a tile takes the same class in all
+/// of them (one track), and in a full tile that can leave the other inputs
+/// of those cells more nets than tracks of the other class. No single net
+/// can then resolve the conflict, as moving the shared net to the other
+/// class in one cell costs a track and frees none. So in tiles with more
+/// than 16 input nets, each net with several inputs (or a fixed input or
+/// control pin besides) gets the class that leaves the most room for the
+/// others, which the router places freely; failing that, every input keeps
+/// the class placement counted it in. Returns the permutation edges this
+/// rules out.
+fn track_classes(arch: &Arch, nl: &Netlist, placement: &Placement) -> Result<Vec<u32>, String> {
+    const IN: [&str; 4] = ["I0", "I1", "I2", "I3"];
+    const PERM: [&str; 4] = ["PERM0", "PERM1", "PERM2", "PERM3"];
+    let g = &arch.graph;
+    let mut tiles: FxHashMap<(u8, u8), Vec<(u8, CellId)>> = FxHashMap::default();
+    for (&c, &bel) in &placement.cell_bel {
+        if nl.cell_kind(c) == LC {
+            let b = arch.bel(bel);
+            tiles.entry((b.x, b.y)).or_default().push((b.z, c));
+        }
+    }
+    let mut keys: Vec<(u8, u8)> = tiles.keys().copied().collect();
+    keys.sort_unstable();
+    let mut excluded = Vec::new();
+    for key in keys {
+        let cells = &tiles[&key];
+        // The tile's nets, those with a fixed pin of each class (bit
+        // masks), the inputs free to take either class, and the inputs of
+        // each class each cell has room for.
+        let mut nets: Vec<NetId> = Vec::new();
+        let mut index = |n: NetId| match nets.iter().position(|&m| m == n) {
+            Some(i) => i,
+            None => {
+                nets.push(n);
+                nets.len() - 1
+            }
+        };
+        let (mut fixed_a, mut fixed_b) = (0u64, 0u64);
+        let mut free: Vec<(usize, usize, usize)> = Vec::new();
+        let mut room = vec![[2u8; 2]; cells.len()];
+        for (ci, &(z, c)) in cells.iter().enumerate() {
+            if nl.param(c, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0 {
+                for p in ["CLK", "CEN", "SR"] {
+                    if let Some(n) = nl.pin_net(c, p).filter(|&n| !crate::place::on_global(nl, n)) {
+                        fixed_a |= 1 << index(n);
+                    }
+                }
+            }
+            for (k, p) in IN.iter().enumerate() {
+                let net = nl.pin_net(c, p);
+                // A carry output reaches the next cell on `in_3` only.
+                let carried = k == 3
+                    && net.and_then(|n| nl.nets[n].driver).is_some_and(|d| {
+                        nl.str(nl.cells[d.cell].pins[d.pin as usize].name) == "COUT"
+                    });
+                if permutable(nl, c, k) && !carried {
+                    if let Some(n) = net {
+                        free.push((ci, k, index(n)));
+                    }
+                    continue;
+                }
+                // Carry operands (or a blocked pin), or a carry on `in_3`,
+                // which needs no track.
+                let a = class_a(z, k);
+                room[ci][usize::from(!a)] -= 1;
+                if let Some(n) = net.filter(|_| k != 3) {
+                    *(if a { &mut fixed_a } else { &mut fixed_b }) |= 1 << index(n);
+                }
+            }
+        }
+        if nets.len() <= 16 {
+            continue;
+        }
+        let mut sinks = vec![0usize; nets.len()];
+        for &(_, _, n) in &free {
+            sinks[n] += 1;
+        }
+        let fixed = fixed_a | fixed_b;
+        let shared: Vec<usize> = (0..nets.len())
+            .filter(|&n| sinks[n] >= 2 || (sinks[n] == 1 && fixed >> n & 1 != 0))
+            .collect();
+        let slot: Vec<Option<usize>> =
+            free.iter().map(|&(_, _, n)| shared.iter().position(|&s| s == n)).collect();
+        let mut unique = vec![0i32; cells.len()];
+        for (&(ci, _, _), s) in free.iter().zip(&slot) {
+            unique[ci] += i32::from(s.is_none());
+        }
+        // Tracks of the busier class and in all with the shared nets in the
+        // classes of `mask` (bit set: class A), the others spread at best.
+        let load = |mask: u32| -> Option<(i32, i32)> {
+            let (mut a, mut b) = (fixed_a, fixed_b);
+            for (i, &n) in shared.iter().enumerate() {
+                *(if mask >> i & 1 != 0 { &mut a } else { &mut b }) |= 1 << n;
+            }
+            let mut left: Vec<[i32; 2]> =
+                room.iter().map(|r| [i32::from(r[0]), i32::from(r[1])]).collect();
+            for (&(ci, _, _), s) in free.iter().zip(&slot) {
+                if let Some(i) = *s {
+                    left[ci][usize::from(mask >> i & 1 == 0)] -= 1;
+                }
+            }
+            // Range of the number of other nets on class A tracks.
+            let (mut lo, mut hi, mut total) = (0, 0, 0);
+            for (&[ra, rb], &u) in left.iter().zip(&unique) {
+                if ra < 0 || rb < 0 || u > ra + rb {
+                    return None;
+                }
+                lo += (u - rb).max(0);
+                hi += u.min(ra);
+                total += u;
+            }
+            let (na, nb) = (a.count_ones() as i32, b.count_ones() as i32);
+            let even = nb + total - na;
+            let busier = [even.div_euclid(2), (even + 1).div_euclid(2)]
+                .map(|t| (na + t.clamp(lo, hi)).max(nb + total - t.clamp(lo, hi)));
+            Some((busier[0].min(busier[1]), na + nb + total))
+        };
+        let combos = if shared.len() <= 12 { 1u32 << shared.len() } else { 0 };
+        let best = (0..combos).filter_map(|m| Some((load(m)?, m))).min_by_key(|&(l, _)| l);
+        let fits = best.filter(|&((busier, _), _)| busier <= 16).map(|(_, m)| m);
+        // Room left by the shared nets in each cell: the other nets must
+        // take the class with room when the other has none.
+        let mut left = room.clone();
+        for (&(ci, _, _), s) in free.iter().zip(&slot) {
+            if let (Some(mask), Some(i)) = (fits, *s) {
+                left[ci][usize::from(mask >> i & 1 == 0)] -= 1;
+            }
+        }
+        for (&(ci, k, _), s) in free.iter().zip(&slot) {
+            let (z, c) = cells[ci];
+            let class = match (fits, s) {
+                (Some(mask), Some(i)) => mask >> i & 1 != 0,
+                (Some(_), None) if left[ci][1] == 0 => true,
+                (Some(_), None) if left[ci][0] == 0 => false,
+                (Some(_), None) => continue,
+                (None, _) => class_a(z, k),
+            };
+            let bel = arch.bel(placement.cell_bel[&c]);
+            let virt = bel.pin(PERM[k]).ok_or("logic cell without permutation nodes")?;
+            for j in (0..4).filter(|&j| class_a(z, j) != class) {
+                let phys = bel.pin(IN[j]).ok_or("logic cell without inputs")?;
+                excluded.extend(
+                    g.edges(phys.raw()).filter(|&e| g.edge_dst[e] == virt.raw()).map(|e| e as u32),
+                );
+            }
+        }
+    }
+    Ok(excluded)
+}
+
 fn node_cost(class: NodeClass) -> f32 {
     match class {
         NodeClass::Global => 0.5,
@@ -212,8 +373,13 @@ pub fn route(
             t0.elapsed().as_secs_f64()
         );
     };
-    let hooks =
-        synth_route::RouteHooks { blocked: &blocked, progress: Some(&mut progress), retime: None };
+    let blocked_edges = track_classes(arch, nl, placement)?;
+    let hooks = synth_route::RouteHooks {
+        blocked: &blocked,
+        blocked_edges: &blocked_edges,
+        progress: Some(&mut progress),
+        retime: None,
+    };
     let (routes, stats): (_, RouteStats) =
         synth_route::route_with(graph, &requests, &opts, hooks).map_err(|e| match e {
             synth_route::RouteError::Unroutable { net, sink } => format!(
@@ -268,4 +434,40 @@ pub fn route(
     }
     routing.lut_pins.retain(|_, p| *p != [0, 1, 2, 3]);
     Ok(routing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::Part;
+
+    #[test]
+    fn local_track_classes() {
+        let arch = Arch::new(Part::Hx8k, "cb132").unwrap();
+        let g = &arch.graph;
+        let node = |name: &str| arch.db.node_by_name(6, 10, name).unwrap().raw();
+        let feeds = |track: u32, pin: u32| g.edges(track).any(|e| g.edge_dst[e] == pin);
+        // Track `local_g<G>_<N>` is of class A when G and N have the same
+        // parity; each LUT input sees (almost) all 16 tracks of its class.
+        for z in 0..8u8 {
+            for j in 0..4 {
+                let pin = node(&format!("lutff_{z}/in_{j}"));
+                let mut seen = 0;
+                for t in 0..32 {
+                    if feeds(node(&format!("local_g{}_{}", t / 8, t % 8)), pin) {
+                        assert_eq!((t / 8) % 2 == t % 2, class_a(z, j), "lutff_{z}/in_{j}");
+                        seen += 1;
+                    }
+                }
+                assert!(seen >= 15, "lutff_{z}/in_{j}: {seen} tracks");
+            }
+        }
+        for ctrl in ["lutff_global/clk", "lutff_global/cen", "lutff_global/s_r"] {
+            for t in 0..32 {
+                if feeds(node(&format!("local_g{}_{}", t / 8, t % 8)), node(ctrl)) {
+                    assert_eq!((t / 8) % 2, t % 2, "{ctrl}");
+                }
+            }
+        }
+    }
 }

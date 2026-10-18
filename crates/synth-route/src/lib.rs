@@ -4,7 +4,8 @@
 //! Each routing node can carry one net. Nets are routed one after another;
 //! overused nodes get more expensive each iteration (present and history
 //! congestion costs) until every node is used by at most one net. Only nets
-//! touching overused nodes are ripped up and rerouted after the first pass.
+//! touching overused nodes are ripped up and rerouted after the first pass,
+//! and nets whose nodes others take in that pass.
 //!
 //! The cost of entering a node blends congestion and delay according to the
 //! criticality of the connection being routed, so timing-critical
@@ -182,6 +183,8 @@ pub type Retime<'a> = &'a mut dyn FnMut(&[NetRoute]) -> Vec<Vec<f32>>;
 pub struct RouteHooks<'a> {
     /// Nodes no net may use.
     pub blocked: &'a [u32],
+    /// Edges no net may use.
+    pub blocked_edges: &'a [u32],
     /// Called after every iteration with the iteration number, the number of
     /// nets routed in it and the overused nodes.
     pub progress: Option<Progress<'a>>,
@@ -196,6 +199,7 @@ impl std::fmt::Debug for RouteHooks<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RouteHooks")
             .field("blocked", &self.blocked.len())
+            .field("blocked_edges", &self.blocked_edges.len())
             .field("progress", &self.progress.is_some())
             .field("retime", &self.retime.is_some())
             .finish()
@@ -217,6 +221,19 @@ pub fn route_with(
             edge_src[e as usize] = node as u32;
         }
     }
+    // A blocked edge becomes a loop on its source node, which never
+    // improves a search.
+    let looped: Vec<u32>;
+    let graph = if hooks.blocked_edges.is_empty() {
+        graph
+    } else {
+        let mut dst = graph.edge_dst.to_vec();
+        for &e in hooks.blocked_edges {
+            dst[e as usize] = edge_src[e as usize];
+        }
+        looped = dst;
+        Graph { edge_dst: &looped, ..graph }
+    };
     let mut st = State {
         occupancy: vec![0; n],
         history: vec![0.0; n],
@@ -254,13 +271,29 @@ pub fn route_with(
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
+    // Exclusive or of the nets using each node: with one user, that net.
+    let mut users = vec![0u32; n];
+    // Last iteration each net was (or is to be) routed in.
+    let mut routed = vec![usize::MAX; nets.len()];
     for iter in 0..opts.max_iterations {
         stats.iterations = iter + 1;
         for &i in &to_route {
+            routed[i] = iter;
+        }
+        // A net taking the node of another is routed again in this
+        // iteration, now that it has company: it moves if it can, before the
+        // first net comes back to the same choice (two nets could otherwise
+        // swap nodes forever while the one that should move never sees the
+        // other on its node).
+        let mut k = 0;
+        while k < to_route.len() {
+            let i = to_route[k];
+            k += 1;
             // Rip up.
             for &e in &routes[i].edges {
                 let d = graph.edge_dst[e as usize] as usize;
                 st.occupancy[d] -= 1;
+                users[d] ^= i as u32;
             }
             routes[i].edges.clear();
             route_net(
@@ -277,7 +310,15 @@ pub fn route_with(
             )?;
             for &e in &routes[i].edges {
                 let d = graph.edge_dst[e as usize] as usize;
+                if st.occupancy[d] == 1 {
+                    let v = users[d] as usize;
+                    if routed[v] != iter {
+                        routed[v] = iter;
+                        to_route.push(v);
+                    }
+                }
                 st.occupancy[d] += 1;
+                users[d] ^= i as u32;
             }
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
@@ -579,5 +620,83 @@ mod tests {
             assert!(seen.insert(d[e as usize]));
         }
         assert!(seen.contains(&5) && seen.contains(&30) && seen.contains(&35));
+    }
+
+    #[test]
+    fn blocked_edges_are_avoided() {
+        let (o, d, dl, x, y, c) = grid(3, 3);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        // Block the straight way from node 0 to node 2 along the first row.
+        let blocked: Vec<u32> = (o[0]..o[1]).filter(|&e| d[e as usize] == 1).collect();
+        let nets = vec![NetRequest { source: 0, sinks: vec![2], criticality: vec![] }];
+        let hooks = RouteHooks { blocked_edges: &blocked, ..RouteHooks::default() };
+        let (routes, _) = route_with(g, &nets, &RouteOptions::default(), hooks).unwrap();
+        assert!(routes[0].edges.iter().all(|e| !blocked.contains(e)));
+        assert_eq!(d[*routes[0].edges.last().unwrap() as usize], 2);
+    }
+
+    /// Builds a graph with all nodes at one position from an edge list.
+    fn edge_graph(n: usize, edges: &[(u32, u32)]) -> GridData {
+        let mut offsets = vec![0u32];
+        let mut dst = Vec::new();
+        for s in 0..n as u32 {
+            dst.extend(edges.iter().filter(|e| e.0 == s).map(|e| e.1));
+            offsets.push(dst.len() as u32);
+        }
+        let delay = vec![100.0; dst.len()];
+        (offsets, dst, delay, vec![0; n], vec![0; n], vec![1.0; n])
+    }
+
+    #[test]
+    fn displaced_net_moves() {
+        // Nets A and B need one of P1 and P3 each; V sits on P1 but could
+        // take R1 from D, which has a long free detour. When A comes to P1,
+        // V must see it there to move; rerouted only after A has left again
+        // it would stay forever.
+        let (s_a, s_b, s_d, s_v, p1, p3, r1, p2, s1, s2, s3) = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        let (t_a, t_b, t_d, t_v) = (11, 12, 13, 14);
+        let edges = [
+            (s_a, p1),
+            (s_a, p3),
+            (s_b, p1),
+            (s_b, p3),
+            (p1, t_a),
+            (p1, t_b),
+            (p3, t_a),
+            (p3, t_b),
+            (s_v, p1),
+            (p1, t_v),
+            (s_v, r1),
+            (r1, p2),
+            (p2, t_v),
+            (s_d, r1),
+            (r1, t_d),
+            (s_d, s1),
+            (s1, s2),
+            (s2, s3),
+            (s3, t_d),
+        ];
+        let (o, d, dl, x, y, c) = edge_graph(15, &edges);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let net = |source, sink| NetRequest { source, sinks: vec![sink], criticality: vec![] };
+        let nets = vec![net(s_a, t_a), net(s_b, t_b), net(s_d, t_d), net(s_v, t_v)];
+        let opts = RouteOptions { max_iterations: 30, ..RouteOptions::default() };
+        let (routes, _) = route(g, &nets, &opts).unwrap();
+        let uses = |i: usize, node: u32| routes[i].edges.iter().any(|&e| d[e as usize] == node);
+        assert!(uses(3, r1) && uses(2, s3));
     }
 }
