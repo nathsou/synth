@@ -47,7 +47,7 @@ module nes(
     let dmc_busy = dmc_dma != .Idle || dmc_halt;
     let cpu_running = (oam_dma == .Idle || (oam_dma == .Halt && cpu.write)) && !dmc_busy;
     let dmc_get = dmc_dma == .Get;
-    inst cpu = nes_cpu(enable: tick && cpu_running, nmi: ppu.nmi, irq: apu.irq || cart.irq, data: bus_read_data);
+    inst cpu = nes_cpu(enable: tick && cpu_running, sample_tick: tick, nmi: ppu.nmi, irq: apu.irq || cart.irq, data: bus_read_data);
     inst ppu = nes_ppu(cpu_access: tick && bus_address >= 0x2000 && bus_address < 0x4000,
         cpu_write: bus_write, cpu_register: bus_address[2:0], cpu_data: bus_write_data,
         mirroring: cart.mirroring, chr_data: chr_data);

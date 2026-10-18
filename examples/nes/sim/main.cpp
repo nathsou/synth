@@ -80,17 +80,23 @@ struct Input { unsigned frame; unsigned p1; unsigned p2; };
 
 int main(int argc, char **argv) {
     try {
-        if (argc < 2) throw std::runtime_error("usage: nes_sim ROM [--frames N] [--test] [--ppm FILE] [--wav FILE] [--input FILE] [--save FILE] [--trace FILE]");
+        if (argc < 2) throw std::runtime_error("usage: nes_sim ROM [--frames N] [--test] [--legacy-result HEX_ADDRESS] [--ppm FILE] [--wav FILE] [--input FILE] [--save FILE] [--trace FILE]");
         Verilated::commandArgs(argc, argv);
         std::string ppm_name, wav_name, input_name, save_name, trace_name;
         unsigned max_frames = 600;
         bool test = false;
+        int legacy_address = -1, legacy_code = -1;
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--test") { test = true; continue; }
             if (i + 1 == argc) throw std::runtime_error("missing value for " + arg);
             const std::string value = argv[++i];
             if (arg == "--frames") { max_frames = std::stoul(value); if (!max_frames) throw std::runtime_error("frames must be positive"); }
+            else if (arg == "--legacy-result") {
+                legacy_address = std::stoul(value, nullptr, 16);
+                if (legacy_address < 0 || legacy_address > 0x7ff) throw std::runtime_error("legacy result must be in CPU RAM");
+                test = true;
+            }
             else if (arg == "--ppm") ppm_name = value;
             else if (arg == "--wav") wav_name = value;
             else if (arg == "--input") input_name = value;
@@ -133,6 +139,7 @@ int main(int argc, char **argv) {
         unsigned frames = 0, audio_phase = 0;
         size_t input_index = 0;
         bool test_started = false;
+        unsigned self_jumps = 0;
         int result = test ? 2 : 0;
         double previous_mix = 0, hp90 = 0, hp440 = 0, previous_hp90 = 0, lp = 0;
         // Clock-derived bounds catch hangs even if the frame output breaks.
@@ -177,6 +184,14 @@ int main(int argc, char **argv) {
                 }
             }
             if (nes.debug_cpu_tick) {
+                if (legacy_address >= 0 && nes.debug_write && (nes.debug_address & 0xf800) == 0 &&
+                    (nes.debug_address & 0x7ff) == unsigned(legacy_address)) legacy_code = nes.debug_data;
+                if (legacy_address >= 0 && nes.debug_fetch && nes.debug_pc >= 0x8000) {
+                    const size_t pa = nes.prg_address;
+                    const bool self_jump = pa + 2 < cart.prg.size() && cart.prg[pa] == 0x4c &&
+                        (cart.prg[pa + 1] | (cart.prg[pa + 2] << 8)) == nes.debug_pc;
+                    self_jumps = self_jump ? self_jumps + 1 : 0;
+                }
                 if (trace) trace << std::dec << cycles << ',' << std::hex << nes.debug_address << ',' << unsigned(nes.debug_write) << ','
                     << unsigned(nes.debug_data) << ',' << unsigned(nes.debug_fetch) << ',' << nes.debug_pc << ',' << unsigned(nes.debug_a) << ','
                     << unsigned(nes.debug_x) << ',' << unsigned(nes.debug_y) << ',' << unsigned(nes.debug_s) << ',' << unsigned(nes.debug_p) << ','
@@ -187,6 +202,11 @@ int main(int argc, char **argv) {
             if (nes.chr_write) cart.chr[nes.chr_address] = nes.chr_write_data;
             nes.clk = 1; nes.eval(); ++dots;
             if (nes.halted) throw std::runtime_error("CPU executed a KIL opcode");
+            if (legacy_address >= 0 && self_jumps >= 3 && legacy_code >= 0) {
+                result = legacy_code == 1 ? 0 : 1;
+                std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " legacy code=" << legacy_code << '\n';
+                break;
+            }
             if (test && cart.ram[1] == 0xde && cart.ram[2] == 0xb0 && cart.ram[3] == 0x61) {
                 if (cart.ram[0] == 0x80) test_started = true;
                 if (test_started && cart.ram[0] < 0x80) {

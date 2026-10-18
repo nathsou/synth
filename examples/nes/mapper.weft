@@ -31,8 +31,9 @@ module nes_mapper(
     if !ppu_address[12] {
         if a12_low != 15 { a12_low := a12_low +% 1; }
     } else { a12_low := 0; }
-    if mapper == 4 && ppu_address[12] && !a12_previous && a12_low >= 8 {
-        let next_count = if irq_count == 0 || irq_reload { irq_latch } else { irq_count -% 1 };
+    let a12_clock = ppu_address[12] && !a12_previous && a12_low >= 8;
+    let next_count = if irq_count == 0 || irq_reload { irq_latch } else { irq_count -% 1 };
+    if mapper == 4 && a12_clock {
         irq_count := next_count; irq_reload := false;
         if next_count == 0 && irq_enabled { irq_flag := true; }
     }
@@ -78,7 +79,7 @@ module nes_mapper(
     chr_bank = uint<8>(ppu_address[12:10]);
     mirroring = if vertical { 2 } else { 3 };
     ram_enable = true; ram_write = true;
-    irq = mapper == 4 && irq_flag;
+    irq = mapper == 4 && (irq_flag || (a12_clock && next_count == 0 && irq_enabled));
     match mapper {
         1 => {
             mirroring = uint<3>(control[1:0]);

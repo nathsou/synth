@@ -111,7 +111,7 @@ enum NesCpuCycle {
 }
 
 module nes_cpu(
-    in enable: bool, in nmi: bool, in irq: bool, in data: uint<8>,
+    in enable: bool, in sample_tick: bool = true, in nmi: bool, in irq: bool, in data: uint<8>,
     out address: uint<16>, out write: bool, out write_data: uint<8>,
     out sync_fetch: bool, out halted: bool,
     out debug_pc: uint<16>, out debug_a: uint<8>, out debug_x: uint<8>,
@@ -134,7 +134,10 @@ module nes_cpu(
     reg software_int: bool = false;
     reg nmi_prev: bool = false;
     reg nmi_pending: bool = false;
+    reg nmi_sample: bool = false;
     reg irq_sample: bool = false;
+    reg irq_level: bool = false;
+    if sample_tick { irq_level := irq; }
     nmi_prev := nmi;
     if nmi && !nmi_prev { nmi_pending := true; }
 
@@ -161,7 +164,7 @@ module nes_cpu(
     debug_pc = pc; debug_a = a; debug_x = x; debug_y = y; debug_s = s; debug_p = p;
     match cycle {
         .Reset2 | .Reset3 | .Reset4 | .JsrDummy | .PullDummy => { address = concat(0x01, s); }
-        .VectorLo => { address = if nmi_pending && vector != 0xFFFC { 0xFFFA } else { vector }; }
+        .VectorLo => { address = vector; }
         .VectorHi => { address = vector +% 1; }
         .ZpIndex | .PtrLo => { address = uint<16>(pointer); }
         .PtrHi => { address = uint<16>(pointer +% 1); }
@@ -188,7 +191,8 @@ module nes_cpu(
     if cycle == .RmwWrite { write = true; write_data = rmw_alu.value; }
 
     if enable {
-        irq_sample := irq && !p[2];
+        irq_sample := irq_level && !p[2];
+        nmi_sample := nmi_pending;
         match cycle {
             .Reset0 => { cycle := .Reset1; }
             .Reset1 => { cycle := .Reset2; }
@@ -197,14 +201,13 @@ module nes_cpu(
             .Reset4 => { s := s -% 1; cycle := .VectorLo; }
             .VectorLo => {
                 lo := data; cycle := .VectorHi;
-                if nmi_pending && vector != 0xFFFC { vector := 0xFFFA; nmi_pending := false; }
             }
-            .VectorHi => { pc := concat(data, lo); cycle := .Fetch; irq_sample := false; }
+            .VectorHi => { pc := concat(data, lo); cycle := .Fetch; irq_sample := false; nmi_sample := false; }
             .Fetch => {
-                if nmi_pending || irq_sample {
+                if nmi_sample || irq_sample {
                     software_int := false;
-                    vector := if nmi_pending { 0xFFFA } else { 0xFFFE };
-                    if nmi_pending { nmi_pending := false; }
+                    vector := if nmi_sample { 0xFFFA } else { 0xFFFE };
+                    if nmi_sample { nmi_pending := false; nmi_sample := false; }
                     cycle := .IntDummy;
                 } else {
                     opcode := data; pc := pc +% 1; cycle := .Operand;
@@ -277,6 +280,9 @@ module nes_cpu(
             .Branch => {
                 pc := ea;
                 cycle := if pc[15:8] != ea[15:8] { .BranchFix } else { .Fetch };
+                // A taken branch without a page crossing polls on its operand
+                // cycle; it does not poll again during the final dummy read.
+                if pc[15:8] == ea[15:8] { irq_sample := irq_sample; nmi_sample := nmi_sample; }
             }
             .BranchFix => { cycle := .Fetch; }
             .JsrDummy => { cycle := .JsrHi; }
@@ -304,7 +310,10 @@ module nes_cpu(
             .IntDummy => { cycle := .IntHi; }
             .IntHi => { s := s -% 1; cycle := .IntLo; }
             .IntLo => { s := s -% 1; cycle := .IntP; }
-            .IntP => { s := s -% 1; p := p | 4; cycle := .VectorLo; }
+            .IntP => {
+                s := s -% 1; p := p | 4; cycle := .VectorLo;
+                if nmi_pending { vector := 0xFFFA; nmi_pending := false; nmi_sample := false; }
+            }
             .Jam => {}
         }
     }

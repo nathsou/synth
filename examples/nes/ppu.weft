@@ -47,6 +47,7 @@ module nes_ppu(
     reg sprite_hit: bool = false;
     reg overflow: bool = false;
     reg suppress_vblank: bool = false;
+    reg nmi_delay: uint<2> = 0;
     reg io_latch: uint<8> = 0;
     reg read_buffer: uint<8> = 0;
     reg oam_address: uint<8> = 0;
@@ -127,7 +128,12 @@ module nes_ppu(
         7 => if v[13:8] == 0x3F { palette_read } else { read_buffer },
         _ => io_latch,
     };
-    nmi = vblank && ctrl[7];
+    // Delay the PPU's NMI output; a coincident status read cancels the pulse
+    // before the CPU edge detector can latch it.
+    nmi_delay := concat(nmi_delay[0], vblank);
+    nmi = nmi_delay[0] && vblank && ctrl[7]
+          && !(cpu_access && !cpu_write && cpu_register == 2)
+          && !(cpu_access && cpu_write && cpu_register == 0 && !cpu_data[7]);
 
     // Priority is the first opaque sprite in OAM order, even behind background.
     wire chosen: bool;
@@ -198,7 +204,7 @@ module nes_ppu(
         if dot >= 65 && dot <= 256 && !eval_done && line < 240 {
             if phase[0] { eval_data := oam[concat(eval_n, eval_m)]; }
             else {
-                let row = uint<9>(line)[7:0] -% eval_data;
+                let row = uint<9>(line) -% uint<9>(eval_data);
                 let in_range = row < (if ctrl[5] { 16 } else { 8 });
                 if eval_count < 8 {
                     if eval_m != 0 || in_range {
@@ -261,7 +267,7 @@ module nes_ppu(
         } else {
             if cpu_register == 2 {
                 io_latch := status; vblank := false; second_write := false;
-                if line == 241 && dot <= 1 { suppress_vblank := true; }
+                if line == 241 && dot == 1 { suppress_vblank := true; }
             }
             if cpu_register == 4 { io_latch := cpu_read; }
             if cpu_register == 7 { io_latch := cpu_read; read_buffer := bus_data; }

@@ -256,6 +256,9 @@ module nes_apu(
         if reset_delay != 0 { reset_delay := reset_delay -% 1; }
         if restarting { counter := 0; }
         if access && !write && address == 0x15 { frame_irq := false; }
+        // On the last two assertion clocks the frame sequencer can set the
+        // flag again on the same cycle that a status read clears it.
+        if !five_step && counter >= 29828 && counter <= 29829 && !inhibit_irq { frame_irq := true; }
         if status_write { enables := data[3:0]; }
         if frame_write {
             five_step := data[7]; inhibit_irq := data[6];
