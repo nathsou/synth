@@ -77,19 +77,22 @@ fn run(
     let mut fixed = crate::place::Placement::default();
     crate::place::place_ios(&arch, &nl, pins, &mut fixed, log)?;
     crate::place::assign_globals(&arch, &mut nl, &mut fixed, log)?;
-    let weights = [opts.timing_weight, opts.timing_weight / 2.0, 0.0];
+    // Each retry also leaves tiles room on their local tracks (contested
+    // local tracks in full tiles are what fails to route) and anneals longer.
+    let attempts = [
+        (opts.timing_weight, 32, opts.place_effort),
+        (opts.timing_weight / 2.0, 30, opts.place_effort),
+        (0.0, 28, 2.0 * opts.place_effort),
+    ];
     let mut result = None;
-    for (attempt, &w) in weights.iter().enumerate() {
-        if attempt > 0 && w == weights[attempt - 1] {
-            continue;
-        }
+    for (attempt, &(w, max_locals, effort)) in attempts.iter().enumerate() {
         let t = Instant::now();
         let popts = PlaceOptions {
             seed: opts.seed,
-            effort: opts.place_effort,
+            effort,
             timing_weight: w,
+            max_locals,
             clocks: opts.clocks.clone(),
-            ..PlaceOptions::default()
         };
         let mut placement = fixed.clone();
         crate::place::place_with_fixed(&arch, &nl, &packed, &mut placement, &popts, log)?;
@@ -106,8 +109,11 @@ fn run(
                 result = Some((placement, routing));
                 break;
             }
-            Err(e) if attempt + 1 < weights.len() => {
-                log.push(format!("{e}; placing again with timing weight {}", weights[attempt + 1]));
+            Err(e) if attempt + 1 < attempts.len() => {
+                let (w, l, _) = attempts[attempt + 1];
+                log.push(format!(
+                    "{e}; placing again with timing weight {w} and at most {l} local inputs per tile"
+                ));
             }
             Err(e) => return Err(e),
         }
