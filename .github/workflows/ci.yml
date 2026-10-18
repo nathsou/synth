@@ -1,10 +1,12 @@
 name: CI
 
-# Pull requests run everything except macOS. A push to main (after the PR
-# already passed) only runs the fast tests. The weekly run and manual runs
-# cover everything, macOS included, and refresh the build caches on main.
+# Pull requests run the jobs their changes can affect, except macOS; the
+# slow simulation job waits until the PR is ready for review. A push to main
+# (after the PR already passed) only runs the fast tests. The weekly run and
+# manual runs cover everything, macOS included, and refresh the caches.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
   push:
     branches: [main]
@@ -23,8 +25,45 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Which parts of the repository the change touches.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.f.outputs.rust }}
+      sim: ${{ steps.f.outputs.sim }}
+      playground: ${{ steps.f.outputs.playground }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$EVENT" != pull_request ]; then
+            printf 'rust=true\nsim=true\nplayground=true\n' >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE"...HEAD)
+          echo "$files"
+          any() { echo "$files" | grep -qE "$1" && echo true || echo false; }
+          shared='^(Cargo\.(toml|lock)|\.github/workflows/ci\.yml)$'
+          echo "rust=$(any "^(crates|tests|examples)/|$shared")" >> "$GITHUB_OUTPUT"
+          # The simulations exercise the frontends, synthesis and the backend,
+          # not the playground, the language server or the editors.
+          echo "sim=$(echo "$files" | grep -E "^(crates|tests|examples|tools)/|$shared" \
+            | grep -vE '^crates/synth-(playground|lsp)/|^tools/build_playground\.sh$' | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "playground=$(echo "$files" | grep -E "^(crates|examples|editors)/|^tools/build_playground\.sh$|$shared" \
+            | grep -vE '^crates/(synth|synth-lsp)/' | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   test:
     name: test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +98,8 @@ jobs:
 
   msrv:
     name: MSRV
-    if: github.event_name != 'push'
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +117,8 @@ jobs:
 
   playground:
     name: playground (WebAssembly and web app)
-    if: github.event_name != 'push'
+    needs: changes
+    if: needs.changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +148,8 @@ jobs:
   # Euler solvers share one build of synth and one install of the oracles.
   simulation:
     name: simulation (bitstream, frontend, Project Euler)
-    if: github.event_name != 'push'
+    needs: changes
+    if: needs.changes.outputs.sim == 'true' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     env:
       SYNTH: ${{ github.workspace }}/target/ci/synth
