@@ -53,17 +53,42 @@ the core. The cartridge configuration must stay constant until reset.
 in external CHR ROM/RAM; accept `chr_write` only for CHR RAM. Cartridge RAM uses
 `ram_address`, `ram_write` and `ram_write_data`. Reads are combinational; writes
 are accepted on the next rising edge. Masks are the number of 8 KiB PRG or 1 KiB
-CHR banks minus one. The runner validates power-of-two sizes. Internal memory
-currently uses combinational reads; FPGA area/timing and a board port have not
-been validated.
+CHR banks minus one. The runner validates power-of-two sizes.
+
+Internal memories (CPU RAM, VRAM, OAM, secondary OAM and palette) are block
+RAMs read on the falling edge of `clk`: their addresses come from registers,
+so the data arrives half a dot later and is used within the same dot. External
+cartridge reads must likewise return within the dot.
 
 `pixel_valid`, `pixel_x`, `pixel_y`, `pixel` and `emphasis` describe each visible
-dot. `frame` pulses at vblank entry. Audio outputs are the raw channel DAC
+dot; `pixel` is valid from the falling edge of `clk`. `frame` pulses at vblank entry. Audio outputs are the raw channel DAC
 values; `audio_valid` marks a CPU cycle. The runner applies the nonlinear NES
 mixer and an approximate analog filter. Composite decoding, analog color and
 OAM decay are outside the digital hardware boundary. The PPU I/O bus uses a
-deterministic 600 ms charge-decay model; physical decay varies with temperature
-and chip revision.
+deterministic charge-decay model (bits decay 400–600 ms after being refreshed);
+physical decay varies with temperature and chip revision.
+
+## FPGA resources and timing
+
+`board.weft` wraps `nes` for measurement: cartridge buses, video, audio and
+controllers become pins, the cartridge configuration is shifted in serially and
+the simulation-only debug outputs are dropped. `make -C examples/nes fpga`
+synthesizes, places and routes it for an iCE40 HX8K (CT256 package) against the
+dot clock:
+
+| Resource | Used | HX8K |
+|---|---|---|
+| Logic cells | 5,331 | 7,680 |
+| Block RAMs | 16 | 32 |
+| I/O | 148 | 206 |
+
+Timing closes at 16.2 MHz equivalent, 3.0 times the 5.369 MHz dot clock needed
+for real time. Paths between the rising and falling edges count double: a
+falling-edge block RAM read and the logic it feeds must fit in half a dot.
+
+An HX1K (1,280 logic cells) cannot hold the core: the CPU alone uses about
+1,850 LUTs and the PPU about 1,500. The HX8K also has no room for cartridge
+ROMs, which stay external.
 
 ## Verification
 

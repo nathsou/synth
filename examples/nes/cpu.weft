@@ -33,23 +33,25 @@ fn nes_alu(op: NesOp, a: uint<8>, x: uint<8>, y: uint<8>, s: uint<8>, p: uint<8>
         _ => {}
     }
     r.value = v;
+    // One adder serves ADC/SBC and the comparisons, which add the inverted
+    // operand with carry in set: the carry out is `left >= v`.
+    let compare = op == .CMP || op == .CPX || op == .CPY || op == .DCP || op == .AXS;
+    let left = match op { .CPX => x, .CPY => y, .AXS => a & x, _ => a };
+    let sub = compare || op == .SBC || op == .ISC;
+    let operand = if sub { ~v } else { v };
+    let sum: uint<9> = uint<9>(left) +% uint<9>(operand) +% uint<9>((compare || r.p[0]).bits());
     match op {
         .ORA | .SLO => { r.a = a | v; r.p = nes_nz(r.p, r.a); }
         .AND | .RLA => { r.a = a & v; r.p = nes_nz(r.p, r.a); }
         .EOR | .SRE => { r.a = a ^ v; r.p = nes_nz(r.p, r.a); }
         .ADC | .SBC | .RRA | .ISC => {
-            let sub = op == .SBC || op == .ISC;
-            let operand = if sub { ~v } else { v };
-            let sum: uint<9> = uint<9>(a) +% uint<9>(operand) +% uint<9>(r.p[0].bits());
             r.a = sum[7:0];
             let overflow = ((~(a ^ operand)) & (a ^ r.a))[7];
             r.p = nes_nz((r.p & 0xBE) | uint<8>(sum[8].bits()) | (uint<8>(overflow.bits()) << 6), r.a);
         }
         .CMP | .CPX | .CPY | .DCP | .AXS => {
-            let left = match op { .CPX => x, .CPY => y, .AXS => a & x, _ => a };
-            let diff = left -% v;
-            r.p = nes_nz((r.p & 0xFE) | uint<8>((left >= v).bits()), diff);
-            if op == .AXS { r.x = diff; }
+            r.p = nes_nz((r.p & 0xFE) | uint<8>(sum[8].bits()), sum[7:0]);
+            if op == .AXS { r.x = sum[7:0]; }
         }
         .ASL | .LSR | .ROL | .ROR | .INC | .DEC => { r.p = nes_nz(r.p, v); }
         .LDA => { r.a = v; r.p = nes_nz(p, v); }
@@ -147,8 +149,12 @@ module nes_cpu(
     let mode = dec.mode;
     let indexed_y = mode == .Aby || mode == .Izy || mode == .Zpy;
     let idx = if indexed_y { y } else { x };
-    let alu = nes_alu(op, a, x, y, s, p, if mode == .Acc { a } else { data });
-    let rmw_alu = nes_alu(op, a, x, y, s, p, old_data);
+    // One ALU: read-modify-write instructions modify the byte read earlier.
+    let operand = if cycle == .RmwWrite { old_data } else if mode == .Acc { a } else { data };
+    let alu = nes_alu(op, a, x, y, s, p, operand);
+    let rmw_alu = alu;
+    // Base plus index for absolute indexed and (indirect),Y addressing.
+    let indexed: uint<16> = concat(data, lo) +% uint<16>(idx);
     let high_mask = partial[15:8] +% 1;
     let store_byte = match op {
         .STX => x, .STY => y, .SAX => a & x,
@@ -251,7 +257,7 @@ module nes_cpu(
             }
             .AbsHi => {
                 let base = concat(data, lo);
-                let dest = base +% uint<16>(idx);
+                let dest = indexed;
                 pc := pc +% 1; ea := base; partial := base;
                 if op == .JMP && mode == .Abs { pc := base; cycle := .Fetch; }
                 else if mode == .Ind { cycle := .JmpLo; }
@@ -263,7 +269,7 @@ module nes_cpu(
             .PtrLo => { lo := data; cycle := .PtrHi; }
             .PtrHi => {
                 let base = concat(data, lo);
-                let dest = base +% uint<16>(y);
+                let dest = indexed;
                 ea := base; partial := base;
                 if mode == .Izy {
                     ea := dest; partial := concat(data, dest[7:0]);

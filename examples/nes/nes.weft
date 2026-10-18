@@ -24,10 +24,14 @@ module nes(
     out debug_dot: uint<9>, out debug_line: uint<9>, out halted: bool,
 ) {
     default domain sys { clock: clk, reset: reset }
+    // Block RAM reads are registered on the falling edge: addresses come
+    // from registers, so data is ready half a dot later, within the cycle.
+    domain half { clock: clk, edge: falling }
     reg divider: index<3> = 0;
     reg parity: bool = false;
     reg open_bus: uint<8> = 0;
-    mem ram: [uint<8>; 2048];
+    mem ram: [uint<8>; 2048] @sys;
+    reg ram_q: uint<8> @half init 0;
     reg strobe: bool = false;
     reg shift1: uint<8> = 0;
     reg shift2: uint<8> = 0;
@@ -73,7 +77,8 @@ module nes(
     if dmc_steal { bus_address = if dmc_get { apu.dma_address } else { cpu.address }; bus_write = false; }
 
     bus_read_data = open_bus;
-    if bus_address < 0x2000 { bus_read_data = ram[bus_address[10:0]]; }
+    ram_q := ram[bus_address[10:0]];
+    if bus_address < 0x2000 { bus_read_data = ram_q; }
     else if bus_address < 0x4000 { bus_read_data = ppu.cpu_read; }
     else if bus_address == 0x4015 { bus_read_data = apu.read_data | (open_bus & 0x20); }
     else if bus_address == 0x4016 { bus_read_data = (open_bus & 0xE0) | uint<8>((if strobe { pad1[0] } else { shift1[0] }).bits()); }
