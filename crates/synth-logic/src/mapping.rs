@@ -4,7 +4,7 @@
 use crate::choice::ChoiceAig;
 use crate::lutmap::{self, MapOptions, Tiebreak};
 use crate::net::LogicNet;
-use std::time::Instant;
+use synth_core::time::Instant;
 
 /// Optimizes `net` and returns a mapping of its final graph.
 pub fn optimize(
@@ -14,6 +14,19 @@ pub fn optimize(
     timing: impl Fn(&LogicNet) -> lutmap::Timing,
     cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
     log: &mut Vec<String>,
+) -> Result<lutmap::Mapping, String> {
+    optimize_observed(net, opts, remap_rounds, timing, cost, log, |_| {})
+}
+
+/// Like [`optimize`], reporting the optimized graph before mapping.
+pub fn optimize_observed(
+    net: &mut LogicNet,
+    opts: &MapOptions,
+    remap_rounds: usize,
+    timing: impl Fn(&LogicNet) -> lutmap::Timing,
+    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+    log: &mut Vec<String>,
+    mut observe: impl FnMut(&LogicNet),
 ) -> Result<lutmap::Mapping, String> {
     let t = Instant::now();
     let before = net.aig.num_ands();
@@ -55,6 +68,7 @@ pub fn optimize(
     }
     net.aig = main;
     net.cleanup();
+    observe(net);
     log.push(format!(
         "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits and {} flip-flops removed",
         t.elapsed().as_secs_f64(),

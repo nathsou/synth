@@ -119,6 +119,18 @@ pub fn analyse(
     routing: &Routing,
     clocks: &ClockConstraints,
 ) -> TimingReport {
+    analyse_full(arch, nl, placement, routing, clocks).0
+}
+
+/// [`analyse`], also returning the timing graph and the per-connection
+/// results (criticality, slack, critical paths) behind the report.
+pub fn analyse_full(
+    arch: &Arch,
+    nl: &Netlist,
+    placement: &Placement,
+    routing: &Routing,
+    clocks: &ClockConstraints,
+) -> (TimingReport, TimingGraph, Analysis) {
     let graph = TimingGraph::with_lut_pins(arch, nl, clocks, &routing.lut_pins);
     let pin_name = |c: CellId, i: usize| nl.str(nl.cells[c].pins[i].name).to_string();
     // Routed delay of every connection.
@@ -162,7 +174,7 @@ pub fn analyse(
                 .collect(),
         });
     }
-    report
+    (report, graph, a)
 }
 
 /// Global clock distribution jitter added to every launch, as icetime does

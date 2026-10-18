@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// UART transmitter and receiver (8N1) and a synchronous FIFO.
+
+enum TxState { Idle, Start, Data, Stop }
+
+/// Sends `byte` when `start` is high while idle. CLKS_PER_BIT is the clock
+/// frequency divided by the baud rate.
+module uart_tx<CLKS_PER_BIT: int>(
+    in start: bool,
+    in byte: uint<8>,
+    out tx: bool,
+    out busy: bool,
+) {
+    reg state: TxState = .Idle;
+    reg timer: index<CLKS_PER_BIT> = 0;
+    reg shift: uint<8> = 0;
+    reg bit: index<8> = 0;
+
+    let tick = timer == CLKS_PER_BIT - 1;
+    timer := timer +% 1;
+
+    tx = match state {
+        .Idle | .Stop => true,
+        .Start => false,
+        .Data => shift[0],
+    };
+    busy = state != .Idle;
+
+    match state {
+        .Idle => if start {
+            shift := byte;
+            timer := 0;
+            state := .Start;
+        }
+        .Start => if tick { state := .Data; }
+        .Data => if tick {
+            shift := shift >> 1;
+            bit := bit +% 1;
+            if bit == 7 { state := .Stop; }
+        }
+        .Stop => if tick { state := .Idle; }
+    }
+}
+
+enum RxState { Idle, Start, Data, Stop }
+
+/// Receives bytes from the asynchronous line `rx`; `valid` pulses for one
+/// cycle with each correctly framed byte.
+module uart_rx<CLKS_PER_BIT: int>(in rx: bool @async, out byte: uint<8>, out valid: bool) {
+    let line = sync(rx);
+
+    reg state: RxState = .Idle;
+    reg timer: index<CLKS_PER_BIT> = 0;
+    reg bit: index<8> = 0;
+    reg shift: uint<8> = 0;
+    reg done: bool = false;
+
+    // The timer is cleared at the start bit's falling edge: `mid` falls in
+    // the middle of the start bit, `end` in the middle of every later bit.
+    let mid = timer == CLKS_PER_BIT / 2;
+    let end = timer == CLKS_PER_BIT - 1;
+    done := false;
+    timer := timer +% 1;
+
+    match state {
+        .Idle => if !line {
+            state := .Start;
+            timer := 0;
+        }
+        .Start => if mid {
+            state := if line { .Idle } else { .Data };
+            timer := 0;
+        }
+        .Data => if end {
+            shift := concat(line, shift[7:1]);
+            bit := bit +% 1;
+            if bit == 7 { state := .Stop; }
+        }
+        .Stop => if end {
+            done := line;
+            state := .Idle;
+        }
+    }
+    byte = shift;
+    valid = done;
+}
+
+/// A first-in first-out queue. `pop` takes the oldest element, which
+/// appears on `head` in the next cycle (like a block RAM read).
+module fifo<T: type, DEPTH: int = 16>(
+    in push: bool,
+    in data: T,
+    in pop: bool,
+    out head: T,
+    out empty: bool,
+    out full: bool,
+) {
+    assert(DEPTH >= 2, "a fifo holds at least two elements");
+    mem buf: [T; DEPTH];
+    reg wr: index<DEPTH> = 0;
+    reg rd: index<DEPTH> = 0;
+    reg count: uint<bits_for(DEPTH)> = 0;
+    reg out_q: T init from_bits(0);
+
+    empty = count == 0;
+    full = count == DEPTH;
+    let do_push = push && !full;
+    let do_pop = pop && !empty;
+
+    if do_push {
+        buf[wr] := data;
+        wr := wr +% 1;
+    }
+    if do_pop {
+        out_q := buf[rd];
+        rd := rd +% 1;
+    }
+    if do_push && !do_pop { count := count +% 1; }
+    if do_pop && !do_push { count := count -% 1; }
+    head = out_q;
+}
