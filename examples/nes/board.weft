@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Pin-level wrapper used to measure the NES on iCE40: the external
+// cartridge buses, video, audio and controllers become pins. The cartridge
+// configuration (mapper, bank masks and mirroring) is shifted in serially
+// while reset is held, as a loader reading the iNES header would do. The
+// simulation-only debug outputs of `nes` are left unconnected.
+module nes_board(
+    in  clk: clock, in reset: bool @clk,
+    in  config_shift: bool @clk, in config_data: bool @clk,
+    in  prg_data: uint<8> @clk, out prg_address: uint<21>,
+    in  ram_data: uint<8> @clk, out ram_address: uint<13>, out ram_write: bool, out ram_write_data: uint<8>,
+    in  chr_data: uint<8> @clk, out chr_address: uint<18>, out chr_write: bool, out chr_write_data: uint<8>,
+    in  pad1: uint<8> @clk, in pad2: uint<8> @clk,
+    out pixel: uint<6>, out emphasis: uint<3>, out pixel_valid: bool, out frame: bool,
+    out audio_pulse1: uint<4>, out audio_pulse2: uint<4>, out audio_triangle: uint<4>,
+    out audio_noise: uint<4>, out audio_dmc: uint<7>,
+) {
+    default domain sys { clock: clk }
+    // mapper, prg_mask, chr_mask, then vertical, four_screen, chr_ram.
+    reg config: uint<27> = 0;
+    if config_shift { config := concat(config[25:0], config_data); }
+    inst core = nes(clk: clk, reset: reset,
+        mapper: config[26:19], prg_mask: config[18:11], chr_mask: config[10:3],
+        vertical: config[2], four_screen: config[1], chr_ram: config[0],
+        prg_data: prg_data, ram_data: ram_data, chr_data: chr_data, pad1: pad1, pad2: pad2);
+    prg_address = core.prg_address;
+    ram_address = core.ram_address; ram_write = core.ram_write; ram_write_data = core.ram_write_data;
+    chr_address = core.chr_address; chr_write = core.chr_write; chr_write_data = core.chr_write_data;
+    pixel = core.pixel; emphasis = core.emphasis; pixel_valid = core.pixel_valid; frame = core.frame;
+    audio_pulse1 = core.audio_pulse1; audio_pulse2 = core.audio_pulse2; audio_triangle = core.audio_triangle;
+    audio_noise = core.audio_noise; audio_dmc = core.audio_dmc;
+}

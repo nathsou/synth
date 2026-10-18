@@ -405,3 +405,49 @@ module top<N: int = 3, PARITY: bool = true>(in x: uint<4> @async, out y: uint<4>
     assert_eq!(s.peek("y"), Some(1));
     assert_eq!(s.peek("p"), Some(1));
 }
+
+#[test]
+fn single_generic_parameter_needs_no_name() {
+    let m = ok(r#"
+fn ones<N: int>(x: uint<N>) -> uint<bits_for(N)> {
+    count_ones<N>(x)
+}
+
+module counter<N: int>(in clk: clock, out q: uint<8>) {
+    reg c: uint<8> = 0;
+    c := c +% N;
+    q = c;
+}
+
+module top(in clk: clock, in x: uint<5> @clk, out q: uint<8>, out n: uint<3>) {
+    inst c = counter<3>();
+    q = c.q;
+    n = ones<5>(x);
+}
+"#);
+    let mut s = Sim::new(m);
+    s.poke("x", 0b10110);
+    assert_eq!(s.peek("n"), Some(3));
+    for _ in 0..4 {
+        s.step();
+    }
+    assert_eq!(s.peek("q"), Some(12));
+}
+
+#[test]
+fn constants_declared_int() {
+    let m = ok(r#"
+const LEN: int = 3;
+const TABLE: [uint<8>; LEN] = [7, 8, 9];
+
+module top(in i: uint<2>, out y: uint<8>, out n: uint<4>) {
+    const TWICE: int = LEN * 2;
+    y = if i < LEN { TABLE[i] } else { 0 };
+    n = TWICE;
+}
+"#);
+    let mut s = Sim::new(m);
+    s.poke("i", 2);
+    assert_eq!(s.peek("y"), Some(9));
+    assert_eq!(s.peek("n"), Some(6));
+}

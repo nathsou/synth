@@ -1753,14 +1753,8 @@ impl<'a> ModCx<'a> {
         // Explicit generic arguments.
         let mut given: HashMap<String, Value> = HashMap::new();
         for a in generics {
-            let Some(g) = f.generics.iter().find(|g| g.name.name == a.name.name) else {
-                return d.err(
-                    Diagnostic::error(
-                        a.name.span,
-                        format!("`{}` has no generic parameter `{}`", f.name.name, a.name.name),
-                    )
-                    .with_label("unknown parameter"),
-                );
+            let Some(g) = super::generic_param(d, &f.generics, &f.name.name, a) else {
+                return Err(());
             };
             let v = self.eval_generic_arg(d, g, &a.value)?;
             given.insert(g.name.name.clone(), v);
@@ -1879,13 +1873,18 @@ impl<'a> ModCx<'a> {
         self.scopes[scope].syms.insert(name.to_string(), Sym::Var(h));
     }
 
+    /// Runs `stmts` in a new scope and returns the values of the variables
+    /// `before` (from [`Self::vars`] before the branching statement) at its
+    /// end, in the same order, restoring their values from `before`.
+    /// Variables are looked up by name: [`Self::vars`] lists them in hash
+    /// map order, which can differ after a branch has run.
     fn exec_branch(
         &mut self,
         d: &mut Design<'a>,
         stmts: &'a [Stmt],
         narrow: HashMap<String, IntTy>,
+        before: &[(usize, String, Hw)],
     ) -> R<Vec<Hw>> {
-        let before = self.vars();
         self.scopes.push(Scope { narrow, ..Default::default() });
         let r = self.exec(d, stmts);
         self.scopes.pop();
@@ -1898,7 +1897,7 @@ impl<'a> ModCx<'a> {
             })
             .collect();
         for (k, n, h) in before {
-            self.set_var(k, &n, h);
+            self.set_var(*k, n, h.clone());
         }
         Ok(after)
     }
@@ -1973,9 +1972,9 @@ impl<'a> ModCx<'a> {
                 }
                 let (tn, en) = self.narrowing(d, cond);
                 let before = self.vars();
-                let tv = self.exec_branch(d, then, tn)?;
+                let tv = self.exec_branch(d, then, tn, &before)?;
                 let ev = match els {
-                    Some(b) => self.exec_branch(d, b, en)?,
+                    Some(b) => self.exec_branch(d, b, en, &before)?,
                     None => before.iter().map(|(_, _, h)| h.clone()).collect(),
                 };
                 for ((k, n, _), (t, e)) in before.iter().zip(tv.into_iter().zip(ev)) {
@@ -2000,7 +1999,12 @@ impl<'a> ModCx<'a> {
                     if let (Some(n), Some(r)) = (&name, &info.narrow) {
                         nar.insert(n.clone(), r.clone());
                     }
-                    results.push(self.exec_branch(d, std::slice::from_ref(&arms[k].1), nar)?);
+                    results.push(self.exec_branch(
+                        d,
+                        std::slice::from_ref(&arms[k].1),
+                        nar,
+                        &before,
+                    )?);
                 }
                 // Priority chain, last arm first.
                 for (vi, (k, n, _)) in before.iter().enumerate() {

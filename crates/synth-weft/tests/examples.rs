@@ -134,3 +134,201 @@ fn serv_port_matches_its_verilog_original() {
         b.step();
     }
 }
+
+#[test]
+fn sources_are_formatted() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = vec![
+        root.join("crates/synth-weft/src/std.weft"),
+        root.join("crates/arch-ice40/src/prims.weft"),
+    ];
+    for e in std::fs::read_dir(root.join("examples/weft")).unwrap().flatten() {
+        if e.path().extension().is_some_and(|x| x == "weft") {
+            files.push(e.path());
+        }
+    }
+    for f in files {
+        let src = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(
+            synth_weft::fmt::format(&src),
+            src,
+            "{} is not formatted (synth fmt)",
+            f.display()
+        );
+    }
+}
+
+/// What rv_program.weft prints: a few results, the Fibonacci numbers up to
+/// 610, and their sum.
+fn riscv_expected() -> String {
+    let mut out = String::new();
+    for w in [
+        0xffffff9cu32,
+        0xffffffe7,
+        0xffffff8b,
+        0x0000f00d,
+        0xf00d000d,
+        0xfffff00d,
+        0x000000f0,
+        0x00000e20,
+    ] {
+        out += &format!("{w:08x}\r\n");
+    }
+    let (mut a, mut b) = (0u32, 1u32);
+    for _ in 0..16 {
+        out += &format!("{a:08x}\r\n");
+        (a, b) = (b, a + b);
+    }
+    out + "0000063c\r\n"
+}
+
+/// Runs a RISC-V example until it has printed the program's output (or for
+/// `max` cycles), and gives the cycles taken with the text.
+fn run_riscv(core: &str, max: usize) -> (usize, String) {
+    let m = compile_files(
+        &[
+            core,
+            "examples/weft/rv32i.weft",
+            "examples/weft/rv_program.weft",
+            "examples/weft/uart.weft",
+        ],
+        &[],
+        None,
+        &[("CLKS_PER_BIT", "4"), ("DELAY", "0")],
+    );
+    let want = riscv_expected();
+    let mut s = Sim::new(m);
+    let mut line = Vec::new();
+    for cycle in 0..max {
+        line.push(s.peek("tx").unwrap());
+        s.step();
+        if cycle % 2048 == 0 || cycle == max - 1 {
+            let text = String::from_utf8_lossy(&uart_decode(&line, 4)).into_owned();
+            if text.len() >= want.len() {
+                return (cycle, text[..want.len()].to_string());
+            }
+            if cycle == max - 1 {
+                return (cycle, text);
+            }
+        }
+    }
+    unreachable!()
+}
+
+#[test]
+fn riscv_single_cycle_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_single.weft", 60_000);
+    assert_eq!(text, riscv_expected());
+}
+
+#[test]
+fn riscv_multi_cycle_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_multi.weft", 150_000);
+    assert_eq!(text, riscv_expected());
+}
+
+#[test]
+fn riscv_pipelined_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_pipe.weft", 80_000);
+    assert_eq!(text, riscv_expected());
+}
+
+#[test]
+fn breathe_brightens_then_dims() {
+    let m = compile_files(&["examples/weft/breathe.weft"], &[], None, &[("STEP", "256")]);
+    let mut s = Sim::new(m);
+    // The time LED 0 is on in each PWM period (256 cycles = one step).
+    let mut duty = Vec::new();
+    for _ in 0..72 {
+        let mut on = 0;
+        for _ in 0..256 {
+            on += s.peek("led").unwrap() & 1;
+            s.step();
+        }
+        duty.push(on);
+    }
+    assert!(duty[0] <= 1 && duty[63] >= 250, "{duty:?}");
+    assert!(duty[..64].windows(2).all(|w| w[0] <= w[1] + 1), "{duty:?}");
+    assert!(duty[64..].windows(2).all(|w| w[0] + 1 >= w[1]) && duty[71] < duty[64], "{duty:?}");
+}
+
+#[test]
+fn life_draws_its_generations() {
+    let m = compile_files(
+        &["examples/weft/life.weft", "examples/weft/uart.weft"],
+        &[],
+        Some("top"),
+        &[("CLKS_PER_BIT", "2"), ("PAUSE", "10")],
+    );
+    // The same rules, on the same torus.
+    let mut g = [[false; 8]; 8];
+    for (y, x) in [(0, 1), (1, 2), (2, 0), (2, 1), (2, 2), (5, 4), (5, 5), (5, 6)] {
+        g[y][x] = true;
+    }
+    let mut frames = Vec::new();
+    for _ in 0..3 {
+        let mut f = String::from("\x1b[H");
+        for row in &g {
+            f.extend(row.iter().map(|&c| if c { '#' } else { '.' }));
+            f += "\r\n";
+        }
+        frames.push(f);
+        let mut n = [[false; 8]; 8];
+        for y in 0..8 {
+            for x in 0..8 {
+                let mut count = 0;
+                for (dy, dx) in [(7, 7), (7, 0), (7, 1), (0, 7), (0, 1), (1, 7), (1, 0), (1, 1)] {
+                    count += g[(y + dy) % 8][(x + dx) % 8] as u32;
+                }
+                n[y][x] = count == 3 || (g[y][x] && count == 2);
+            }
+        }
+        g = n;
+    }
+    let want = frames.concat();
+    let mut s = Sim::new(m);
+    let mut line = Vec::new();
+    let mut text = String::new();
+    for cycle in 1..=20_000 {
+        line.push(s.peek("tx").unwrap());
+        s.step();
+        if cycle % 500 == 0 {
+            text = String::from_utf8(uart_decode(&line, 2)).unwrap();
+            if text.len() >= want.len() {
+                break;
+            }
+        }
+    }
+    assert!(text.len() >= want.len(), "{text:?}");
+    assert_eq!(&text[..want.len()], want);
+}
+
+#[test]
+fn nes_cpu_elaborates_reliably() {
+    // The CPU's ALU function branches over many arms that call other
+    // functions. Branch results used to be matched to variables by the
+    // iteration order of a hash map, which could change between arms and
+    // swap or mismatch values; elaborate a few times to catch that.
+    const NES: [&str; 6] = [
+        "examples/nes/nes.weft",
+        "examples/nes/cpu.weft",
+        "examples/nes/decode.weft",
+        "examples/nes/ppu.weft",
+        "examples/nes/apu.weft",
+        "examples/nes/mapper.weft",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for _ in 0..8 {
+        let mut sm = synth_core::SourceMap::new();
+        let ids: Vec<_> = NES
+            .iter()
+            .map(|p| {
+                let path = root.join(p);
+                sm.add(path.display().to_string(), std::fs::read_to_string(&path).unwrap())
+            })
+            .collect();
+        let opts = synth_weft::Options { top: Some("nes".into()), ..Default::default() };
+        let (m, diags) = synth_weft::compile(&mut sm, &ids, &[], None, &opts);
+        assert!(m.is_some() && !diags.has_errors(), "{}", diags.render(&sm));
+    }
+}

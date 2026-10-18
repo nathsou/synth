@@ -1,0 +1,10 @@
+diff --git a/crates/synth-logic/src/carry.rs b/crates/synth-logic/src/carry.rs
+index 73c96b1..8606f0a 100644
+--- a/crates/synth-logic/src/carry.rs
++++ b/crates/synth-logic/src/carry.rs
+@@ -120,0 +121,5 @@ pub fn simplify_carries(net: &mut LogicNet) -> usize {
++            // Keep the bit which generates a variable carry: folding it
++            // would turn a constant chain entry into a fabric carry input.
++            if k != carry && !x.is_const() && (lo + 1 < w || ch.cout.is_some()) {
++                break;
++            }

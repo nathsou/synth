@@ -34,6 +34,8 @@ Start, Up, Down, Left and Right. Values persist until the next event. For exampl
 This presses Start on controller 1 for two frames, then holds Right from frame
 300 onward. `--save path` loads and writes an explicit 8 KiB battery save for a
 battery-backed cartridge. `--trace path` writes every CPU bus cycle to CSV.
+`--ppm-every N` additionally writes `frame-N.ppm`, `frame-2N.ppm`, … next to the
+`--ppm` path, which is useful for checking motion and scrolling.
 Invalid/truncated headers, unsupported mappers/regions, NES 2.0 and unsupported
 memory geometries fail explicitly. ROMs are never modified or distributed here.
 
@@ -51,17 +53,42 @@ the core. The cartridge configuration must stay constant until reset.
 in external CHR ROM/RAM; accept `chr_write` only for CHR RAM. Cartridge RAM uses
 `ram_address`, `ram_write` and `ram_write_data`. Reads are combinational; writes
 are accepted on the next rising edge. Masks are the number of 8 KiB PRG or 1 KiB
-CHR banks minus one. The runner validates power-of-two sizes. Internal memory
-currently uses combinational reads; FPGA area/timing and a board port have not
-been validated.
+CHR banks minus one. The runner validates power-of-two sizes.
+
+Internal memories (CPU RAM, VRAM, OAM, secondary OAM and palette) are block
+RAMs read on the falling edge of `clk`: their addresses come from registers,
+so the data arrives half a dot later and is used within the same dot. External
+cartridge reads must likewise return within the dot.
 
 `pixel_valid`, `pixel_x`, `pixel_y`, `pixel` and `emphasis` describe each visible
-dot. `frame` pulses at vblank entry. Audio outputs are the raw channel DAC
+dot; `pixel` is valid from the falling edge of `clk`. `frame` pulses at vblank entry. Audio outputs are the raw channel DAC
 values; `audio_valid` marks a CPU cycle. The runner applies the nonlinear NES
 mixer and an approximate analog filter. Composite decoding, analog color and
 OAM decay are outside the digital hardware boundary. The PPU I/O bus uses a
-deterministic 600 ms charge-decay model; physical decay varies with temperature
-and chip revision.
+deterministic charge-decay model (bits decay 400–600 ms after being refreshed);
+physical decay varies with temperature and chip revision.
+
+## FPGA resources and timing
+
+`board.weft` wraps `nes` for measurement: cartridge buses, video, audio and
+controllers become pins, the cartridge configuration is shifted in serially and
+the simulation-only debug outputs are dropped. `make -C examples/nes fpga`
+synthesizes, places and routes it for an iCE40 HX8K (CT256 package) against the
+dot clock:
+
+| Resource | Used | HX8K |
+|---|---|---|
+| Logic cells | 5,331 | 7,680 |
+| Block RAMs | 16 | 32 |
+| I/O | 148 | 206 |
+
+Timing closes at 16.2 MHz equivalent, 3.0 times the 5.369 MHz dot clock needed
+for real time. Paths between the rising and falling edges count double: a
+falling-edge block RAM read and the logic it feeds must fit in half a dot.
+
+An HX1K (1,280 logic cells) cannot hold the core: the CPU alone uses about
+1,850 LUTs and the PPU about 1,500. The HX8K also has no room for cartridge
+ROMs, which stay external.
 
 ## Verification
 
@@ -82,11 +109,25 @@ protocol and fails on a nonzero result, a KIL opcode or a timeout. Reset request
 (`$81`) wait at least 100 ms, then apply reset while preserving CPU/cartridge
 RAM. The runner does not modify the test's result memory.
 
-Older sprite tests use `--legacy-result f8`: the runner waits for the terminal
-self-jump before judging the result byte. Older ASCII-console tests use
-`--console-test` or explicit `--console-crc` values from the test's documented
-output. These modes are selected explicitly by `tests/run.py`; an ordinary
-frame or timeout is never counted as a pass.
+Older sprite, VBL/NMI and branch timing tests use `--legacy-result f8`: the
+runner waits for the terminal self-jump before judging the result byte. The
+2005 APU and PPU tests use `--console-code`: at the terminal self-jump the
+runner reads the `$hh` code they print, where `$01` means every test passed.
+ASCII-console tests use `--console-test` with the default `Passed`/`Failed`
+text, `--console-pass`/`--console-fail` strings, or explicit `--console-crc`
+values from the test's documented output. These modes are selected explicitly
+by `tests/run.py`; an ordinary frame or timeout is never counted as a pass.
+
+`tests/run.py` covers 121 ROMs: `instr_test-v5`, `instr_misc`, `instr_timing`,
+`cpu_timing_test6` (official and undocumented opcodes), `branch_timing_tests`,
+`cpu_interrupts_v2`, `cpu_reset`, `cpu_dummy_writes`, `cpu_exec_space`,
+`ppu_vbl_nmi`, `vbl_nmi_timing`, `ppu_open_bus`, `ppu_read_buffer`, the 2005
+PPU tests, `oam_read`, `oam_stress`, the sprite hit and overflow tests,
+`apu_test`, `apu_reset`, the 2005 APU tests, `dmc_dma_during_read4`,
+`sprdma_and_dmc_dma`, and `mmc3_test`/`mmc3_test_2` tests 1–5. The MMC6 and
+MMC3A variants of test 6 are expected to fail because the core implements
+MMC3B. Palette RAM starts with the contents blargg recorded on his console
+(`power_up_palette`); real power-up contents differ between chips.
 
 For independent per-cycle CPU checks, obtain the `nes6502/v1` JSON vectors from
 [SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) at revision

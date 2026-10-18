@@ -75,12 +75,14 @@ export class Backend {
       const runner = new WorkerChannel();
       const checker = new WorkerChannel();
       this.direct = runner;
+      this.checker = checker;
       this.runs = new Latest(runner);
       this.checks = new Latest(checker);
     } catch {
       this.mode = 'server';
       const http = new HttpChannel();
       this.direct = http;
+      this.checker = http;
       this.runs = new Latest(http);
       this.checks = new Latest(http);
     }
@@ -93,4 +95,5 @@ export class Backend {
 
   run(req) { return this.runs.call('run', JSON.stringify(req)); }
   analyze(req) { return this.checks.call('analyze', JSON.stringify(req)); }
+  async format(text) { return JSON.parse(await this.checker.call('format', JSON.stringify({ text }))); }
 }

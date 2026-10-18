@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// A pipelined RV32I core, in the classic five stages: fetch (IF), decode
+// (ID), execute (EX), memory (MEM) and write back (WB). Five instructions
+// are in flight, one per stage, and one finishes in most cycles. It runs
+// rv_program.weft, which prints over the UART (115200 8N1). Build with
+// rv32i.weft, rv_program.weft and uart.weft.
+//
+// - Results are forwarded to EX from the instructions ahead of it, so that an
+//   instruction can use the result of the one just before.
+// - A load's value comes a cycle later than an ALU result: an instruction
+//   that uses it right after waits one cycle in ID (a bubble goes to EX).
+// - Branches and jumps are predicted not taken and resolved in EX; a taken
+//   one cancels the two instructions fetched after it.
+// - The register file is read at the end of ID, as a block RAM read; the
+//   instruction that writes it at the same time is forwarded from a sixth,
+//   bookkeeping stage (`done`).
+
+/// CLKS_PER_BIT: the clock frequency divided by 115200. DELAY: the pause
+/// between two runs of the program (see rv_program.weft).
+module top<CLKS_PER_BIT: int = 104, DELAY: int = 600>(in clk: clock, out tx: bool, out led: uint<8>) {
+    mem rom: [uint<32>; 128] init program<128>(DELAY);
+    mem regs1: [uint<32>; 32]; // two copies of the register file, one per read port
+    mem regs2: [uint<32>; 32];
+    mem ram: [uint<32>; 256];
+    inst dev = devices<CLKS_PER_BIT>();
+
+    // IF: the address of the instruction being fetched.
+    reg pc: uint<32> = 0;
+
+    // ID: the fetched instruction.
+    reg id_valid: bool = false;
+    reg id_pc: uint<32> init 0;
+    reg id_instr: uint<32> init 0;
+    let id = decode(id_instr);
+
+    // EX: the decoded instruction, and its registers as the register file
+    // had them.
+    reg ex_valid: bool = false;
+    reg ex_pc: uint<32> init 0;
+    reg ex: Decoded init decode(0);
+    reg ex_read1: uint<32> init 0;
+    reg ex_read2: uint<32> init 0;
+
+    // MEM: the result, or the address of a load.
+    reg mem_writes: bool = false;
+    reg mem_rd: uint<5> init 0;
+    reg mem_result: uint<32> init 0;
+    reg mem_load: bool init false;
+    reg mem_funct3: uint<3> init 0;
+    reg mem_device: bool init false;
+    reg mem_word: uint<32> init 0;   // the RAM word at the address
+    reg mem_status: uint<32> init 0; // the devices' word
+
+    // WB: the value written to rd.
+    reg wb_writes: bool = false;
+    reg wb_rd: uint<5> init 0;
+    reg wb_value: uint<32> init 0;
+
+    // The instruction that wrote the register file in the previous cycle.
+    reg done_writes: bool = false;
+    reg done_rd: uint<5> init 0;
+    reg done_value: uint<32> init 0;
+
+    // EX, with each operand from the most recent instruction that writes it.
+    let rs1 = if mem_writes && mem_rd == ex.rs1 {
+        mem_result
+    } else if wb_writes && wb_rd == ex.rs1 {
+        wb_value
+    } else if done_writes && done_rd == ex.rs1 {
+        done_value
+    } else {
+        ex_read1
+    };
+    let rs2 = if mem_writes && mem_rd == ex.rs2 {
+        mem_result
+    } else if wb_writes && wb_rd == ex.rs2 {
+        wb_value
+    } else if done_writes && done_rd == ex.rs2 {
+        done_value
+    } else {
+        ex_read2
+    };
+    let a = if ex.a_pc { ex_pc } else { rs1 };
+    let b = if ex.b_imm { ex.imm } else { rs2 };
+    let result = alu(ex.alu, a, b);
+    let taken = ex_valid && (ex.jal || ex.jalr || (ex.branch && branch_taken(ex.funct3, rs1, rs2)));
+    let target = if ex.jalr { (rs1 +% ex.imm) & ~uint<32>(1) } else { ex_pc +% ex.imm };
+
+    // EX starts the memory access: stores write, loads read.
+    let to_device = is_device(result);
+    dev.write = ex_valid && ex.store && to_device;
+    dev.uart_port = result[2];
+    dev.wdata = rs2;
+    if ex_valid && ex.store && !to_device {
+        let lanes = store_lanes(ex.funct3, rs2);
+        let mask = store_mask(ex.funct3, result[1:0]);
+        for i in 0..4 {
+            if mask[i] { ram[result[9:2]][i * 8 + 7:i * 8] := lanes[i * 8 + 7:i * 8]; }
+        }
+    }
+    mem_word := ram[result[9:2]];
+    mem_status := dev.rdata;
+    mem_writes := ex_valid && ex.writes;
+    mem_rd := ex.rd;
+    mem_result := if ex.jal || ex.jalr { ex_pc +% 4 } else { result };
+    mem_load := ex.load;
+    mem_funct3 := ex.funct3;
+    mem_device := to_device;
+
+    // MEM.
+    wb_writes := mem_writes;
+    wb_rd := mem_rd;
+    wb_value := if mem_load {
+        load_value(mem_funct3, mem_result[1:0], if mem_device { mem_status } else { mem_word })
+    } else {
+        mem_result
+    };
+
+    // WB.
+    if wb_writes {
+        regs1[wb_rd] := wb_value;
+        regs2[wb_rd] := wb_value;
+    }
+    done_writes := wb_writes;
+    done_rd := wb_rd;
+    done_value := wb_value;
+
+    // IF and ID. The register file is read for the instruction in ID.
+    ex_read1 := regs1[id.rs1];
+    ex_read2 := regs2[id.rs2];
+    let stall = ex_valid && ex.load && ex.writes && id_valid && (ex.rd == id.rs1 || ex.rd == id.rs2);
+    if taken {
+        pc := target;
+        id_valid := false;
+        ex_valid := false;
+    } else if stall {
+        ex_valid := false;
+    } else {
+        pc := pc +% 4;
+        id_valid := true;
+        id_pc := pc;
+        id_instr := rom[pc[8:2]];
+        ex_valid := id_valid;
+        ex_pc := id_pc;
+        ex := id;
+    }
+
+    tx = dev.tx;
+    led = dev.led;
+}

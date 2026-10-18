@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: CERN-OHL-W-2.0
 // NTSC RP2C02 digital picture generator. Clock at one edge per PPU dot.
+// Palette RAM contents at power-up are unspecified and differ between chips;
+// these are the values blargg recorded on one NES, used here for determinism.
+const NES_POWER_UP_PALETTE: [uint<8>; 32] = [
+    0x09,0x01,0x00,0x01,0x00,0x02,0x02,0x0D,0x08,0x10,0x08,0x24,0x00,0x00,0x04,0x2C,
+    0x09,0x01,0x34,0x03,0x00,0x04,0x00,0x14,0x08,0x3A,0x00,0x02,0x00,0x20,0x2C,0x08,
+];
 fn nes_palette_index(address: uint<5>) -> uint<5> {
     if address[1:0] == 0 { address & 0x0F } else { address }
 }
@@ -51,18 +57,35 @@ module nes_ppu(
     reg suppress_vblank: bool = false;
     reg nmi_delay: uint<2> = 0;
     reg io_latch: uint<8> = 0;
-    // A deterministic 600 ms approximation of the PPU's dynamic bus charge.
-    // Actual decay varies among chips and with temperature.
-    reg io_decay: [uint<22>; 8] = [0; 8];
+    // A deterministic approximation of the PPU's dynamic bus charge: a
+    // refreshed bit decays after three ticks of a shared 200 ms timer, 400 to
+    // 600 ms later. Actual decay varies among chips and with temperature.
+    reg decay_timer: uint<21> = 0;
+    reg io_decay: [uint<2>; 8] = [0; 8];
     reg read_buffer: uint<8> = 0;
     reg last_read: uint<8> = 0;
     reg read_cooldown: uint<3> = 0;
     if read_cooldown != 0 { read_cooldown := read_cooldown -% 1; }
     reg oam_address: uint<8> = 0;
-    mem oam: [uint<8>; 256];
-    mem vram: [uint<8>; 4096];
-    mem palette: [uint<6>; 32];
-    reg secondary: [uint<8>; 32] = [0xFF; 32];
+    // Block RAM reads are registered on the falling edge: addresses come
+    // from registers, so data is ready half a dot later, within the cycle.
+    domain half { clock: default.clock, edge: falling }
+    mem oam: [uint<8>; 256] @default;
+    mem vram: [uint<8>; 4096] @default;
+    reg oam_q: uint<8> @half init 0;
+    reg vram_q: uint<8> @half init 0;
+    // Entries are 6 bits; storing 8 lets the palette use block RAM (one copy
+    // per read port: rendering and $2007).
+    mem palette: [uint<8>; 32] @default init NES_POWER_UP_PALETTE;
+    reg palette_cpu_q: uint<8> @half init 0;
+    reg palette_pixel_q: uint<8> @half init 0;
+    // Secondary OAM is read one byte per dot while sprites are fetched
+    // (Y, tile, attributes, X), as in the PPU, so it fits a block RAM.
+    mem secondary: [uint<8>; 32] @default init [0xFF; 32];
+    reg secondary_q: uint<8> @half init 0xFF;
+    reg fetch_y: uint<8> = 0xFF;
+    reg fetch_tile: uint<8> = 0xFF;
+    reg fetch_attr: uint<8> = 0xFF;
     reg secondary_zero: [bool; 8] = [false; 8];
     reg eval_n: uint<6> = 0;
     reg eval_m: uint<2> = 0;
@@ -84,9 +107,13 @@ module nes_ppu(
     reg attr_low: uint<16> = 0;
     reg attr_high: uint<16> = 0;
 
+    let decay_tick = decay_timer == 0;
+    decay_timer := if decay_tick { 1_073_863 } else { decay_timer -% 1 };
     for i in 0..8 {
-        if io_decay[i] != 0 { io_decay[i] := io_decay[i] -% 1; }
-        if io_decay[i] == 1 { io_latch[i] := false; }
+        if decay_tick && io_decay[i] != 0 {
+            io_decay[i] := io_decay[i] -% 1;
+            if io_decay[i] == 1 { io_latch[i] := false; }
+        }
     }
 
     let rendering = mask[3] || mask[4];
@@ -96,11 +123,15 @@ module nes_ppu(
     let sprite_fetch = dot >= 257 && dot <= 320;
     let phase: uint<3> = uint<9>(dot)[2:0];
     let sprite_slot: uint<3> = (uint<9>(dot) -% 257)[5:3];
-    let sy = secondary[concat(sprite_slot, 0b00)];
-    let tile = secondary[concat(sprite_slot, 0b01)];
-    let attr = secondary[concat(sprite_slot, 0b10)];
-    let sx = secondary[concat(sprite_slot, 0b11)];
-    let sprite_row = uint<9>(line)[7:0] -% sy;
+    secondary_q := secondary[concat(sprite_slot, (phase -% 1)[1:0])];
+    // One write port: clearing on dots 1-64, then copies during evaluation.
+    wire secondary_write: bool;
+    wire secondary_address: uint<5>;
+    wire secondary_data: uint<8>;
+    secondary_write = false; secondary_address = (uint<9>(dot) -% 1)[5:1]; secondary_data = 0xFF;
+    let tile = fetch_tile;
+    let attr = fetch_attr;
+    let sprite_row = uint<9>(line)[7:0] -% fetch_y;
     let flipped_row = sprite_row ^ (if attr[7] { uint<8>(if ctrl[5] { 15 } else { 7 }) } else { uint<8>(0) });
     let sprite_pattern: uint<13> = if ctrl[5] {
         concat(tile[0], tile[7:1], flipped_row[3], false, flipped_row[2:0])
@@ -130,14 +161,19 @@ module nes_ppu(
     memory_address = if data_access { v[13:0] & (if !cpu_write && v[13:8] == 0x3F { uint<14>(0x2FFF) } else { uint<14>(0x3FFF) }) }
                      else { fetch_address };
     let nt_index = nes_nametable_index(memory_address, mirroring);
-    let bus_data = if memory_address[13] { vram[nt_index] } else { chr_data };
+    vram_q := vram[nt_index];
+    let bus_data = if memory_address[13] { vram_q } else { chr_data };
     chr_write = data_access && cpu_write && v[13:0] < 0x2000;
     chr_write_data = cpu_data;
     let pal_index = nes_palette_index(v[4:0]);
-    let palette_read: uint<8> = (io_latch & 0xC0) | uint<8>(palette[pal_index] & (if mask[0] { uint<6>(0x30) } else { uint<6>(0x3F) }));
+    palette_cpu_q := palette[pal_index];
+    let palette_read: uint<8> = (io_latch & 0xC0) | (palette_cpu_q & (if mask[0] { uint<8>(0x30) } else { uint<8>(0x3F) }));
     let status = concat(vblank, sprite_hit, overflow, io_latch[4:0]);
+    // One OAM read port: sprite evaluation on odd dots, otherwise $2004.
+    let oam_eval = fetching && dot >= 65 && dot <= 256 && !eval_done && line < 240 && phase[0];
+    oam_q := oam[if oam_eval { concat(eval_n, eval_m) } else { oam_address }];
     let oam_read = if fetching { if dot <= 64 { uint<8>(0xFF) } else { eval_data } }
-                   else { oam[oam_address] };
+                   else { oam_q };
     cpu_read = match cpu_register {
         2 => status,
         4 => if oam_address[1:0] == 2 { oam_read & 0xE3 } else { oam_read },
@@ -175,7 +211,8 @@ module nes_ppu(
     let output_index: uint<5> = if use_sprite { concat(true, sp_palette, sp_bits) }
                               else if bg_bits != 0 { concat(false, bg_pal, bg_bits) } else { 0 };
     let forced_index = if !rendering && v[13:8] == 0x3F { pal_index } else { output_index };
-    pixel = palette[nes_palette_index(forced_index)] & (if mask[0] { uint<6>(0x30) } else { uint<6>(0x3F) });
+    palette_pixel_q := palette[nes_palette_index(forced_index)];
+    pixel = palette_pixel_q[5:0] & (if mask[0] { uint<6>(0x30) } else { uint<6>(0x3F) });
     emphasis = mask[7:5];
     pixel_valid = line < 240 && dot >= 1 && dot <= 256;
     pixel_x = (uint<9>(dot) -% 1)[7:0]; pixel_y = uint<9>(line)[7:0];
@@ -221,15 +258,16 @@ module nes_ppu(
             }
         }
         if dot == 1 { eval_n := 0; eval_m := 0; eval_count := 0; eval_done := false; secondary_zero := [false; 8]; }
-        if dot >= 1 && dot <= 64 && !phase[0] { secondary[(uint<9>(dot) -% 1)[5:1]] := 0xFF; }
+        if dot >= 1 && dot <= 64 && !phase[0] { secondary_write = true; }
         if dot >= 65 && dot <= 256 && !eval_done && line < 240 {
-            if phase[0] { eval_data := oam[concat(eval_n, eval_m)]; }
+            if phase[0] { eval_data := oam_q; }
             else {
                 let row = uint<9>(line) -% uint<9>(eval_data);
                 let in_range = row < (if ctrl[5] { 16 } else { 8 });
                 if eval_count < 8 {
                     if eval_m != 0 || in_range {
-                        secondary[concat(eval_count[2:0], eval_m)] := eval_data;
+                        secondary_write = true; secondary_address = concat(eval_count[2:0], eval_m);
+                        secondary_data = eval_data;
                         if eval_m == 0 { secondary_zero[eval_count[2:0]] := eval_n == 0; }
                         eval_m := eval_m +% 1;
                         if eval_m == 3 { eval_count := eval_count +% 1; eval_n := eval_n +% 1; if eval_n == 63 { eval_done := true; } }
@@ -243,10 +281,16 @@ module nes_ppu(
         }
         if sprite_fetch {
             oam_address := 0;
-            if phase == 1 {
-                sprite_x[sprite_slot] := sx; sprite_attr[sprite_slot] := attr;
-                sprite_zero[sprite_slot] := secondary_zero[sprite_slot];
-                sprite_active[sprite_slot] := uint<4>(sprite_slot) < eval_count;
+            match phase {
+                1 => {
+                    fetch_y := secondary_q;
+                    sprite_zero[sprite_slot] := secondary_zero[sprite_slot];
+                    sprite_active[sprite_slot] := uint<4>(sprite_slot) < eval_count;
+                }
+                2 => { fetch_tile := secondary_q; }
+                3 => { fetch_attr := secondary_q; sprite_attr[sprite_slot] := secondary_q; }
+                4 => { sprite_x[sprite_slot] := secondary_q; }
+                _ => {}
             }
             if phase == 6 { sprite_fetch_low := if attr[6] { bus_data.reverse() } else { bus_data }; }
             if phase == 0 {
@@ -256,10 +300,12 @@ module nes_ppu(
         }
     }
 
+    if secondary_write { secondary[secondary_address] := secondary_data; }
+
     if cpu_access {
         if cpu_write {
             io_latch := cpu_data;
-            io_decay := [3_221_591; 8];
+            io_decay := [3; 8];
             match cpu_register {
                 0 => if !warming_up { ctrl := cpu_data; t := (t & 0x73FF) | (uint<15>(cpu_data[1:0]) << 10); }
                 1 => if !warming_up { mask := cpu_data; }
@@ -281,7 +327,7 @@ module nes_ppu(
                     else { t := (t & 0x7F00) | uint<15>(cpu_data); v := (t & 0x7F00) | uint<15>(cpu_data); }
                 }
                 7 => {
-                    if v[13:8] == 0x3F { palette[pal_index] := cpu_data[5:0]; }
+                    if v[13:8] == 0x3F { palette[pal_index] := cpu_data & 0x3F; }
                     else if v[13] { vram[nt_index] := cpu_data; }
                 }
                 _ => {}
@@ -289,15 +335,15 @@ module nes_ppu(
         } else {
             if cpu_register == 2 {
                 io_latch := status; vblank := false; second_write := false;
-                for i in 5..8 { io_decay[i] := 3_221_591; }
+                for i in 5..8 { io_decay[i] := 3; }
                 if line == 241 && dot == 1 { suppress_vblank := true; }
             }
-            if cpu_register == 4 { io_latch := cpu_read; io_decay := [3_221_591; 8]; }
+            if cpu_register == 4 { io_latch := cpu_read; io_decay := [3; 8]; }
             if cpu_register == 7 {
                 io_latch := cpu_read; read_buffer := bus_data;
                 last_read := cpu_read; read_cooldown := 5;
-                for i in 0..6 { io_decay[i] := 3_221_591; }
-                if v[13:8] != 0x3F { io_decay[6] := 3_221_591; io_decay[7] := 3_221_591; }
+                for i in 0..6 { io_decay[i] := 3; }
+                if v[13:8] != 0x3F { io_decay[6] := 3; io_decay[7] := 3; }
             }
         }
         if cpu_register == 7 {

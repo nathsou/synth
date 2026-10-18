@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Conway's Game of Life on an 8×8 torus, a generation every half second,
+// drawn over the UART (115200 8N1): a serial terminal shows it in place.
+// Every cell is computed in parallel, by a function called once per
+// generation. Build with uart.weft.
+
+const SIZE: int = 8;
+
+/// The first generation: a glider and a blinker.
+fn first() -> [[bool; SIZE]; SIZE] {
+    var g: [[bool; SIZE]; SIZE] = [[false; SIZE]; SIZE];
+    g[0][1] = true;
+    g[1][2] = true;
+    g[2][0] = true;
+    g[2][1] = true;
+    g[2][2] = true;
+    g[5][4] = true;
+    g[5][5] = true;
+    g[5][6] = true;
+    g
+}
+
+/// The two bits of the sum of three bits.
+struct Sum { sum: bool, carry: bool }
+
+fn full_add(a: bool, b: bool, c: bool) -> Sum {
+    Sum { sum: a ^ b ^ c, carry: (a && b) || (c && (a ^ b)) }
+}
+
+/// Whether a cell is alive in the next generation: with three live
+/// neighbours, or with two if it is alive now. The neighbours are counted by
+/// a tree of full adders, which is smaller than a chain of additions.
+fn lives(alive: bool, n: [bool; 8]) -> bool {
+    let a = full_add(n[0], n[1], n[2]);
+    let b = full_add(n[3], n[4], n[5]);
+    let c = full_add(n[6], n[7], false);
+    let ones = full_add(a.sum, b.sum, c.sum);
+    let twos = full_add(a.carry, b.carry, c.carry);
+    // The count is ones.sum + 2 × (ones.carry + twos.sum) + 4 × twos.carry.
+    let two = ones.carry ^ twos.sum;
+    let four_or_more = twos.carry || (ones.carry && twos.sum);
+    two && !four_or_more && (ones.sum || alive)
+}
+
+/// The next generation. The edges wrap around.
+fn next(g: [[bool; SIZE]; SIZE]) -> [[bool; SIZE]; SIZE] {
+    var n: [[bool; SIZE]; SIZE] = [[false; SIZE]; SIZE];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let up = (y + SIZE - 1) % SIZE;
+            let down = (y + 1) % SIZE;
+            let left = (x + SIZE - 1) % SIZE;
+            let right = (x + 1) % SIZE;
+            n[y][x] = lives(
+                g[y][x],
+                [g[up][left], g[up][x], g[up][right], g[y][left], g[y][right], g[down][left], g[down][x], g[down][right]],
+            );
+        }
+    }
+    n
+}
+
+/// "ESC [ H": moves a terminal's cursor to its top left corner.
+const HOME: [uint<8>; 3] = [0x1B, 0x5B, 0x48];
+
+enum Phase { Home, Cells, Pause }
+
+/// CLKS_PER_BIT: the clock frequency divided by 115200. PAUSE: the cycles
+/// between two generations (25 MHz on the Go Board).
+module top<CLKS_PER_BIT: int = 217, PAUSE: int = 12_500_000>(in clk: clock, out tx: bool, out led: uint<4>) {
+    reg grid: [[bool; SIZE]; SIZE] = first();
+    reg generation: uint<4> = 0;
+    inst uart = uart_tx<CLKS_PER_BIT>();
+
+    // Drawing: HOME, then each row as `#` and `.`, then "\r\n".
+    reg phase: Phase = .Home;
+    reg home: index<3> = 0;
+    reg row: index<SIZE> = 0;
+    reg col: index<SIZE + 2> = 0;
+    reg wait: index<PAUSE> = 0;
+
+    let sent = phase != .Pause && !uart.busy;
+    uart.start = sent;
+    uart.byte = match phase {
+        .Home => HOME[home],
+        .Cells => if col < SIZE {
+            if grid[row][col] { 0x23 } else { 0x2E }
+        } else if col == SIZE { 0x0D } else { 0x0A },
+        .Pause => 0,
+    };
+
+    match phase {
+        .Home => if sent {
+            home := home +% 1;
+            if home == 2 { phase := .Cells; }
+        }
+        .Cells => if sent {
+            col := col +% 1;
+            if col == SIZE + 1 {
+                row := row +% 1;
+                if row == SIZE - 1 { phase := .Pause; }
+            }
+        }
+        .Pause => {
+            wait := wait +% 1;
+            if wait == PAUSE - 1 {
+                grid := next(grid);
+                generation := generation +% 1;
+                phase := .Home;
+            }
+        }
+    }
+
+    tx = uart.tx;
+    led = generation;
+}

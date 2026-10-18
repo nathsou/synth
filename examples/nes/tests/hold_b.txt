@@ -1,0 +1,2 @@
+# Hold B on controller 1 from power-up.
+0 02 00

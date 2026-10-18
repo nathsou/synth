@@ -8,7 +8,7 @@ VECTORS ?= ../../work/nes-vectors.bin
 BUILD := $(abspath $(BUILD))
 SOURCES := nes.weft cpu.weft decode.weft ppu.weft apu.weft mapper.weft
 
-.PHONY: all sim cpu-test vectors-test test clean
+.PHONY: all sim cpu-test vectors-test test fpga clean
 all: sim
 sim: $(BUILD)/obj/Vnes
 
@@ -41,5 +41,11 @@ vectors-test: $(BUILD)/vectors/Vnes_cpu_test
 test: sim cpu-test
 	python3 tests/run.py --sim $(BUILD)/obj/Vnes --roms $(TEST_ROMS)
 
+# Place and route the pin-level wrapper on an HX8K against the dot clock.
+fpga: $(SOURCES) board.weft $(SYNTH)
+	mkdir -p $(BUILD)
+	$(SYNTH) build $(SOURCES) board.weft --top nes_board --device hx8k --package ct256 \
+	    --freq 5.369318 -o $(BUILD)/nes_board.bin
+
 clean:
-	rm -rf $(BUILD)/obj $(BUILD)/cpu $(BUILD)/vectors $(BUILD)/nes.v $(BUILD)/cpu.v
+	rm -rf $(BUILD)/obj $(BUILD)/cpu $(BUILD)/vectors $(BUILD)/nes.v $(BUILD)/cpu.v $(BUILD)/nes_board.bin

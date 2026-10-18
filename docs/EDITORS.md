@@ -14,7 +14,9 @@ Protocol over standard input and output. It gives any LSP-capable editor:
 - completion of names, keywords and builtins, and after `.` the ports of an
   instance, the fields of a struct or the variants of an enum;
 - semantic highlighting: registers, wires, ports, instances, domains,
-  constants and types each get their own token type.
+  constants and types each get their own token type;
+- formatting of a whole file, the same as `synth fmt` (see the layout rules
+  in [WEFT.md §4](WEFT.md#4-source-files-and-items)).
 
 ## Which files are checked together
 

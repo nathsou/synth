@@ -8,9 +8,9 @@ module top<CLKS_PER_BIT: int = 217>(in clk: clock, in rx: bool, in sw1: bool, ou
     let rst = reset_sync(sw1) @clk;
     default domain sys { clock: clk, async_reset: rst }
 
-    inst rx_u = uart_rx<CLKS_PER_BIT: CLKS_PER_BIT>(rx: rx);
+    inst rx_u = uart_rx<CLKS_PER_BIT>(rx: rx);
     inst queue = fifo<T: uint<8>, DEPTH: 64>(push: rx_u.valid, data: rx_u.byte);
-    inst tx_u = uart_tx<CLKS_PER_BIT: CLKS_PER_BIT>();
+    inst tx_u = uart_tx<CLKS_PER_BIT>();
 
     // `pop` asks for the next byte; it is on `queue.head` one cycle later.
     reg loaded: bool = false;

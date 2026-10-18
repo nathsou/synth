@@ -233,6 +233,12 @@ functions; `CamelCase` for structs, enums and variants; `UPPER_CASE` for
 constants and value generics (extern modules keep their Verilog parameter
 names).
 
+**Layout.** `synth fmt` (and the language server's formatting) indents by four
+spaces per open bracket, with one more level for the continuation of a
+statement, and aligns the port names of a port list written one per line
+(`in  start: bool,` above `out tx: bool,`). It changes only layout, never the
+code on a line.
+
 **Scopes.** Items are visible everywhere. Module-level declarations (§7.3) are
 visible throughout their module body, before and after the declaration.
 Declarations inside a block (`let`, `var`, loop variables, and declarations
@@ -646,7 +652,7 @@ A trailing comma is allowed after the last port.
 
 | Declaration | Meaning |
 |---|---|
-| `const NAME[: T] = expr;` | A compile-time constant |
+| `const NAME[: T] = expr;` | A compile-time constant; T is a hardware type, `int` or `string` |
 | `let name[: T] [@d] = expr;` | A named combinational value |
 | `wire name: T [@d];` | A combinational signal, driven by assignments (§7.6) |
 | `reg name: T [@d] = expr;` | A register with a reset value (§9) |
@@ -1152,10 +1158,13 @@ module fifo<T: type, DEPTH: int = 16>(
 ) { … }
 
 inst q = fifo<T: uint<8>, DEPTH: 64>(push: p, data: d, pop: r);
+inst tick = divider<25_000_000>();   // one parameter: the name is optional
 ```
 
 Generic parameters have kind `int`, `bool`, `string` or `type`, and may have a
-default. Arguments are given by name and must be compile-time constants.
+default. Arguments are given by name and must be compile-time constants. A
+module or function with a single generic parameter may take its argument
+without the name: `divider<25_000_000>()` is `divider<N: 25_000_000>()`.
 
 Generic modules and functions are checked for each set of arguments they are
 used with, as C++ templates are; errors show the instantiation chain. Items
@@ -1491,12 +1500,12 @@ struct      = "struct" ident "{" field { "," field } [ "," ] "}" ;
 field       = ident ":" type ;
 enum        = "enum" ident [ ":" type ] "{" variant { "," variant } [ "," ] "}" ;
 variant     = ident [ "=" expr ] ;
-const_decl  = "const" ident [ ":" type ] "=" expr ";" ;
+const_decl  = "const" ident [ ":" ( type | "int" | "string" ) ] "=" expr ";" ;
 
 generics    = "<" generic { "," generic } [ "," ] ">" ;
 generic     = ident ":" ( "int" | "bool" | "string" | "type" ) [ "=" expr ] ;
 gen_args    = "<" gen_arg { "," gen_arg } [ "," ] ">" ;
-gen_arg     = ident ":" ( type | expr ) ;
+gen_arg     = [ ident ":" ] ( type | expr ) ;   (* the name only when a single parameter *)
 
 port        = { attribute }
               ( ( "in" | "out" ) ident ":" type [ dom ] [ "=" expr ]
@@ -1561,8 +1570,9 @@ literal     = int_lit | "true" | "false" | string ;
 
 Struct literals are not allowed directly in `if`, `match` and `for` headers
 (parenthesize them), as in Rust. A name followed by `<` starts generic
-arguments only when the next two tokens are an identifier and `:`; otherwise
-`<` is a comparison. `uint`, `sint` and `index` are keywords, so `uint<8>(x)` is
+arguments when what follows parses as `gen_args` and is followed by `(`, or
+when the next two tokens are an identifier and `:`; otherwise `<` is a
+comparison. `uint`, `sint` and `index` are keywords, so `uint<8>(x)` is
 unambiguous.
 
 ---

@@ -1,0 +1,10 @@
+diff --git a/crates/arch-ice40/src/synth.rs b/crates/arch-ice40/src/synth.rs
+index 1a878c4..63fa922 100644
+--- a/crates/arch-ice40/src/synth.rs
++++ b/crates/arch-ice40/src/synth.rs
+@@ -371 +371 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
+-            arc(c.cin, s, CHAIN_NET + i as u32 * CHAIN_BIT + CHAIN_SUM);
++            arc(c.cin, s, CHAIN_NET + CHAIN_ENTRY + i as u32 * CHAIN_BIT + CHAIN_SUM);
+@@ -374 +374 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
+-            arc(c.cin, co, CHAIN_NET + w as u32 * CHAIN_BIT);
++            arc(c.cin, co, CHAIN_NET + CHAIN_ENTRY + w as u32 * CHAIN_BIT);

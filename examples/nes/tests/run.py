@@ -31,7 +31,20 @@ GROUPS = [
     "sprite_overflow_tests/*.nes",
     "dmc_dma_during_read4/*.nes",
     "sprdma_and_dmc_dma/*.nes",
+    "vbl_nmi_timing/*.nes",
+    "branch_timing_tests/*.nes",
+    "blargg_apu_2005.07.30/*.nes",
+    "blargg_ppu_tests_2005.09.15b/*.nes",
+    "cpu_exec_space/*.nes",
+    "oam_read/*.nes",
+    "oam_stress/*.nes",
+    "mmc3_test/[1-5]-*.nes",
+    "cpu_timing_test6/*.nes",
 ]
+
+# Diagnostics that predate the $6000 protocol report results in other ways.
+LEGACY_RESULT = {"sprite_hit_tests_2005.10.05", "sprite_overflow_tests", "vbl_nmi_timing", "branch_timing_tests"}
+CONSOLE_CODE = {"blargg_apu_2005.07.30", "blargg_ppu_tests_2005.09.15b"}
 
 
 def main():
@@ -62,8 +75,14 @@ def main():
     def run(path):
         start = time.monotonic()
         mode = ["--test"]
-        if path.parent.name in {"sprite_hit_tests_2005.10.05", "sprite_overflow_tests"}:
+        if path.parent.name in LEGACY_RESULT:
             mode = ["--legacy-result", "f8"]
+        elif path.parent.name in CONSOLE_CODE:
+            mode = ["--console-code"]
+        elif path.parent.name == "cpu_timing_test6":
+            # Holding B at power-up selects official and undocumented opcodes.
+            mode = ["--input", str(Path(__file__).with_name("hold_b.txt")), "--console-pass", "PASSED",
+                    "--console-fail", "FAIL OP", "--console-fail", "UNKNOWN ERROR", "--console-fail", "BASIC TIMING WRONG"]
         elif path.parent.name == "dmc_dma_during_read4":
             mode = ["--console-test"]
             if path.name == "dma_2007_read.nes":

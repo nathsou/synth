@@ -10,8 +10,8 @@ const MESSAGE: [uint<8>; 14] = [
 
 /// PERIOD and CLKS_PER_BIT are in clock cycles (25 MHz on the Go Board).
 module top<PERIOD: int = 25_000_000, CLKS_PER_BIT: int = 217>(in clk: clock, out tx: bool, out led: uint<4>) {
-    inst second = divider<N: PERIOD>();
-    inst uart = uart_tx<CLKS_PER_BIT: CLKS_PER_BIT>(); // 25 MHz / 115200
+    inst second = divider<PERIOD>();
+    inst uart = uart_tx<CLKS_PER_BIT>(); // 25 MHz / 115200
 
     reg sending: bool = false;
     reg pos: index<14> = 0;
