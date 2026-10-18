@@ -898,86 +898,27 @@ impl<'a> Annealer<'a> {
                 if (nx, ny) == (x as usize, y as usize) {
                     return None;
                 }
-                // Target slots must be free, belong to this chain or hold
-                // single logic cells, which move to the slots the chain leaves.
-                let target: Vec<usize> =
-                    (0..cells.len()).map(|i| self.slot(nx, ny + i / 8, i % 8)).collect();
-                let mut displaced: Vec<(CellId, (i16, i16, u8))> = Vec::new();
-                for &s in &target {
-                    if let Some(o) = self.lc_occ[s]
-                        && !cells.contains(&o)
-                    {
-                        if !matches!(self.units[self.cell_unit[&o]], Unit::Lc(_)) {
+                // A chain in the way swaps places with this one.
+                let mut others: Vec<usize> = (0..cells.len())
+                    .filter_map(|i| self.lc_occ[self.slot(nx, ny + i / 8, i % 8)])
+                    .map(|o| self.cell_unit[&o])
+                    .filter(|&v| v != u && matches!(self.units[v], Unit::Chain(_)))
+                    .collect();
+                others.sort_unstable();
+                others.dedup();
+                let mut moves = vec![(cells, nx, ny)];
+                match others[..] {
+                    [] => {}
+                    [v] => {
+                        let Unit::Chain(other) = self.units[v].clone() else { unreachable!() };
+                        if y as usize + other.len().div_ceil(8) > self.height + 1 {
                             return None;
                         }
-                        displaced.push((o, self.pos[&o]));
+                        moves.push((other, x as usize, y as usize));
                     }
+                    _ => return None,
                 }
-                let old: Vec<(i16, i16, u8)> = cells.iter().map(|c| self.pos[c]).collect();
-                let slot_of = |sa: &Self, p: (i16, i16, u8)| {
-                    sa.slot(p.0 as usize, p.1 as usize, p.2 as usize)
-                };
-                for &(_, p) in &displaced {
-                    let s = slot_of(self, p);
-                    self.lc_occ[s] = None;
-                }
-                for (i, &c) in cells.iter().enumerate() {
-                    let s = slot_of(self, old[i]);
-                    if self.lc_occ[s] == Some(c) {
-                        self.lc_occ[s] = None;
-                    }
-                }
-                for (i, &c) in cells.iter().enumerate() {
-                    self.lc_occ[target[i]] = Some(c);
-                    self.pos.insert(c, (nx as i16, (ny + i / 8) as i16, (i % 8) as u8));
-                }
-                // Displaced cells fill the chain's old slots that are free now.
-                let vacated: Vec<(i16, i16, u8)> = old
-                    .iter()
-                    .copied()
-                    .filter(|&p| self.lc_occ[slot_of(self, p)].is_none())
-                    .collect();
-                for (k, &(o, _)) in displaced.iter().enumerate() {
-                    let p = vacated[k];
-                    let s = slot_of(self, p);
-                    self.lc_occ[s] = Some(o);
-                    self.pos.insert(o, p);
-                }
-                let mut touched: Vec<(usize, usize)> = (0..tiles).map(|t| (nx, ny + t)).collect();
-                touched.extend(
-                    vacated.iter().take(displaced.len()).map(|p| (p.0 as usize, p.1 as usize)),
-                );
-                touched.sort_unstable();
-                touched.dedup();
-                let legal = touched.iter().all(|&(tx, ty)| self.tile_ok(tx, ty));
-                let moved: Vec<CellId> =
-                    cells.iter().copied().chain(displaced.iter().map(|d| d.0)).collect();
-                let accept = legal && {
-                    let d = self.delta(&moved, scratch);
-                    d <= 0.0 || self.rng.unit() < (-d / temp).exp()
-                };
-                if accept {
-                    self.commit(scratch);
-                } else {
-                    for p in vacated.iter().take(displaced.len()) {
-                        let s = slot_of(self, *p);
-                        self.lc_occ[s] = None;
-                    }
-                    for &s in &target {
-                        self.lc_occ[s] = None;
-                    }
-                    for (i, &c) in cells.iter().enumerate() {
-                        let s = slot_of(self, old[i]);
-                        self.lc_occ[s] = Some(c);
-                        self.pos.insert(c, old[i]);
-                    }
-                    for &(o, p) in &displaced {
-                        let s = slot_of(self, p);
-                        self.lc_occ[s] = Some(o);
-                        self.pos.insert(o, p);
-                    }
-                }
-                Some(accept)
+                self.move_chains(&moves, temp, scratch)
             }
             Unit::Ram(c) => {
                 if self.ram_bels.len() < 2 {
@@ -1015,6 +956,108 @@ impl<'a> Annealer<'a> {
                 Some(accept)
             }
         }
+    }
+
+    /// Moves carry chains to new anchors (column, bottom row), as one move
+    /// accepted or rejected by the annealing rule. Their target slots must
+    /// be free, belong to a moving chain or hold single logic cells, which
+    /// move to the slots the chains leave.
+    fn move_chains(
+        &mut self,
+        moves: &[(Vec<CellId>, usize, usize)],
+        temp: f64,
+        scratch: &mut Vec<(u32, f64)>,
+    ) -> Option<bool> {
+        let moving: Vec<CellId> = moves.iter().flat_map(|m| m.0.iter().copied()).collect();
+        let mut target: Vec<usize> = Vec::with_capacity(moving.len());
+        for (cells, nx, ny) in moves {
+            target.extend((0..cells.len()).map(|i| self.slot(*nx, ny + i / 8, i % 8)));
+        }
+        let mut sorted = target.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return None;
+        }
+        let mut displaced: Vec<(CellId, (i16, i16, u8))> = Vec::new();
+        for &s in &target {
+            if let Some(o) = self.lc_occ[s]
+                && !moving.contains(&o)
+            {
+                if !matches!(self.units[self.cell_unit[&o]], Unit::Lc(_)) {
+                    return None;
+                }
+                displaced.push((o, self.pos[&o]));
+            }
+        }
+        let old: Vec<(i16, i16, u8)> = moving.iter().map(|c| self.pos[c]).collect();
+        let slot_of =
+            |sa: &Self, p: (i16, i16, u8)| sa.slot(p.0 as usize, p.1 as usize, p.2 as usize);
+        let at = |s: usize, sa: &Self| {
+            let z = s % 8;
+            let y = (s / 8) % (sa.height + 2);
+            let x = s / 8 / (sa.height + 2);
+            (x as i16, y as i16, z as u8)
+        };
+        for &(_, p) in &displaced {
+            let s = slot_of(self, p);
+            self.lc_occ[s] = None;
+        }
+        for (i, &c) in moving.iter().enumerate() {
+            let s = slot_of(self, old[i]);
+            if self.lc_occ[s] == Some(c) {
+                self.lc_occ[s] = None;
+            }
+        }
+        for (i, &c) in moving.iter().enumerate() {
+            self.lc_occ[target[i]] = Some(c);
+            self.pos.insert(c, at(target[i], self));
+        }
+        // Displaced cells fill the chains' old slots that are free now.
+        let vacated: Vec<(i16, i16, u8)> =
+            old.iter().copied().filter(|&p| self.lc_occ[slot_of(self, p)].is_none()).collect();
+        for (k, &(o, _)) in displaced.iter().enumerate() {
+            let p = vacated[k];
+            let s = slot_of(self, p);
+            self.lc_occ[s] = Some(o);
+            self.pos.insert(o, p);
+        }
+        let mut touched: Vec<(usize, usize)> = target
+            .iter()
+            .map(|&s| at(s, self))
+            .chain(vacated.iter().take(displaced.len()).copied())
+            .map(|p| (p.0 as usize, p.1 as usize))
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        let legal = touched.iter().all(|&(tx, ty)| self.tile_ok(tx, ty));
+        let moved: Vec<CellId> =
+            moving.iter().copied().chain(displaced.iter().map(|d| d.0)).collect();
+        let accept = legal && {
+            let d = self.delta(&moved, scratch);
+            d <= 0.0 || self.rng.unit() < (-d / temp).exp()
+        };
+        if accept {
+            self.commit(scratch);
+        } else {
+            for p in vacated.iter().take(displaced.len()) {
+                let s = slot_of(self, *p);
+                self.lc_occ[s] = None;
+            }
+            for &s in &target {
+                self.lc_occ[s] = None;
+            }
+            for (i, &c) in moving.iter().enumerate() {
+                let s = slot_of(self, old[i]);
+                self.lc_occ[s] = Some(c);
+                self.pos.insert(c, old[i]);
+            }
+            for &(o, p) in &displaced {
+                let s = slot_of(self, p);
+                self.lc_occ[s] = Some(o);
+                self.pos.insert(o, p);
+            }
+        }
+        Some(accept)
     }
 
     fn anneal(&mut self, log: &mut Vec<String>) {
