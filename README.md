@@ -149,7 +149,7 @@ trail by 4 to 7%.
 
 ### Experimental native Artix-7 flow
 
-The Rust backend supports synthesis, slice/carry/RAM packing, placement,
+The Rust backend supports synthesis, slice/carry/RAM/DSP packing, placement,
 routing and configuration-frame generation:
 
 ```sh
@@ -166,7 +166,7 @@ for independent tests; the runtime reads the pinned CC0 device database.
 **Artix-7 has not reached iCE40 maturity or Yosys QoR parity.** Physical tests
 compare native frames/packets against Project X-Ray on 35T and 100T, but
 hardware behavior and timing closure remain unvalidated. Builds require the
-explicit timing override. DSP, LUTRAM, SRL, advanced clocks/I/O and incremental
+explicit timing override. Registered DSP modes, LUTRAM, SRL, advanced clocks/I/O and incremental
 checkpoints remain unsupported. See [the detailed status and validation
 report](docs/ARTIX7.md) for the supported XDC subset and remaining criteria.
 

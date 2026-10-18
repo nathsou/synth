@@ -351,9 +351,12 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
         p.slots.insert(c, (s, l));
     }
     for c in nl.live_cells() {
+        if nl.cell_kind(c) == "DSP48E1" {
+            crate::physical_dsp::validate(nl, c)?;
+        }
         if !is_lut(nl.cell_kind(c))
             && !is_ff(nl.cell_kind(c))
-            && !matches!(nl.cell_kind(c), "CARRY4" | "RAMB18E1" | "$input" | "$output")
+            && !matches!(nl.cell_kind(c), "CARRY4" | "RAMB18E1" | "DSP48E1" | "$input" | "$output")
         {
             return Err(format!(
                 "physical implementation of {} ({}) is not implemented",

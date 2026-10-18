@@ -110,7 +110,7 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
     if let Some(site) = pl.ports.get(&d.cell) {
         return site.node(db, "I");
     }
-    if let Some(site) = pl.rams.get(&d.cell) {
+    if let Some(site) = pl.rams.get(&d.cell).or_else(|| pl.dsps.get(&d.cell)) {
         let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name).replace(['[', ']'], "");
         return site.node(db, &pin);
     }
@@ -162,6 +162,12 @@ fn requests(
         }
         if let Some(site) = pl.rams.get(&c) {
             for (pin, n) in crate::physical_bram::inputs(nl, c, p)? {
+                sinks.entry(n).or_default().insert(site.node(db, &pin)?);
+            }
+            continue;
+        }
+        if let Some(site) = pl.dsps.get(&c) {
+            for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site) {
                 sinks.entry(n).or_default().insert(site.node(db, &pin)?);
             }
             continue;
@@ -380,6 +386,9 @@ fn cell_features(
     }
     for (&c, site) in &pl.rams {
         f.extend(crate::physical_bram::features(db, nl, c, site)?);
+    }
+    for (&c, site) in &pl.dsps {
+        f.extend(crate::physical_dsp::features(db, nl, c, site)?);
     }
     for site in pl.clocks.values() {
         let t = &db.tiles[site.tile];

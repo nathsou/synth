@@ -92,6 +92,11 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     opt::clean(&mut m)?;
     dff::extract_controls(&mut m);
     opt::clean(&mut m)?;
+    let dsps = crate::dsp::map(&mut m);
+    if dsps != 0 {
+        log.push(format!("{dsps} DSP48E1 multiplier blocks"));
+        opt::clean(&mut m)?;
+    }
     let mut net = synth_logic::lower::lower(&m, &Default::default())?;
     synth_logic::ff::legalize(
         &mut net,
@@ -115,7 +120,9 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
 }
 
 // Relative mapping costs, not device STA or an Fmax prediction. Keep paths
-// through hard carries connected in the mapper's timing graph.
+// through hard carries and unregistered multipliers connected in the mapper's
+// timing graph. A DSP multiply costs eight LUT levels here; this is a relative
+// optimization weight, not a speed-grade characterization.
 fn chain_timing(net: &LogicNet) -> lutmap::Timing {
     let mut t = lutmap::Timing::default();
     for c in &net.carries {
@@ -143,6 +150,36 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
         }
         if let Some(to) = c.cout {
             t.arcs.push(lutmap::BoxArc { from: c.cin, to: to as usize, delay: 20 + w as u32 * 5 });
+        }
+    }
+    for instance in &net.instances {
+        if instance.module != "DSP48E1"
+            || !crate::dsp::REGISTERS.iter().all(|reg| {
+                instance
+                    .params
+                    .iter()
+                    .any(|(k, v)| k == reg && matches!(v, Attr::Const(v) if v.to_u64() == Some(0)))
+            })
+        {
+            continue;
+        }
+        let Some((_, _, outputs)) = instance.conns.iter().find(|(k, _, _)| k == "P") else {
+            continue;
+        };
+        for (pin, _, inputs) in &instance.conns {
+            let width = match pin.as_str() {
+                "A" => 25,
+                "B" => 18,
+                _ => continue,
+            };
+            for (i, input) in inputs.iter().take(width).enumerate() {
+                let Bit::Snk(from) = *input else { continue };
+                for output in outputs.iter().skip(i) {
+                    if let Bit::Src(to) = *output {
+                        t.arcs.push(lutmap::BoxArc { from, to: to as usize, delay: 800 });
+                    }
+                }
+            }
         }
     }
     t

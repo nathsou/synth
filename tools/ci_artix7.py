@@ -74,6 +74,40 @@ def main():
         assert "PASS controls" in (out / "controls.sim.log").read_text()
         print("PASS controls", flush=True)
 
+        # Independent DSP48E1 model: signed extrema, truncation and partial
+        # products crossing both the 25-bit A and 18-bit B multiplier widths.
+        for a,b,y in [(9,9,18),(24,17,48),(25,18,48),(25,25,64),(33,19,64),(64,64,64),(32,32,17)]:
+            for signed in [0,1]:
+                name=f"multiply-{a}-{b}-{y}-{signed}"
+                net=synth(SRC / "multiplier.v", "multiplier", out / name,
+                          [f"A={a}",f"B={b}",f"Y={y}",f"SIGNED={signed}"])
+                assert "DSP48E1" in net.read_text(), name
+                tb=out / f"{name}.tb.v"
+                tb.write_text(f'''module tb;
+                  reg [{a-1}:0] a=0; reg [{b-1}:0] b=0;
+                  wire [{y-1}:0] refy,got;
+                  multiplier #(.A({a}),.B({b}),.Y({y}),.SIGNED({signed})) refdut(a,b,refy);
+                  multiplier_net dut(a,b,got);
+                  integer i;
+                  initial begin
+                    for(i=0;i<2000;i=i+1) begin
+                      case(i)
+                        0: begin a=0; b=0; end
+                        1: begin a=-1; b=-1; end
+                        2: begin a=1; b=-1; end
+                        3: begin a=1<<({a}-1); b=1<<({b}-1); end
+                        default: begin a={{$random,$random}}; b={{$random,$random}}; end
+                      endcase
+                      #10; if(got!==refy) $fatal(1,"multiply case %d: %h * %h: %h != %h",i,a,b,got,refy);
+                    end
+                    $display("PASS multiplier"); $finish;
+                  end
+                endmodule''')
+                run(["iverilog","-g2012","-s","tb","-o",out/f"{name}.vvp",tb,SRC/"multiplier.v",net,cells],out/f"{name}.compile.log")
+                run(["vvp",out/f"{name}.vvp"],out/f"{name}.sim.log")
+                assert "PASS multiplier" in (out/f"{name}.sim.log").read_text()
+                print(f"PASS {name}",flush=True)
+
         # All BRAM modes, parity, replication, bank selection, offsets, masked
         # writes, falling edges, read enables, initialization and read/write collision.
         for w, d, offset, neg, mask in [(1, 1024, 0, 0, 0), (2, 512, 3, 1, 0),

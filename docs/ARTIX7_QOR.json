@@ -2,7 +2,8 @@
   "versions": {
     "yosys": "Yosys 0.52 (git sha1 fee39a3284c90249e1d9684cf6944ffbbcbb8f90)",
     "synth": "synth 0.1.0",
-    "revision": "a1f312d-dirty"
+    "revision": "90ca8ae-dirty",
+    "synth_sha256": "fb11534523ce9d903b3d3f46f06b2b1553c57563fb88ed73ef0521ce5160755b"
   },
   "designs": [
     {
@@ -10,8 +11,8 @@
       "sources": {
         "tests/designs/euler/p014.v": "f4ab4b0c1c0d0d4e5483d143a632d60dca91efb3468a7eabe941f3231fae90d0"
       },
-      "synth_seconds": 16.957,
-      "yosys_seconds": 34.385,
+      "synth_seconds": 5.049,
+      "yosys_seconds": 16.074,
       "synth": {
         "lut": 2974,
         "ff": 2214,
@@ -60,8 +61,8 @@
         "tests/designs/euler/p025.v": "d6a3c60186cb978b86e8ec07f00e54272098b81649b0bb2263dbbf9167dee5ef",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 0.469,
-      "yosys_seconds": 8.084,
+      "synth_seconds": 0.416,
+      "yosys_seconds": 8.229,
       "synth": {
         "lut": 549,
         "ff": 187,
@@ -106,8 +107,8 @@
       "sources": {
         "tests/designs/euler/p031.v": "963e665d179db067e0fb355a1998a2bb9952050887577fb9922946345068e362"
       },
-      "synth_seconds": 0.116,
-      "yosys_seconds": 14.074,
+      "synth_seconds": 0.065,
+      "yosys_seconds": 3.993,
       "synth": {
         "lut": 198,
         "ff": 402,
@@ -152,8 +153,8 @@
       "sources": {
         "tests/designs/euler/p043.v": "156f52c09927aaf5dbf44d206023142a380154c0915a14f08fd5144b25a0cba3"
       },
-      "synth_seconds": 17.71,
-      "yosys_seconds": 104.126,
+      "synth_seconds": 11.427,
+      "yosys_seconds": 104.793,
       "synth": {
         "lut": 3846,
         "ff": 1497,
@@ -199,24 +200,25 @@
       "sources": {
         "tests/designs/euler/p048.v": "4d8fcc1d2b45cb12e96332cde97eb39996351dfb4c5d374ebc80dac9ccf4c1a5"
       },
-      "synth_seconds": 5.187,
-      "yosys_seconds": 8.452,
+      "synth_seconds": 5.935,
+      "yosys_seconds": 19.461,
       "synth": {
-        "lut": 4054,
+        "lut": 3582,
         "ff": 2412,
-        "carry4": 756,
+        "carry4": 724,
         "bram18": 0,
-        "dsp48": 0,
+        "dsp48": 13,
         "cells": {
-          "CARRY4": 756,
+          "CARRY4": 724,
+          "DSP48E1": 13,
           "FDRE": 2397,
           "FDSE": 15,
           "LUT1": 137,
-          "LUT2": 1314,
-          "LUT3": 387,
-          "LUT4": 345,
-          "LUT5": 1084,
-          "LUT6": 787
+          "LUT2": 1287,
+          "LUT3": 304,
+          "LUT4": 287,
+          "LUT5": 1041,
+          "LUT6": 526
         }
       },
       "yosys": {
@@ -248,8 +250,8 @@
         "tests/designs/euler/p057.v": "97bb47dd27ca609fd85a0d43250dd8afbec768f24a8516cfcd02c9dac0dce22f",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 0.706,
-      "yosys_seconds": 9.78,
+      "synth_seconds": 1.235,
+      "yosys_seconds": 12.69,
       "synth": {
         "lut": 1081,
         "ff": 857,
@@ -297,8 +299,8 @@
       "sources": {
         "tests/designs/euler/p058.v": "aaf3cc64b404a36366973e84bd1e9ed66968fdb4a8263041773b603010769687"
       },
-      "synth_seconds": 9.571,
-      "yosys_seconds": 27.798,
+      "synth_seconds": 17.89,
+      "yosys_seconds": 57.759,
       "synth": {
         "lut": 4044,
         "ff": 2158,
@@ -345,8 +347,8 @@
       "sources": {
         "tests/designs/euler/p092.v": "7b55fa9731e53abbc3ca173c54dddca8b1a1826cd47fd8c51a35ee1d53412c45"
       },
-      "synth_seconds": 1.07,
-      "yosys_seconds": 14.205,
+      "synth_seconds": 1.785,
+      "yosys_seconds": 14.484,
       "synth": {
         "lut": 934,
         "ff": 2807,
@@ -395,24 +397,25 @@
       "sources": {
         "tests/designs/euler/p097.v": "53d5d0f77c5015e07c63373a2c34e4e3918872254ddd7d415b4086ac66af2816"
       },
-      "synth_seconds": 1.292,
-      "yosys_seconds": 5.438,
+      "synth_seconds": 0.618,
+      "yosys_seconds": 7.997,
       "synth": {
-        "lut": 634,
+        "lut": 600,
         "ff": 445,
-        "carry4": 132,
+        "carry4": 126,
         "bram18": 0,
-        "dsp48": 0,
+        "dsp48": 3,
         "cells": {
-          "CARRY4": 132,
+          "CARRY4": 126,
+          "DSP48E1": 3,
           "FDRE": 436,
           "FDSE": 9,
           "LUT1": 23,
-          "LUT2": 235,
-          "LUT3": 19,
-          "LUT4": 58,
-          "LUT5": 206,
-          "LUT6": 93
+          "LUT2": 224,
+          "LUT3": 13,
+          "LUT4": 57,
+          "LUT5": 203,
+          "LUT6": 80
         }
       },
       "yosys": {
@@ -438,11 +441,5 @@
         }
       }
     }
-  ],
-  "measurement_date": "2026-10-18",
-  "scope": "Native synthesis only; no placement, routing, bitstreams or Fmax.",
-  "omitted_cases": {
-    "euler10": "Yosys mapping was manually stopped after more than 10 minutes without a completed result. No comparable QoR result is reported."
-  },
-  "runtime_note": "Single wall-clock measurements on a shared development machine with other validation work running; not a controlled speed benchmark."
+  ]
 }

@@ -2,8 +2,10 @@
 pub mod bitstream;
 mod bram;
 pub mod device;
+mod dsp;
 pub mod fasm;
 mod json;
+mod physical_dsp;
 pub mod synth;
 pub mod xdc;
 

@@ -25,6 +25,19 @@ impl synth_rtlil::PrimitiveLibrary for Library {
                 "S" | "DI" | "CI" | "CYINIT" => Some(Input),
                 _ => None,
             },
+            "DSP48E1" => match port {
+                "P" | "ACOUT" | "BCOUT" | "CARRYCASCOUT" | "CARRYOUT" | "MULTSIGNOUT"
+                | "OVERFLOW" | "PATTERNBDETECT" | "PATTERNDETECT" | "PCOUT" | "UNDERFLOW" => {
+                    Some(Output)
+                }
+                "A" | "ACIN" | "ALUMODE" | "B" | "BCIN" | "C" | "CARRYCASCIN" | "CARRYIN"
+                | "CARRYINSEL" | "CEA1" | "CEA2" | "CEAD" | "CEALUMODE" | "CEB1" | "CEB2"
+                | "CEC" | "CECARRYIN" | "CECTRL" | "CED" | "CEINMODE" | "CEM" | "CEP" | "CLK"
+                | "D" | "INMODE" | "MULTSIGNIN" | "OPMODE" | "PCIN" | "RSTA" | "RSTALLCARRYIN"
+                | "RSTALUMODE" | "RSTB" | "RSTC" | "RSTCTRL" | "RSTD" | "RSTINMODE" | "RSTM"
+                | "RSTP" => Some(Input),
+                _ => None,
+            },
             "RAMB18E1" => match port {
                 "DOADO" | "DOBDO" | "DOPADOP" | "DOPBDOP" => Some(Output),
                 "ADDRARDADDR" | "ADDRBWRADDR" | "CLKARDCLK" | "CLKBWRCLK" | "DIADI" | "DIBDI"

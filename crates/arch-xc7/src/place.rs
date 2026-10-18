@@ -40,6 +40,7 @@ pub struct Placement {
     pub ports: BTreeMap<CellId, Site>,
     pub clocks: BTreeMap<synth_netlist::NetId, Site>,
     pub rams: BTreeMap<CellId, Site>,
+    pub dsps: BTreeMap<CellId, Site>,
     pub hpwl: f64,
 }
 fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> {
@@ -252,37 +253,46 @@ pub fn place(
         }
     }
     let hpwl = (0..nets.len()).map(|i| cost(i, &loc)).sum();
-    let ram_sites = sites(db, |k| k == "RAMB18E1" || k == "FIFO18E1")?;
     let mut rams = BTreeMap::new();
-    let mut used_rams = BTreeSet::new();
-    for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == "RAMB18E1") {
-        crate::physical_bram::validate(nl, c)?;
-        let neighbors: Vec<_> = nl.cells[c]
-            .pins
-            .iter()
-            .filter_map(|p| p.net)
-            .flat_map(|n| nl.nets[n].driver.iter().chain(&nl.nets[n].users))
-            .filter_map(|pin| {
-                p.slots
-                    .get(&pin.cell)
-                    .map(|&(s, _)| &db.tiles[all[loc[s]].tile])
-                    .or_else(|| ports.get(&pin.cell).map(|s| &db.tiles[s.tile]))
-            })
-            .collect();
-        let (i, site) = ram_sites
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !used_rams.contains(i))
-            .min_by_key(|(_, s)| {
-                let t = &db.tiles[s.tile];
-                neighbors
-                    .iter()
-                    .map(|n| i64::from((t.x - n.x).abs()) + i64::from((t.y - n.y).abs()))
-                    .sum::<i64>()
-            })
-            .ok_or("not enough RAMB18 sites")?;
-        used_rams.insert(i);
-        rams.insert(c, site.clone());
+    let mut dsps = BTreeMap::new();
+    for (kind, placed) in [("RAMB18E1", &mut rams), ("DSP48E1", &mut dsps)] {
+        let hard_sites = sites(db, |k| {
+            if kind == "RAMB18E1" { k == "RAMB18E1" || k == "FIFO18E1" } else { k == "DSP48E1" }
+        })?;
+        let mut occupied = BTreeSet::new();
+        for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == kind) {
+            if kind == "RAMB18E1" {
+                crate::physical_bram::validate(nl, c)?;
+            } else {
+                crate::physical_dsp::validate(nl, c)?;
+            }
+            let neighbors: Vec<_> = nl.cells[c]
+                .pins
+                .iter()
+                .filter_map(|p| p.net)
+                .flat_map(|n| nl.nets[n].driver.iter().chain(&nl.nets[n].users))
+                .filter_map(|pin| {
+                    p.slots
+                        .get(&pin.cell)
+                        .map(|&(s, _)| &db.tiles[all[loc[s]].tile])
+                        .or_else(|| ports.get(&pin.cell).map(|s| &db.tiles[s.tile]))
+                })
+                .collect();
+            let (i, site) = hard_sites
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !occupied.contains(i))
+                .min_by_key(|(_, s)| {
+                    let t = &db.tiles[s.tile];
+                    neighbors
+                        .iter()
+                        .map(|n| i64::from((t.x - n.x).abs()) + i64::from((t.y - n.y).abs()))
+                        .sum::<i64>()
+                })
+                .ok_or_else(|| format!("not enough {kind} sites"))?;
+            occupied.insert(i);
+            placed.insert(c, site.clone());
+        }
     }
     let mut clock_nets: BTreeSet<_> =
         p.slices.iter().filter_map(|s| s.controls.as_ref().map(|c| c.clock)).collect();
@@ -323,6 +333,7 @@ pub fn place(
         ports,
         clocks,
         rams,
+        dsps,
         hpwl,
     })
 }

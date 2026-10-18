@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -49,6 +50,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     versions = {"yosys": subprocess.check_output(["yosys", "-V"], text=True).strip(),
                 "synth": subprocess.check_output([SYNTH, "version"], text=True).strip(),
+                "synth_sha256": hashlib.sha256(Path(shutil.which(SYNTH) or SYNTH).read_bytes()).hexdigest(),
                 "revision": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=ROOT, text=True).strip()}
     report = {"versions": versions, "designs": []}
     print(json.dumps(versions), flush=True)

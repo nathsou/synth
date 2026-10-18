@@ -42,6 +42,18 @@ fn evaluate(nl: &Netlist, inputs: &[(&str, u64)]) -> FxHashMap<String, u64> {
                 let idx: usize = ins.iter().enumerate().map(|(i, &v)| (v as usize) << i).sum();
                 let init = nl.param(c, "INIT").and_then(Param::as_u64).unwrap();
                 vec![("O".into(), init >> idx & 1 == 1)]
+            } else if kind == "DSP48E1" {
+                let bus = |p: &str, w: usize| -> Option<u64> {
+                    (0..w)
+                        .map(|i| get(&format!("{p}[{i}]")).map(|v| (v as u64) << i))
+                        .collect::<Option<Vec<_>>>()
+                        .map(|v| v.into_iter().sum())
+                };
+                let (Some(a), Some(b)) = (bus("A", 25), bus("B", 18)) else { continue };
+                let a = ((a << 39) as i64) >> 39;
+                let b = ((b << 46) as i64) >> 46;
+                let p = (a * b) as u64;
+                (0..48).map(|i| (format!("P[{i}]"), p >> i & 1 != 0)).collect()
             } else if kind == "CARRY4" {
                 let (Some(ci), Some(cyinit)) = (get("CI"), get("CYINIT")) else { continue };
                 let ins: Option<Vec<_>> = (0..4)
@@ -172,4 +184,66 @@ fn packing_enforces_shared_control_sets() {
             assert_eq!(matches!(nl.cell_kind(*ff), "FDRE" | "FDSE"), ctrl.synchronous);
         }
     }
+}
+
+#[test]
+fn dsp_products_preserve_signed_extension_and_truncation() {
+    for (aw, bw, yw) in [
+        (9, 9, 18),
+        (24, 17, 48),
+        (25, 18, 48),
+        (25, 25, 64),
+        (33, 19, 64),
+        (64, 64, 64),
+        (32, 32, 17),
+    ] {
+        for signed in [false, true] {
+            let sign = if signed { "signed" } else { "" };
+            let src = format!(
+                "module top(input {sign} [{}:0] a,input {sign} [{}:0] b,output [{}:0] y); assign y=a*b; endmodule",
+                aw - 1,
+                bw - 1,
+                yw - 1
+            );
+            let mut nl = synth(&src);
+            assert!(nl.live_cells().any(|c| nl.cell_kind(c) == "DSP48E1"));
+            arch_xc7::pack::pack(&mut nl).unwrap();
+            let mask = |w: u32| if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+            let extend =
+                |v: u64, w: u32| if signed && v >> (w - 1) & 1 != 0 { v | !mask(w) } else { v };
+            for i in 0..128u64 {
+                let a = (i.wrapping_mul(0x9e3779b97f4a7c15) ^ u64::MAX) & mask(aw);
+                let b = (i.wrapping_mul(0xd1b54a32d192ed03) ^ u64::MAX) & mask(bw);
+                assert_eq!(
+                    evaluate(&nl, &[("a", a), ("b", b)])["y"],
+                    extend(a, aw).wrapping_mul(extend(b, bw)) & mask(yw),
+                    "{aw}x{bw}->{yw} signed={signed} vector={i}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn dsp_packing_rejects_unsupported_modes_and_controls() {
+    let original = synth("module top(input [11:0] a,b,output [23:0] y); assign y=a*b; endmodule");
+    let dsp = original.live_cells().find(|&c| original.cell_kind(c) == "DSP48E1").unwrap();
+    for (key, value) in [
+        ("AREG", Param::Int(1)),
+        ("PREG", Param::Int(1)),
+        ("IS_OPMODE_INVERTED", Param::Int(1)),
+        ("USE_MULT", Param::Int(0)),
+    ] {
+        let mut nl = original.clone();
+        nl.set_param(dsp, key, value);
+        let error = arch_xc7::pack::pack(&mut nl).unwrap_err();
+        assert!(error.contains(key), "{error}");
+    }
+    let mut nl = original;
+    let dynamic = nl.pin_net(dsp, "A[0]").unwrap();
+    let index = nl.cells[dsp].pins.iter().position(|p| nl.str(p.name) == "OPMODE[0]").unwrap();
+    let pin = synth_netlist::PinRef { cell: dsp, pin: index as u32 };
+    nl.disconnect(pin);
+    nl.connect(pin, dynamic).unwrap();
+    assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("fixed multiplier control"));
 }

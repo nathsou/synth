@@ -33,6 +33,10 @@ The new `arch-xc7` crate emits:
   are supported. Same-clock transparency is implemented with bypass logic.
   Out-of-range writes are disabled rather than aliased into a valid word.
   Other memories fall back to registers and logic.
+- Combinational DSP48E1 multipliers, with signed/unsigned operand extension,
+  partial products for wider operands, and result truncation. Small or sparse
+  constant multipliers remain in logic. DSP registers, accumulators, preadders
+  and dedicated cascades are not implemented.
 
 An address-register absorption guard prevents changing asynchronous reads
 when writes use a different clock. Such reads remain asynchronous instead of
@@ -40,7 +44,7 @@ being updated only on the address clock.
 
 AIG optimization, structural choices, carry-aware LUT mapping, remapping and
 SAT-based don't-care optimization now live in `synth-logic::mapping`. Backends
-provide carry timing and emitted-netlist cost callbacks. The carry timing
+provide hard-block timing and emitted-netlist cost callbacks. The carry/DSP timing
 weights for Artix-7 are **mapping heuristics, not calibrated device delays**;
 the printed LUT-level delay is not an Fmax prediction.
 
@@ -70,9 +74,10 @@ Implemented components:
   use hundreds of MB, not the roadmap's tens-of-MB target.
 - Four LUT6 and four primary FF slots per slice, common clock/enable/reset
   legality, contiguous carry-chain macros, direct FF input bypasses, carry
-  output legalization, and RAMB18E1 TDP placement. The second FF bank, LUT5
-  sharing, RAMB36, DSP, SRL, LUTRAM and wide-mux packing are not implemented.
-- Deterministic seeded macro placement with HPWL annealing, RAM placement,
+  output legalization, RAMB18E1 TDP and combinational DSP48E1 placement. The
+  second FF bank, LUT5 sharing, RAMB36, SRL, LUTRAM and wide-mux packing are
+  not implemented. Unsupported DSP register/control modes fail explicitly.
+- Deterministic seeded macro placement with HPWL annealing, RAM/DSP placement,
   explicit package-pin placement, BUFG insertion and native PathFinder
   routing. Only configuration-backed pips and explicitly modeled site
   pass-throughs can be routed. Clock distribution enable bits are emitted.
@@ -117,7 +122,8 @@ Python dependencies are pinned in `tools/xc7-test-requirements.txt`.
 These are test dependencies only. See [THIRD_PARTY.md](../THIRD_PARTY.md).
 
 The suite implements an inverter, clocked counter, mixed reset/enable/clock
-edge registers, initialized block RAM, single-site boundary I/O, and optionally
+edge registers, initialized block RAM, paired DSP multipliers, single-site
+boundary I/O, and optionally
 Euler 31 on both 35T and 100T. For each routed design, independent X-Ray FASM
 assembly must match every native configuration frame. X-Ray's C++ packet
 writer generates a second bitstream, and its C++ decoder must recover the
@@ -125,9 +131,9 @@ same bits, including ECC, from both streams. Counter builds also check
 byte-for-byte repeatability and the timing-failure gate. `--full-luts`
 randomizes every LUT INIT in the fabric to exercise configuration addressing.
 Sources, XDC, FASM, bitstreams, frames and reports are retained. The latest
-local [physical validation report](ARTIX7_PHYSICAL.json) records 14 passing
+local [physical validation report](ARTIX7_PHYSICAL.json) records 16 passing
 checks, source/constraint hashes and independent tool revisions. The updated
-workspace passes 117 tests, warnings-denied Clippy and Rust 1.88 checks.
+workspace passes 119 tests, warnings-denied Clippy and Rust 1.88 checks.
 
 A 35T full-fabric run covered 1,044,018 enabled LUT INIT bits and all 5,408
 frames. The raw native startup/frame stream with CRC packets disabled also
@@ -135,7 +141,7 @@ matched `xc7frames2bit` byte-for-byte after synchronization. The regular
 suite uses CRC-enabled native streams. These checks establish configuration
 encoding agreement, **not functional correctness of the placed circuit**.
 There has been no hardware execution or independent vendor timing validation;
-No Vivado installer or validation runner was available in the development
+no Vivado installer or validation runner was available in the development
 environment. The CI job retains the generated artifacts for further validation.
 
 ## Validation
@@ -161,7 +167,11 @@ table inputs. Differential tests cover both clock edges, reset/enable
 priorities, asynchronous controls and initialization. RAM tests compare
 against Xilinx's model across all five width modes, parity, bank and column
 splits, read-port replication, masks, collision behavior, initial read values,
-address-register transparency and out-of-range writes.
+address-register transparency and out-of-range writes. Fourteen multiplier
+configurations cover signed/unsigned products, the 25-by-18 signed DSP boundary,
+multi-DSP products up to 64-by-64 bits, and truncated outputs. Each is compared
+against RTL using the independent Yosys DSP48E1 simulation model on 2,000
+directed/random input pairs, in addition to Rust integer-semantics checks.
 
 Seven Euler solvers (25, 31, 43, 48, 57, 92 and 97) are checked against their
 known answers and exact cycle counts. `--long` additionally enables Euler 10,
@@ -188,7 +198,7 @@ netlists, reports and single-run wall times are recorded. Wall times on a
 shared development machine are indicative, not a controlled speed benchmark.
 No placed area, routing success or Fmax is claimed.
 
-Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `a1f312d`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
+Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `90ca8ae`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
 
 | Design | LUTs incl. INV | FFs | CARRY4 | BRAM18 equivalents | DSP48 |
 |---|---:|---:|---:|---:|---:|
@@ -196,13 +206,13 @@ Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f9
 | Euler 25 | 549 / 543 | 187 / 187 | 180 / 143 | 0 / 0 | 0 / 0 |
 | Euler 31 | 198 / 297 | 402 / 404 | 65 / 54 | 6 / 6 | 0 / 0 |
 | Euler 43 | 3846 / 3404 | 1497 / 1517 | 460 / 320 | 0 / 0 | 0 / 0 |
-| Euler 48 | 4054 / 3336 | 2412 / 2438 | 756 / 731 | 0 / 0 | 0 / 13 |
+| Euler 48 | 3582 / 3336 | 2412 / 2438 | 724 / 731 | 0 / 0 | 13 / 13 |
 | Euler 57 | 1081 / 1070 | 857 / 1114 | 291 / 224 | 16 / 0 | 0 / 0 |
 | Euler 58 | 4044 / 4769 | 2158 / 2030 | 207 / 225 | 0 / 0 | 0 / 0 |
 | Euler 92 | 934 / 948 | 2807 / 2660 | 198 / 181 | 11 / 7 | 0 / 1 |
-| Euler 97 | 634 / 621 | 445 / 445 | 132 / 125 | 0 / 0 | 0 / 3 |
+| Euler 97 | 600 / 621 | 445 / 445 | 126 / 125 | 0 / 0 | 3 / 3 |
 
-LUT count is lower on four of nine designs, but five regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
+LUT count is lower on five of nine designs, but four regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
 
 Euler 10 was attempted but its Yosys mapping was stopped after more than ten minutes without a completed result. Its full gate-level simulation was also not completed (the initial run hit a five-minute timeout). It is omitted from the numerical comparison rather than assigned an estimated or zero result. The optional long simulation now has a 30-minute command limit.
 
@@ -226,7 +236,7 @@ The synthesis foundation passed formatting, Clippy with warnings denied, 107 wor
   alone cannot establish that the configured circuit implements the RTL.
 - Complete primitive/constraint coverage, device-capacity legality, compact
   database storage and incremental checkpoints.
-- Close the measured synthesis regressions, including DSP/LUTRAM/SRL mapping,
+- Close the measured synthesis regressions, including LUTRAM/SRL mapping,
   then compare matched physical flows and constraints against Yosys plus a
   reference backend. The present measurements do not meet QoR parity.
 
