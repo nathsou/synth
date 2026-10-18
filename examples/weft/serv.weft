@@ -17,7 +17,7 @@ extern module servant<memfile: string, memsize: int>(
 
 module top(in clk: clock, out led: uint<4>, out tx: bool) {
     // Reset for 16 cycles after configuration.
-    let por = power_on_reset<CYCLES: 16>() @clk;
+    let por = power_on_reset<16>() @clk;
     default domain sys { clock: clk, reset: por }
 
     inst soc = servant<memfile: "../go_board_serv/hello.hex", memsize: 4096>();

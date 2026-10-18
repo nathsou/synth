@@ -514,6 +514,55 @@ fn index_items<'a>(d: &mut Design<'a>, files: &[(FileId, &'a ast::File)]) {
     }
 }
 
+/// The generic parameter an argument binds: the one it names, or the only
+/// one for an unnamed argument. Reports the error otherwise.
+pub(crate) fn generic_param<'g>(
+    d: &mut Design<'_>,
+    generics: &'g [ast::Generic],
+    what: &str,
+    a: &ast::GenArg,
+) -> Option<&'g ast::Generic> {
+    let Some(name) = &a.name else {
+        if let [g] = generics {
+            return Some(g);
+        }
+        let mut dg = Diagnostic::error(
+            a.value.span(),
+            if generics.is_empty() {
+                format!("`{what}` takes no generic arguments")
+            } else {
+                format!("`{what}` has {} generic parameters: name this argument", generics.len())
+            },
+        )
+        .with_label("unnamed argument");
+        if let Some(g) = generics.first() {
+            dg = dg.with_help(format!(
+                "write `{}: ...`; only a single parameter can be given without its name",
+                g.name.name
+            ));
+        }
+        d.emit(dg);
+        return None;
+    };
+    let found = generics.iter().find(|g| g.name.name == name.name);
+    if found.is_none() {
+        let mut dg = Diagnostic::error(
+            name.span,
+            format!("`{what}` has no generic parameter `{}`", name.name),
+        )
+        .with_label("unknown parameter");
+        if let Some(s) = suggest(&name.name, generics.iter().map(|g| g.name.name.as_str())) {
+            dg = dg.with_help(format!("did you mean `{s}`?"));
+        } else if !generics.is_empty() {
+            let names: Vec<String> =
+                generics.iter().map(|g| format!("`{}`", g.name.name)).collect();
+            dg = dg.with_help(format!("its parameters are {}", names.join(", ")));
+        }
+        d.emit(dg);
+    }
+    found
+}
+
 /// Records items, checks names, resolves type definitions and picks the top.
 fn collect<'a>(
     d: &mut Design<'a>,
@@ -1190,27 +1239,11 @@ impl<'a> ModCx<'a> {
     ) -> R<()> {
         let mut caller = caller;
         for a in args {
-            let Some(g) = generics.iter().find(|g| g.name.name == a.name.name) else {
-                let mut dg = Diagnostic::error(
-                    a.name.span,
-                    format!("`{what}` has no generic parameter `{}`", a.name.name),
-                )
-                .with_label("unknown parameter");
-                if let Some(s) =
-                    suggest(&a.name.name, generics.iter().map(|g| g.name.name.as_str()))
-                {
-                    dg = dg.with_help(format!("did you mean `{s}`?"));
-                } else if !generics.is_empty() {
-                    let names: Vec<String> =
-                        generics.iter().map(|g| format!("`{}`", g.name.name)).collect();
-                    dg = dg.with_help(format!("its parameters are {}", names.join(", ")));
-                }
-                d.emit(dg);
-                continue;
-            };
+            let Some(g) = generic_param(d, generics, what, a) else { continue };
             if given.contains_key(&g.name.name) {
+                let sp = a.name.as_ref().map_or(a.value.span(), |n| n.span);
                 d.emit(
-                    Diagnostic::error(a.name.span, format!("`{}` is given twice", a.name.name))
+                    Diagnostic::error(sp, format!("`{}` is given twice", g.name.name))
                         .with_label("duplicate argument"),
                 );
                 continue;

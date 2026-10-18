@@ -289,6 +289,14 @@ function activate(context) {
     )
   );
   sub(
+    vscode.languages.registerDocumentFormattingEditProvider(sel, {
+      provideDocumentFormattingEdits: (doc, opts, token) =>
+        ask('textDocument/formatting', { textDocument: { uri: doc.uri.toString() }, options: opts }, token).then((es) =>
+          (es || []).map((e) => vscode.TextEdit.replace(range(e.range), e.newText))
+        ),
+    })
+  );
+  sub(
     vscode.languages.registerRenameProvider(sel, {
       prepareRename: (doc, p, token) =>
         ask('textDocument/prepareRename', docPos(doc, p), token).then((r) => {

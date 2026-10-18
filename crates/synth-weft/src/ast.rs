@@ -135,6 +135,8 @@ pub struct EnumDef {
 pub struct ConstDecl {
     pub name: Ident,
     pub ty: Option<TypeExpr>,
+    /// A compile-time type annotation (`int`, `string`), instead of `ty`.
+    pub kind: Option<(GenericKind, Span)>,
     pub value: Expr,
 }
 
@@ -169,8 +171,18 @@ pub enum GenArgValue {
 
 #[derive(Clone, Debug)]
 pub struct GenArg {
-    pub name: Ident,
+    /// `None` for a positional argument (only for a single parameter).
+    pub name: Option<Ident>,
     pub value: GenArgValue,
+}
+
+impl GenArgValue {
+    pub fn span(&self) -> Span {
+        match self {
+            GenArgValue::Type(t) => t.span,
+            GenArgValue::Expr(e) => e.span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

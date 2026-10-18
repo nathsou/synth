@@ -1,0 +1,40 @@
+{
+  "main_commit": "67504cb",
+  "baseline_commit": "b227bf4",
+  "mapping_rule": "distinct nonconstant boundary AIG nodes <= target LUT inputs (4)",
+  "target": "HX8K CB132; Go Board SERV uses HX1K VQ100",
+  "frequency_mhz": 200,
+  "timing": "carry-feedout-patched icetime with ICETIME_FEEDOUT=1",
+  "no_incremental_checkpoints": true,
+  "screening_workers": 2,
+  "binaries": {
+    "synth-baseline": "420a6bb58a6a8619b6080089f3fdf8d89e0d7ee8119e360198a6436a365b059e",
+    "synth-entry": "d53f1a997f774046cb601f80700ce32d45abc433a5bd34c2d3546c60605d2991",
+    "synth-entrydelay": "11fdebd7f910f54bf5a592bbf1efb22a09c49b5ddf75dd5134fea63865a54f52",
+    "synth-final": "2fd372023d1052ba074b0d474ff1e4166972aceb9b2106ef59954149b0b74a1c",
+    "synth-lutcarry": "4070519ae45118ec46e417802f0c566303fd009d39fcf3cda8c37d1c8b2f1019",
+    "synth-support": "c8e3e46218929c364d7930337773c9ba6056ac6a55e2df2640f42e605879e9cb",
+    "synth-timing": "09787cf11ebb271ba220fe0676dbdcc283c80fb8e211138d995cf3fbcd5774e6"
+  },
+  "implementation_commit": "8206015e42329a4b22153dfe521616b0f6f45239",
+  "new_study_builds": 164,
+  "reused_controls": 44,
+  "reference_toolchain": {
+    "icestorm_commit": "ee340bb2cec60e0d01948076537a9bb3d08aea26",
+    "rust": "1.88.0",
+    "yosys": "0.52 fee39a3",
+    "nextpnr": "0.7-1+b2",
+    "iverilog": "12.0",
+    "reference_notes": [
+      "icetime patched with repository carry-feedout patch and ICETIME_FEEDOUT=1",
+      "nextpnr binary relocated by replacing only its compiled chipdb directory string",
+      "Yosys RTLIL bridge removes $scopeinfo/$print metadata and splits internal vectors for the current synth reader",
+      "matched 200 MHz target; independent full PnR runs, no checkpoints",
+      "screening jobs run concurrently; screening wall times are not a controlled runtime comparison"
+    ]
+  },
+  "reused_control_source": {
+    "commit": "a1f312d9ff67e8147789877dbe06554a4cd85334",
+    "binary_sha256": "c2718be40739143e7b702e6ebcad1b8e97343635caaeb9e5cf9c76e0d67b8c27"
+  }
+}

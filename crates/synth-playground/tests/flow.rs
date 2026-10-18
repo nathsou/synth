@@ -8,6 +8,8 @@ fn request(ex: &Json) -> Json {
         .with("pcf", ex.at(&["pcf"]).clone())
         .with("part", ex.at(&["part"]).clone())
         .with("package", ex.at(&["package"]).clone())
+        // Less placement effort: the test checks the data, not its quality.
+        .with("effort", 0.3)
 }
 
 #[test]
