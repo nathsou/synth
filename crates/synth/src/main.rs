@@ -28,9 +28,13 @@ BUILD OPTIONS:
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
+              [--route-timing-rounds <n>]
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
+              --route-timing-rounds: reroute critical connections that many
+              times once routing is legal, keeping the best timed routing
+              (slower; helps congested designs slightly).
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -40,7 +44,7 @@ ELAB OPTIONS:
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--freq <MHz>] [--timing-allow-fail]
+              [--freq <MHz>] [--timing-allow-fail] [--route-timing-rounds <n>]
 ";
 
 fn main() -> ExitCode {
@@ -164,6 +168,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--effort",
             "--timing-weight",
             "--freq",
+            "--route-timing-rounds",
         ],
         &["--timing-allow-fail"],
     )?;
@@ -189,6 +194,11 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         place_effort: effort,
         timing_weight: timing_weight(&mut a)?,
         clocks,
+        route_timing_rounds: a
+            .value("--route-timing-rounds")
+            .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
+            .transpose()?
+            .unwrap_or(0),
     };
     let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
     finish_flow(&res, &mut a)
@@ -207,6 +217,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--effort",
             "--timing-weight",
             "--freq",
+            "--route-timing-rounds",
         ],
         &["--timing-allow-fail"],
     )?;
@@ -235,6 +246,11 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         place_effort: effort,
         timing_weight: timing_weight(&mut a)?,
         clocks,
+        route_timing_rounds: a
+            .value("--route-timing-rounds")
+            .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
+            .transpose()?
+            .unwrap_or(0),
     };
     let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
     finish_flow(&res, &mut a)

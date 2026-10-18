@@ -65,11 +65,16 @@ pub struct RouteOptions {
     pub bbox_margin: i16,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
-    /// Iterations between criticality updates (0: never).
+    /// Iterations between criticality updates while congested (0: never).
     pub retime_every: usize,
     /// Nets with a sink at least this critical are routed again after an
     /// update.
     pub reroute_criticality: f32,
+    /// Rounds of rerouting critical nets after a legal routing (each lets
+    /// them take other nets' nodes, which then negotiate anew).
+    pub timing_rounds: usize,
+    /// Iterations a timing round may take to become legal again.
+    pub timing_round_iterations: usize,
 }
 
 impl Default for RouteOptions {
@@ -85,8 +90,10 @@ impl Default for RouteOptions {
             delay_scale: 0.001,
             bbox_margin: 3,
             stall_iterations: 120,
-            retime_every: 4,
+            retime_every: 0,
             reroute_criticality: 0.95,
+            timing_rounds: 0,
+            timing_round_iterations: 20,
         }
     }
 }
@@ -181,7 +188,17 @@ pub fn route(
 /// Progress callback: iteration, nets routed in it, overused nodes.
 pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, &[usize]);
 /// Criticality update from the current routes.
-pub type Retime<'a> = &'a mut dyn FnMut(&[NetRoute]) -> Vec<Vec<f32>>;
+pub type Retime<'a> = &'a mut dyn FnMut(&[NetRoute]) -> Retimed;
+
+/// What [`RouteHooks::retime`] finds of a set of routes.
+#[derive(Debug, Clone, Default)]
+pub struct Retimed {
+    /// Sink criticalities, per net like [`NetRequest::criticality`].
+    pub criticality: Vec<Vec<f32>>,
+    /// Timing score of the routes (lower is better): of the legal routings
+    /// found, the one with the lowest score is returned.
+    pub score: f64,
+}
 
 /// What a caller can add to routing.
 #[derive(Default)]
@@ -193,10 +210,12 @@ pub struct RouteHooks<'a> {
     /// Called after every iteration with the iteration number, the number of
     /// nets routed in it and the overused nodes.
     pub progress: Option<Progress<'a>>,
-    /// Recomputes sink criticalities (per net, like
-    /// [`NetRequest::criticality`]) from the current routes; called every
-    /// [`RouteOptions::retime_every`] iterations. Nets with a critical sink
-    /// are then routed again even if uncongested.
+    /// Recomputes sink criticalities and a timing score from the current
+    /// routes; called every [`RouteOptions::retime_every`] iterations and on
+    /// every legal routing. Nets with a critical sink are then routed again
+    /// even if uncongested, for up to [`RouteOptions::timing_rounds`]
+    /// rounds after the first legal routing; the best scoring legal routing
+    /// is returned.
     pub retime: Option<Retime<'a>>,
 }
 
@@ -275,7 +294,7 @@ pub fn route_with(
     // again for congestion, so that persistent conflicts can detour.
     let mut margin = vec![opts.bbox_margin; nets.len()];
     let mut timing_rounds = 0;
-    let mut legal: Option<(Vec<NetRoute>, RouteStats)> = None;
+    let mut legal: Option<(Vec<NetRoute>, RouteStats, f64)> = None;
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
@@ -352,26 +371,36 @@ pub fn route_with(
         }
         if overused.is_empty() {
             stats.wire_nodes = routes.iter().map(|r| r.edges.len()).sum();
-            // A legal routing: with routed criticalities, try once or twice
-            // more for faster critical connections, keeping this one should
-            // that not become legal again.
-            let Some(retime) = hooks.retime.as_mut().filter(|_| timing_rounds < 2) else {
+            // A legal routing: with routed criticalities, try a few rounds
+            // more for faster critical connections, keeping the best timed
+            // legal routing.
+            let Some(retime) = hooks.retime.as_mut() else {
                 return Ok((routes, stats));
             };
-            timing_rounds += 1;
-            legal = Some((routes.clone(), stats.clone()));
-            crit = retime(&routes);
+            let r = retime(&routes);
+            if legal.as_ref().is_none_or(|l| r.score < l.2) {
+                legal = Some((routes.clone(), stats.clone(), r.score));
+            }
+            crit = r.criticality;
             to_route = (0..nets.len())
                 .filter(|&i| crit[i].iter().any(|&c| c >= opts.reroute_criticality))
                 .collect();
-            if to_route.is_empty() {
-                return Ok((routes, stats));
+            if timing_rounds >= opts.timing_rounds || to_route.is_empty() {
+                break;
             }
+            timing_rounds += 1;
             best_iter = iter;
+            // Critical nets may take others' nodes again, which then
+            // negotiate anew.
+            pres_fac = opts.present_factor;
             continue;
         }
         // No progress for a long while: give up (the caller may place again).
         if iter >= best_iter + opts.stall_iterations {
+            break;
+        }
+        // A timing round that does not become legal soon is abandoned.
+        if timing_rounds > 0 && iter >= best_iter + opts.timing_round_iterations {
             break;
         }
         for &k in &overused {
@@ -399,7 +428,7 @@ pub fn route_with(
             && iter % opts.retime_every == 0
             && let Some(retime) = hooks.retime.as_mut()
         {
-            crit = retime(&routes);
+            crit = retime(&routes).criticality;
             let mut listed = vec![false; nets.len()];
             to_route.iter().for_each(|&i| listed[i] = true);
             to_route.extend(
@@ -409,8 +438,8 @@ pub fn route_with(
             );
         }
     }
-    if let Some(l) = legal {
-        return Ok(l);
+    if let Some((routes, stats, _)) = legal {
+        return Ok((routes, stats));
     }
     let (nodes, nets) = best.unwrap_or_default();
     let overused_nodes = nodes.len();
@@ -701,6 +730,32 @@ mod tests {
         let (routes, _) = route_with(g, &nets, &RouteOptions::default(), hooks).unwrap();
         assert!(routes[0].edges.iter().all(|e| !blocked.contains(e)));
         assert_eq!(d[*routes[0].edges.last().unwrap() as usize], 2);
+    }
+
+    #[test]
+    fn best_timed_legal_routing_is_kept() {
+        let (o, d, dl, x, y, c) = grid(4, 4);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let nets = vec![NetRequest { source: 0, sinks: vec![15], criticality: vec![0.0] }];
+        // The first legal routing scores best: the timing round's routing,
+        // scored worse, is not returned.
+        let mut seen: Vec<Vec<u32>> = Vec::new();
+        let mut retime = |routes: &[NetRoute]| {
+            seen.push(routes[0].edges.clone());
+            Retimed { criticality: vec![vec![1.0]], score: seen.len() as f64 }
+        };
+        let hooks = RouteHooks { retime: Some(&mut retime), ..RouteHooks::default() };
+        let opts = RouteOptions { timing_rounds: 1, ..RouteOptions::default() };
+        let (routes, _) = route_with(g, &nets, &opts, hooks).unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(routes[0].edges, seen[0]);
     }
 
     /// Builds a graph with all nodes at one position from an edge list.

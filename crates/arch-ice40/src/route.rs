@@ -261,6 +261,7 @@ pub fn route(
     nl: &Netlist,
     placement: &Placement,
     clocks: &crate::timing::ClockConstraints,
+    timing_rounds: usize,
     log: &mut Vec<String>,
 ) -> Result<Routing, String> {
     let g = &arch.graph;
@@ -313,6 +314,8 @@ pub fn route(
         }
     }
     let mut requests = Vec::new();
+    // The request and sink node of each timing connection.
+    let mut conn_target: Vec<Option<(usize, u32)>> = vec![None; timing.conns.len()];
     // Logic cell of each logical LUT input node that is a sink.
     let mut logical_sink: FxHashMap<u32, CellId> = FxHashMap::default();
     let mut ids = Vec::new();
@@ -337,7 +340,11 @@ pub fn route(
             {
                 logical_sink.insert(node.raw(), u.cell);
             }
-            let c = timing.conn_to(u.cell, u.pin as usize).map_or(0.0, |k| crit[k]) as f32;
+            let conn = timing.conn_to(u.cell, u.pin as usize);
+            if let Some(k) = conn {
+                conn_target[k] = Some((requests.len(), node.raw()));
+            }
+            let c = conn.map_or(0.0, |k| crit[k]) as f32;
             match sinks.iter().position(|&s| s == node.raw()) {
                 Some(k) => criticality[k] = criticality[k].max(c),
                 None if node != source => {
@@ -354,7 +361,7 @@ pub fn route(
         requests.push(NetRequest { source: source.raw(), sinks, criticality });
         ids.push(n);
     }
-    let opts = RouteOptions { astar_cost_per_tile: 0.15, ..RouteOptions::default() };
+    let opts = RouteOptions { astar_cost_per_tile: 0.15, timing_rounds, ..RouteOptions::default() };
     let t0 = std::time::Instant::now();
     let trace = std::env::var("SYNTH_DEBUG").is_ok();
     let mut progress = |iter: usize, nets: usize, over: &[usize]| {
@@ -373,12 +380,62 @@ pub fn route(
             t0.elapsed().as_secs_f64()
         );
     };
+    // Criticalities from routed delays (as the final analysis computes them;
+    // estimates for what is not routed yet), scored by the worst excess
+    // over the clock targets.
+    let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
+        let at: Vec<FxHashMap<u32, f64>> = routes
+            .iter()
+            .zip(&requests)
+            .map(|(r, q)| crate::timing::routed_node_delays(arch, Some(q.source), &r.edges))
+            .collect();
+        let delays: Vec<f64> = (0..timing.conns.len())
+            .map(|k| match conn_target[k] {
+                Some((i, node)) => at[i].get(&node).copied().unwrap_or(est[k]),
+                None => est[k],
+            })
+            .collect();
+        // With the LUT input permutation the routes chose.
+        let mut lut_pins: FxHashMap<CellId, [u8; 4]> = FxHashMap::default();
+        for &e in routes.iter().flat_map(|r| &r.edges) {
+            if let Some((phys, logical)) = Arch::permutation(g.edge_pip[e as usize])
+                && let Some(&cell) = logical_sink.get(&g.edge_dst[e as usize])
+            {
+                lut_pins.entry(cell).or_insert([0, 1, 2, 3])[logical] = phys as u8;
+            }
+        }
+        let a =
+            crate::timing::TimingGraph::with_lut_pins(arch, nl, clocks, &lut_pins).analyse(&delays);
+        let mut criticality: Vec<Vec<f32>> =
+            requests.iter().map(|r| vec![0.0; r.sinks.len()]).collect();
+        for (k, t) in conn_target.iter().enumerate() {
+            if let Some((i, node)) = *t
+                && let Some(j) = requests[i].sinks.iter().position(|&s| s == node)
+            {
+                criticality[i][j] = criticality[i][j].max(a.criticality[k] as f32);
+            }
+        }
+        let score = a
+            .period
+            .iter()
+            .zip(&timing.clocks)
+            .map(|(p, c)| p - c.target_ps.unwrap_or(0.0))
+            .fold(f64::NEG_INFINITY, f64::max);
+        if trace {
+            eprintln!(
+                "debug: routed timing score {:.0} ps ({:.1}s)",
+                score,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        synth_route::Retimed { criticality, score }
+    };
     let blocked_edges = track_classes(arch, nl, placement)?;
     let hooks = synth_route::RouteHooks {
         blocked: &blocked,
         blocked_edges: &blocked_edges,
         progress: Some(&mut progress),
-        retime: None,
+        retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
     };
     let (routes, stats): (_, RouteStats) =
         synth_route::route_with(graph, &requests, &opts, hooks).map_err(|e| match e {

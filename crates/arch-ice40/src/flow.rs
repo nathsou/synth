@@ -19,6 +19,9 @@ pub struct FlowOptions {
     pub timing_weight: f64,
     /// Requested clock frequencies.
     pub clocks: crate::timing::ClockConstraints,
+    /// Rounds of rerouting critical connections once routing is legal (the
+    /// best timed legal routing is kept).
+    pub route_timing_rounds: usize,
 }
 
 /// Result of a successful run.
@@ -106,7 +109,14 @@ fn run(
             }
         }
         let t = Instant::now();
-        match crate::route::route(&arch, &nl, &placement, &opts.clocks, log) {
+        match crate::route::route(
+            &arch,
+            &nl,
+            &placement,
+            &opts.clocks,
+            opts.route_timing_rounds,
+            log,
+        ) {
             Ok(routing) => {
                 log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
                 result = Some((placement, routing));

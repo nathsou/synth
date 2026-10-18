@@ -71,8 +71,14 @@ impl Arcs<'_> {
 /// wire costs the delay of the span mux sized by the distance from where the
 /// net enters the wire to where it leaves (as icetime computes it, per tap).
 fn net_node_delays(arch: &Arch, routing: &Routing, net: NetId) -> FxHashMap<u32, f64> {
-    let g = &arch.graph;
     let edges: &[u32] = routing.net_edges.get(&net).map_or(&[], |v| v.as_slice());
+    routed_node_delays(arch, routing.net_source.get(&net).map(|s| s.raw()), edges)
+}
+
+/// [`net_node_delays`] of a route given by its source node and its edges in
+/// tree order.
+pub fn routed_node_delays(arch: &Arch, source: Option<u32>, edges: &[u32]) -> FxHashMap<u32, f64> {
+    let g = &arch.graph;
     let src_of = |e: u32| (g.offsets.partition_point(|&o| o as usize <= e as usize) - 1) as u32;
     // Span wires of the net: kind and where the net enters them.
     let mut entry: FxHashMap<u32, (u8, (usize, usize))> = FxHashMap::default();
@@ -94,8 +100,8 @@ fn net_node_delays(arch: &Arch, routing: &Routing, net: NetId) -> FxHashMap<u32,
         d
     };
     let mut delay: FxHashMap<u32, f64> = FxHashMap::default();
-    if let Some(src) = routing.net_source.get(&net) {
-        delay.insert(src.raw(), 0.0);
+    if let Some(src) = source {
+        delay.insert(src, 0.0);
     }
     // Edges are in tree order: each edge's source is reached earlier.
     for &e in edges {
