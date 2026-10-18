@@ -764,24 +764,38 @@ impl Lower<'_> {
     /// Shift-and-add multiplier, truncated to the operand width.
     fn mul(&mut self, a: Vec<Lit>, b: Vec<Lit>) -> Vec<Lit> {
         let w = a.len();
-        // Iterate over the operand with fewer non-constant bits.
-        let var = |v: &[Lit]| v.iter().filter(|l| !l.is_const()).count();
-        let (a, b) = if var(&b) <= var(&a) { (a, b) } else { (b, a) };
+        let g = &mut self.net.aig;
+        // Partial product rows: (offset, bits from the offset up).
+        let mut rows: Vec<(usize, Vec<Lit>)> = Vec::new();
+        if a == b {
+            // A square: x_i x_j + x_j x_i = 2 x_i x_j and x_i x_i = x_i, so
+            // row i is x_i at 2i and x_i x_j at i + j + 1 (j > i).
+            for i in (0..w).take_while(|&i| 2 * i < w) {
+                let mut row = vec![a[i], Lit::FALSE];
+                row.extend((i + 1..w).map(|j| g.and(a[i], a[j])));
+                row.truncate(w - 2 * i);
+                rows.push((2 * i, row));
+            }
+        } else {
+            // Iterate over the operand with fewer non-constant bits.
+            let var = |v: &[Lit]| v.iter().filter(|l| !l.is_const()).count();
+            let (a, b) = if var(&b) <= var(&a) { (a, b) } else { (b, a) };
+            for (i, &bi) in b.iter().enumerate() {
+                if bi != Lit::FALSE {
+                    rows.push((i, (0..w - i).map(|k| g.and(a[k], bi)).collect()));
+                }
+            }
+        }
         let mut acc = vec![Lit::FALSE; w];
         let mut started = false;
-        for i in 0..w {
-            if b[i] == Lit::FALSE {
-                continue;
-            }
-            let g = &mut self.net.aig;
-            let pp: Vec<Lit> = (0..w - i).map(|k| g.and(a[k], b[i])).collect();
+        for (i, row) in rows {
             if !started {
-                acc[i..].copy_from_slice(&pp);
+                acc[i..].copy_from_slice(&row);
                 started = true;
                 continue;
             }
             let hi = acc[i..].to_vec();
-            let (s, _) = self.add(&hi, &pp, Lit::FALSE);
+            let (s, _) = self.add(&hi, &row, Lit::FALSE);
             acc[i..].copy_from_slice(&s);
         }
         acc
@@ -948,6 +962,19 @@ mod tests {
         assert_eq!(synth_rtl::opt::shift_by_multiple(&mut m), 1);
         synth_rtl::opt::clean(&mut m).unwrap();
         check_function(&m, |v| word(v) & 31);
+    }
+
+    #[test]
+    fn squares() {
+        // y = a * a, truncated and in full width, with and without carry chains.
+        for (aw, yw) in [(5u32, 5u32), (6, 6), (5, 10), (7, 9)] {
+            let mut m = Module::new("t");
+            let (a, y) = ports(&mut m, aw, yw);
+            let a = a.extend(yw as usize, false);
+            let p = m.binary(BinaryOp::Mul, false, a.clone(), a);
+            m.connect(y, p);
+            check_function(&m, |v| (v * v) & ((1 << yw) - 1));
+        }
     }
 
     #[test]
