@@ -1,9 +1,10 @@
 name: CI
 
-# Pull requests run the jobs their changes can affect; the
-# slow simulation job waits until the PR is ready for review. A push to main
-# (after the PR already passed) only runs the fast tests. The weekly run and
-# manual runs cover everything and refresh the caches.
+# Each run does only what the change needs: tools/ci_changes.py maps the
+# changed files to the crates to check and test (with every crate depending
+# on them) and to the simulation suites that exercise them. The slow
+# simulations wait until a pull request is ready for review. Manual runs do
+# everything.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -11,8 +12,6 @@ on:
   push:
     branches: [main]
     paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
-  schedule:
-    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -25,13 +24,13 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # Which parts of the repository the change touches.
   changes:
     name: changes
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ steps.f.outputs.rust }}
-      sim: ${{ steps.f.outputs.sim }}
+      packages: ${{ steps.f.outputs.packages }}
+      frontend: ${{ steps.f.outputs.frontend }}
+      pnr: ${{ steps.f.outputs.pnr }}
       playground: ${{ steps.f.outputs.playground }}
     steps:
       - uses: actions/checkout@v4
@@ -40,31 +39,24 @@ jobs:
       - id: f
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          if [ "$EVENT" = push ]; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if [ "$EVENT" != pull_request ]; then
-            printf 'rust=true\nsim=true\nplayground=true\n' >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          files=$(git diff --name-only "$BASE"...HEAD)
-          echo "$files"
-          any() { echo "$files" | grep -qE "$1" && echo true || echo false; }
-          shared='^(Cargo\.(toml|lock)|\.github/workflows/ci\.yml)$'
-          echo "rust=$(any "^(crates|tests|examples)/|$shared")" >> "$GITHUB_OUTPUT"
-          # The simulations exercise the frontends, synthesis and the backend,
-          # not the playground, the language server or the editors.
-          echo "sim=$(echo "$files" | grep -E "^(crates|tests|examples|tools)/|$shared" \
-            | grep -vE '^crates/synth-(playground|lsp)/|^tools/build_playground\.sh$' | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "playground=$(echo "$files" | grep -E "^(crates|examples|editors)/|^tools/build_playground\.sh$|$shared" \
-            | grep -vE '^crates/(synth|synth-lsp)/' | grep -q . && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          case "$EVENT" in
+            pull_request) git diff --name-only "$PR_BASE"...HEAD | tools/ci_changes.py ;;
+            # A merge was already tested as a pull request: on main only the
+            # crate tests run, for what the merge changed.
+            push) git diff --name-only "$BEFORE" HEAD | tools/ci_changes.py | grep '^packages=' ;;
+            *) tools/ci_changes.py --all ;;
+          esac | tee -a "$GITHUB_OUTPUT"
 
   test:
     name: test
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.packages != ''
     runs-on: ubuntu-latest
+    env:
+      PACKAGES: ${{ needs.changes.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -79,15 +71,17 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy $PACKAGES --all-targets
       - name: Test
-        run: cargo test --workspace
+        run: cargo test $PACKAGES
 
   msrv:
     name: MSRV
     needs: changes
-    if: needs.changes.outputs.rust == 'true' && github.event_name != 'push'
+    if: needs.changes.outputs.packages != '' && github.event_name != 'push'
     runs-on: ubuntu-latest
+    env:
+      PACKAGES: ${{ needs.changes.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust 1.88
@@ -100,7 +94,7 @@ jobs:
           key: msrv-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: msrv-${{ hashFiles('Cargo.lock') }}-
       - name: Check
-        run: cargo check --workspace --all-targets
+        run: cargo check $PACKAGES --all-targets
 
   playground:
     name: playground (WebAssembly and web app)
@@ -131,15 +125,17 @@ jobs:
       - name: Web app unit tests
         run: node --test crates/synth-playground/web/tests/web.test.mjs
 
-  # Bitstream simulation, frontend differential simulation and the Project
-  # Euler solvers share one build of synth and one install of the oracles.
+  # The simulation suites share one build of synth and one install of the
+  # oracles; each runs only when the change can affect it.
   simulation:
-    name: simulation (bitstream, frontend, Project Euler)
+    name: simulation
     needs: changes
-    if: needs.changes.outputs.sim == 'true' && !github.event.pull_request.draft
+    if: (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pnr == 'true') && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     env:
       SYNTH: ${{ github.workspace }}/target/ci/synth
+      FRONTEND: ${{ needs.changes.outputs.frontend }}
+      PNR: ${{ needs.changes.outputs.pnr }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -154,16 +150,21 @@ jobs:
       - name: Install reference tools (test oracles only)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends yosys fpga-icestorm iverilog
+          sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm)
       - name: Build
         run: cargo build --profile ci -p synth
       - name: Bitstream-level simulation
+        if: env.PNR == 'true'
         run: tools/ci_bitsim.sh
       - name: Incremental bitstream simulation
+        if: env.PNR == 'true'
         run: tools/ci_incremental.sh
       - name: Elaborated netlists vs source RTL
+        if: env.FRONTEND == 'true'
         run: tools/ci_rtlsim.sh
       - name: Synthesised netlists vs RTL
+        if: env.FRONTEND == 'true'
         run: MODE=synth tools/ci_rtlsim.sh
       - name: RTL and synthesised netlists give the answers
+        if: env.FRONTEND == 'true'
         run: tools/ci_euler.sh
