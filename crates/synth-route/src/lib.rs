@@ -83,7 +83,7 @@ impl Default for RouteOptions {
             astar_delay_per_tile: 0.0,
             delay_scale: 0.001,
             bbox_margin: 3,
-            stall_iterations: 40,
+            stall_iterations: 120,
             retime_every: 4,
             reroute_criticality: 0.95,
         }
