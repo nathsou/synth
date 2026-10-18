@@ -2,10 +2,11 @@
 """Compare two synth policies on frozen board designs, using patched icetime.
 
 Example (ICETIME and ICETIME_CHIPDB select the patched timer/database):
-  python3 tools/qor_compare.py --synth target/release/synth --out work/qor
+  python3 tools/qor_compare.py --baseline-synth /path/to/baseline/synth \
+    --synth target/release/synth --out work/qor
 
-The baseline forces carry width 3; the candidate uses the automatic default.
-Use --candidate-flags='--carry-min-width 8' for the fixed-width experiment.
+Both binaries use their defaults. To compare fixed carry thresholds, pass the
+same binary twice and supply --baseline-flags and --candidate-flags.
 Serial execution is the default so build wall times are comparable. Parallel
 runs are suitable for QoR screening, not controlled runtime comparisons.
 """
@@ -71,8 +72,8 @@ def main():
     specs = designs()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--synth", type=Path, default=ROOT / "target/release/synth")
-    parser.add_argument("--baseline-synth", type=Path)
-    parser.add_argument("--baseline-flags", default="--carry-min-width 3")
+    parser.add_argument("--baseline-synth", type=Path, required=True)
+    parser.add_argument("--baseline-flags", default="")
     parser.add_argument("--candidate-flags", default="")
     parser.add_argument("--candidate-env", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--out", type=Path, required=True)
@@ -84,7 +85,7 @@ def main():
     extra_env = dict(pair.split("=", 1) for pair in args.candidate_env)
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
-    binaries = {"baseline": (args.baseline_synth or args.synth).resolve(),
+    binaries = {"baseline": args.baseline_synth.resolve(),
                 "candidate": args.synth.resolve()}
     hashes = {v: hashlib.sha256(p.read_bytes()).hexdigest() for v, p in binaries.items()}
     flags = {"baseline": shlex.split(args.baseline_flags),

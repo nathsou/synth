@@ -75,8 +75,13 @@ adder width that uses a hard carry chain (default: 3). Variable comparators use
 a threshold two bits higher. For example, `--carry-min-width 8` leaves short
 arithmetic in LUT logic, which can reduce carry feed-in cells and improve timing
 on designs with many small adders. Compare routed timing and packed cell counts
-for your design; a higher threshold is not always better. Automatic incremental
-checkpoints distinguish explicit carry thresholds.
+for your design; a higher threshold is not always better.
+
+Subsequent optimization maps a carry chain into LUT logic when its distinct
+boundary signals fit within the four inputs of a LUT. This is a local mapping
+rule; synthesis runs once. Automatic incremental checkpoints distinguish
+explicit carry thresholds. See [the QoR experiments](docs/QOR_EXPERIMENTS.md)
+for results and tradeoffs.
 
 ## Incremental builds
 
