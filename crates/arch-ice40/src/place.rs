@@ -342,6 +342,9 @@ struct Annealer<'a> {
     net_cost: Vec<f64>,
     cell_nets: FxHashMap<CellId, Vec<u32>>,
     fixed: FxHashMap<CellId, (i16, i16)>,
+    /// Units moves may pick (all when empty): those an incremental repair
+    /// placed anew.
+    movable: Vec<usize>,
     conns: Vec<Conn>,
     cell_conns: FxHashMap<CellId, Vec<u32>>,
     timing: crate::timing::TimingGraph,
@@ -399,6 +402,7 @@ impl<'a> Annealer<'a> {
             net_cost: Vec::new(),
             cell_nets: FxHashMap::default(),
             fixed: FxHashMap::default(),
+            movable: Vec::new(),
         };
 
         let is_global = |n: NetId| on_global(nl, n);
@@ -788,10 +792,12 @@ impl<'a> Annealer<'a> {
                 reused += unit.cells().len();
             }
         }
-        for unit in &units {
+        let mut placed_anew = Vec::new();
+        for (u, unit) in units.iter().enumerate() {
             if unit.cells().iter().all(|c| self.pos.contains_key(c)) {
                 continue;
             }
+            placed_anew.push(u);
             // Prefer sites near already placed neighbors; retain unchanged
             // units during this cheap repair attempt. The flow retries fresh
             // placement if the remaining sites cannot accommodate the edit.
@@ -852,6 +858,9 @@ impl<'a> Annealer<'a> {
                 return Err("incremental placement has no legal site for an edited unit".into());
             }
         }
+        // Only the units placed anew move: moving kept ones would void
+        // their routes.
+        self.movable = placed_anew;
         Ok(reused)
     }
 
@@ -953,7 +962,11 @@ impl<'a> Annealer<'a> {
     }
 
     fn try_move(&mut self, temp: f64, rlim: f64, scratch: &mut Vec<(u32, f64)>) -> Option<bool> {
-        let u = self.rng.below(self.units.len());
+        let u = if self.movable.is_empty() {
+            self.rng.below(self.units.len())
+        } else {
+            self.movable[self.rng.below(self.movable.len())]
+        };
         let r = rlim.max(1.0) as i64;
         match self.units[u].clone() {
             Unit::Lc(c) => {
@@ -1205,28 +1218,44 @@ impl<'a> Annealer<'a> {
     }
 
     fn anneal(&mut self, log: &mut Vec<String>) {
+        self.anneal_from(log, None);
+    }
+
+    /// Anneals from scratch, or with `refine` (a starting temperature times
+    /// the number of nets) refines the current placement: a cold start with
+    /// short moves, which keeps its structure.
+    fn anneal_from(&mut self, log: &mut Vec<String>, refine: Option<f64>) {
         if self.units.is_empty() || self.nets.is_empty() {
             return;
         }
-        let n = self.units.len() as f64;
+        let n = if self.movable.is_empty() { self.units.len() } else { self.movable.len() } as f64;
         let moves_per_temp = ((self.opts.effort * n.powf(4.0 / 3.0)) as usize).max(100);
         let mut scratch = Vec::new();
-        // Initial temperature: standard deviation of random move deltas.
-        let mut rlim = self.width.max(self.height) as f64;
+        let nets = self.nets.len() as f64;
         let start = self.total_cost();
         self.bb_norm = start.max(1.0);
-        let mut deltas = Vec::new();
-        for _ in 0..self.units.len().min(500) {
-            let before = self.norm_cost();
-            if self.try_move(f64::INFINITY, rlim, &mut scratch) == Some(true) {
-                deltas.push(self.norm_cost() - before);
+        let (mut temp, mut rlim) = match refine {
+            Some(t) => {
+                self.update_timing();
+                (t / nets, 3.0)
             }
-        }
-        let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
-        let var =
-            deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / deltas.len().max(1) as f64;
-        let mut temp = 20.0 * var.sqrt().max(1e-6);
-        let nets = self.nets.len() as f64;
+            None => {
+                // Initial temperature: standard deviation of random move
+                // deltas.
+                let rlim = self.width.max(self.height) as f64;
+                let mut deltas = Vec::new();
+                for _ in 0..self.units.len().min(500) {
+                    let before = self.norm_cost();
+                    if self.try_move(f64::INFINITY, rlim, &mut scratch) == Some(true) {
+                        deltas.push(self.norm_cost() - before);
+                    }
+                }
+                let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
+                let var = deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
+                    / deltas.len().max(1) as f64;
+                (20.0 * var.sqrt().max(1e-6), rlim)
+            }
+        };
         let mut iters = 0;
         loop {
             // Criticalities follow the placement; normalise the cost terms.
@@ -1306,6 +1335,18 @@ pub fn place_with_fixed(
     Ok(())
 }
 
+/// Least share of cells an incremental placement must keep in place.
+const MIN_REUSE: f64 = 0.6;
+
+/// Starting temperature (times the number of nets) of the annealing that
+/// refines the units an incremental placement placed anew.
+const REFINE_TEMPERATURE: f64 = 0.5;
+
+/// Share of cells placed anew above which the whole placement is refined,
+/// from this starting temperature.
+const WIDE_EDIT: f64 = 0.05;
+const REFINE_TEMPERATURE_WIDE: f64 = 0.05;
+
 /// Retains legal complete units and places edited units in remaining sites.
 /// Does not anneal retained cells; failure asks the caller for a fresh run.
 pub(crate) fn place_incremental(
@@ -1320,7 +1361,29 @@ pub(crate) fn place_incremental(
     let mut sa = Annealer::new(arch, nl, packed, opts)?;
     sa.set_fixed(placement);
     let reused = sa.repair_placement(previous)?;
+    let total = sa.pos.len();
+    log.push(format!("incremental placement: reused {reused}/{total} logic/RAM cells"));
+    // Repairing a mostly new design costs more than placing it afresh, and
+    // places it worse.
+    if (reused as f64) < MIN_REUSE * total as f64 {
+        return Err(format!(
+            "only {:.0}% of the cells can stay in place",
+            100.0 * reused as f64 / total.max(1) as f64
+        ));
+    }
+    for n in 0..sa.nets.len() {
+        sa.net_cost[n] = sa.compute_net_cost(n);
+    }
+    // A small edit refines only the units placed anew; a wider one, whose
+    // new units need room the kept ones hold, refines everything (colder).
+    if !sa.movable.is_empty() {
+        if (reused as f64) < (1.0 - WIDE_EDIT) * total as f64 {
+            sa.movable.clear();
+            sa.anneal_from(log, Some(REFINE_TEMPERATURE_WIDE));
+        } else {
+            sa.anneal_from(log, Some(REFINE_TEMPERATURE));
+        }
+    }
     sa.finish(placement);
-    log.push(format!("incremental placement: reused {reused}/{} logic/RAM cells", sa.pos.len()));
     Ok(())
 }

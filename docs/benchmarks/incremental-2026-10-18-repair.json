@@ -1,0 +1,3905 @@
+[
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 0.0872349999999642,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/baseline-1.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 0.07780681500003084,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.07673341100007747,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/1-unchanged.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 0.08232776899990313,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.06660314399982781,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/1-small.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 0.08285168199995496,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 1,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 0.08112579600015124,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "32",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "6",
+        "84"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/1-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/1-large.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 0.07245664700008092,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/baseline-2.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.05674872300005518,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/2-unchanged.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 0.06261700400000336,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.06251452599985896,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/2-small.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 0.0657701459999771,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 0.0739131529999213,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "32",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "6",
+        "84"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/2-large.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 2,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 0.06599868500006778,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/2-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 0.07949424299999919,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/baseline-3.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 0.0688057590000426,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.07047256100008781,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/3-unchanged.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 0.06385201500006588,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.06271679399992536,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "45",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "77",
+        "77"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/3-small.chk"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 0.08273298599988266,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "blinky_ram",
+    "seed": 3,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 0.07672120300003371,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 192.6
+    },
+    "resources": "44 ICESTORM_LC, 1 ICESTORM_RAM, 1 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "32",
+        "45"
+      ]
+    ],
+    "routes": [
+      [
+        "28",
+        "84"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "blinky_ram.v",
+      "--top",
+      "top",
+      "--device",
+      "hx1k",
+      "--package",
+      "vq100",
+      "--pcf",
+      "go_board.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/blinky_ram/3-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/blinky_ram/3-large.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 6.194764759999998,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.7
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/baseline-1.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 6.682502477000071,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.7
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.8010227940001187,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.7
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/1-unchanged.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 6.782773759000065,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.7
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.6812207789998865,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.7
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/1-small.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 9.927398532000097,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 60.5
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 10.14419524699997,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 60.5
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "639",
+        "1860"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/1-large.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "multiply",
+    "mode": "fresh",
+    "seconds": 9.841202589999739,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 65.1
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-multiply-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "edit": "multiply",
+    "mode": "incremental",
+    "seconds": 10.940448025000023,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 65.1
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "252",
+        "2073"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/1-multiply-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/1-multiply.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 7.086068499000248,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 69.6
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/baseline-2.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.7741030060001322,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 69.6
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/2-unchanged.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 7.264064867999878,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 69.6
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 1.0424350729999787,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 69.6
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/2-small.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 6.748689485999876,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 69.6
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 10.206325976999779,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 70.4
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "639",
+        "1860"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/2-large.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 10.028517256999748,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 70.4
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "multiply",
+    "mode": "incremental",
+    "seconds": 9.592697247999695,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.2
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "252",
+        "2073"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-multiply-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/2-multiply.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 2,
+    "edit": "multiply",
+    "mode": "fresh",
+    "seconds": 8.969299878000129,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 66.2
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/2-multiply-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 7.359542707999935,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 74.3
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/baseline-3.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 7.973304527000437,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 74.3
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.6797268600003008,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 74.3
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/3-unchanged.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 7.63025282200033,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 74.3
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.6730885920001128,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 74.3
+    },
+    "resources": "1592 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1604",
+        "1604"
+      ]
+    ],
+    "routes": [
+      [
+        "1800",
+        "1800"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/3-small.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 9.467065572000138,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 67.3
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 10.023525580000296,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 67.3
+    },
+    "resources": "1848 ICESTORM_LC, 12 ICESTORM_RAM, 5 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "639",
+        "1860"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/3-large.chk"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "multiply",
+    "mode": "fresh",
+    "seconds": 9.525865160000194,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 65.0
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-multiply-fresh.asc"
+    ]
+  },
+  {
+    "design": "picosoc",
+    "seed": 3,
+    "edit": "multiply",
+    "mode": "incremental",
+    "seconds": 9.909485582000343,
+    "exit": 0,
+    "target": 50,
+    "clocks": {
+      "clk": 65.0
+    },
+    "resources": "2061 ICESTORM_LC, 12 ICESTORM_RAM, 7 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "252",
+        "2073"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "soc.v",
+      "picorv32.v",
+      "--top",
+      "top",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "50",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/picosoc/3-multiply-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/picosoc/3-multiply.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 43.829673351999645,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 51.5,
+      "slow$dff[2]": 102.3
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/baseline-1.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 45.235033507000026,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 51.5,
+      "slow$dff[2]": 102.3
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 3.399192514999868,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 51.5,
+      "slow$dff[2]": 102.3
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6704",
+        "6704"
+      ]
+    ],
+    "routes": [
+      [
+        "9257",
+        "9257"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/1-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 40.980254521000006,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 59.1,
+      "slow$dff[2]": 98.1
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 4.694891234999886,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 53.4,
+      "slow$dff[2]": 104.0
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6695",
+        "6703"
+      ]
+    ],
+    "routes": [
+      [
+        "8920",
+        "9256"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/1-small.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 16.227241203000176,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 70.7,
+      "slow$dff[2]": 109.2
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 15.769670689000122,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 70.7,
+      "slow$dff[2]": 109.2
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "799",
+        "3707"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN/euler48/1-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/1-large.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 39.54928278499983,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 56.4,
+      "slow$dff[2]": 95.0
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/baseline-2.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 3.0068133540003146,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 56.4,
+      "slow$dff[2]": 95.0
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6704",
+        "6704"
+      ]
+    ],
+    "routes": [
+      [
+        "9257",
+        "9257"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/2-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 42.866082517999985,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 56.4,
+      "slow$dff[2]": 95.0
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 3.095349408000402,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 56.1,
+      "slow$dff[2]": 95.0
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6695",
+        "6703"
+      ]
+    ],
+    "routes": [
+      [
+        "8867",
+        "9256"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/2-small.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 42.12073671899998,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 50.6,
+      "slow$dff[2]": 89.9
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 16.341519264,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 70.7,
+      "slow$dff[2]": 114.6
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "799",
+        "3707"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/2-large.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 2,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 16.568776076000177,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 70.7,
+      "slow$dff[2]": 114.6
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN/euler48/2-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 40.71219562100032,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 57.4,
+      "slow$dff[2]": 87.4
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/baseline-3.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 37.973752879999665,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 57.4,
+      "slow$dff[2]": 87.4
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 2.569226135000008,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 57.4,
+      "slow$dff[2]": 87.4
+    },
+    "resources": "6704 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6704",
+        "6704"
+      ]
+    ],
+    "routes": [
+      [
+        "9257",
+        "9257"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/3-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 34.10905540400017,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 55.2,
+      "slow$dff[2]": 77.9
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 4.09043568900006,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 57.4,
+      "slow$dff[2]": 87.4
+    },
+    "resources": "6703 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "6695",
+        "6703"
+      ]
+    ],
+    "routes": [
+      [
+        "8786",
+        "9256"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/3-small.chk"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 15.380602800999895,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 65.9,
+      "slow$dff[2]": 116.4
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler48",
+    "seed": 3,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 16.06761967600005,
+    "exit": 0,
+    "target": 30,
+    "clocks": {
+      "clk": 65.9,
+      "slow$dff[2]": 116.4
+    },
+    "resources": "3707 ICESTORM_LC, 8 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "799",
+        "3707"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p048.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler48",
+      "-D",
+      "ANSWER_WIDTH=34",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "30",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN/euler48/3-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN/euler48/3-large.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 2.1980038120000245,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 145.2,
+      "slow$dff[266]": 136.1
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/baseline-1.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 1.773716277999938,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 145.2,
+      "slow$dff[266]": 136.1
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.36276436099979037,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 145.2,
+      "slow$dff[266]": 136.1
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1023",
+        "1023"
+      ]
+    ],
+    "routes": [
+      [
+        "1426",
+        "1426"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/1-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 2.246111780999854,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 138.7,
+      "slow$dff[266]": 136.9
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 1.1485160850002103,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 149.6,
+      "slow$dff[266]": 140.7
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "846",
+        "1021"
+      ]
+    ],
+    "routes": [
+      [
+        "504",
+        "1424"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/1-small.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 1.4476003320000927,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.2,
+      "slow$dff[134]": 125.6
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 1.8501074920000065,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.2,
+      "slow$dff[134]": 125.6
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "167",
+        "771"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "1",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/1-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/1-large.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 2.1307182760001524,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.9,
+      "slow$dff[266]": 126.7
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/baseline-2.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.3679666649995852,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.9,
+      "slow$dff[266]": 126.7
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1023",
+        "1023"
+      ]
+    ],
+    "routes": [
+      [
+        "1426",
+        "1426"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/2-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 2.040360648999922,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.9,
+      "slow$dff[266]": 126.7
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 1.1451779399999396,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 136.9,
+      "slow$dff[266]": 125.7
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "846",
+        "1021"
+      ]
+    ],
+    "routes": [
+      [
+        "486",
+        "1424"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/2-small.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 1.9700561129998277,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 145.6,
+      "slow$dff[266]": 117.0
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 1.6231297449999147,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 157.9,
+      "slow$dff[134]": 108.5
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "167",
+        "771"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/2-large.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 2,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 1.452264983999612,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 157.9,
+      "slow$dff[134]": 108.5
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "2",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/2-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "baseline",
+    "mode": "checkpoint",
+    "seconds": 1.9388341209996725,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 136.8,
+      "slow$dff[266]": 135.8
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-baseline-checkpoint.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/baseline-3.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "fresh",
+    "seconds": 2.044257542000196,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 136.8,
+      "slow$dff[266]": 135.8
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-unchanged-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "unchanged",
+    "mode": "incremental",
+    "seconds": 0.39190560799988816,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 136.8,
+      "slow$dff[266]": 135.8
+    },
+    "resources": "1011 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "1023",
+        "1023"
+      ]
+    ],
+    "routes": [
+      [
+        "1426",
+        "1426"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-unchanged-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/3-unchanged.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "small",
+    "mode": "fresh",
+    "seconds": 2.074645794999924,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 134.0,
+      "slow$dff[266]": 150.0
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-small-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "small",
+    "mode": "incremental",
+    "seconds": 0.8969337149997045,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 131.7,
+      "slow$dff[266]": 135.8
+    },
+    "resources": "1009 ICESTORM_LC, 12 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "846",
+        "1021"
+      ]
+    ],
+    "routes": [
+      [
+        "439",
+        "1424"
+      ]
+    ],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-small-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/3-small.chk"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "large",
+    "mode": "fresh",
+    "seconds": 1.5060885409998264,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.9,
+      "slow$dff[134]": 125.7
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [],
+    "routes": [],
+    "fallback": false,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-large-fresh.asc"
+    ]
+  },
+  {
+    "design": "euler31",
+    "seed": 3,
+    "edit": "large",
+    "mode": "incremental",
+    "seconds": 1.487487771999895,
+    "exit": 0,
+    "target": 60,
+    "clocks": {
+      "clk": 137.9,
+      "slow$dff[134]": 125.7
+    },
+    "resources": "767 ICESTORM_LC, 4 ICESTORM_RAM, 6 SB_GB, 11 SB_IO",
+    "cells": [
+      [
+        "167",
+        "771"
+      ]
+    ],
+    "routes": [],
+    "fallback": true,
+    "command": [
+      "/home/user/synth/target/release/synth",
+      "build",
+      "euler_top.v",
+      "report.v",
+      "p031.v",
+      "--top",
+      "euler_top",
+      "-D",
+      "SOLVER=euler31",
+      "-D",
+      "ANSWER_WIDTH=17",
+      "--device",
+      "hx8k",
+      "--package",
+      "cb132",
+      "--pcf",
+      "alchitry_cu.pcf",
+      "--freq",
+      "60",
+      "--seed",
+      "3",
+      "--asc",
+      "/tmp/bench/ibN31/euler31/3-large-incremental.asc",
+      "--incremental",
+      "/tmp/bench/ibN31/euler31/3-large.chk"
+    ]
+  }
+]

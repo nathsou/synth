@@ -373,7 +373,15 @@ pub(crate) fn route_incremental(
         requests.push(NetRequest { source: source.raw(), sinks, criticality });
         ids.push(n);
     }
-    let opts = RouteOptions { astar_cost_per_tile: 0.15, timing_rounds, ..RouteOptions::default() };
+    let mut opts =
+        RouteOptions { astar_cost_per_tile: 0.15, timing_rounds, ..RouteOptions::default() };
+    // A repair: new routes avoid the kept ones from the start rather than
+    // negotiate with them, and a repair that stops making progress gives
+    // way to fresh place and route sooner.
+    if checkpoint.is_some() {
+        opts.present_factor = 5.0;
+        opts.stall_iterations = 30;
+    }
     let t0 = std::time::Instant::now();
     let trace = std::env::var("SYNTH_DEBUG").is_ok();
     let mut progress = |iter: usize, nets: usize, over: &[usize]| {
@@ -453,12 +461,8 @@ pub(crate) fn route_incremental(
     let initial: Vec<_> = requests
         .iter()
         .filter(|_| checkpoint.is_some())
-        .map(|r| {
-            let mut sinks = r.sinks.clone();
-            sinks.sort_unstable();
-            synth_route::NetRoute {
-                edges: previous.get(&(r.source, sinks)).cloned().unwrap_or_default(),
-            }
+        .map(|r| synth_route::NetRoute {
+            edges: previous.get(&r.source).cloned().unwrap_or_default(),
         })
         .collect();
     let (routes, stats): (_, RouteStats) =
@@ -496,9 +500,10 @@ pub(crate) fn route_incremental(
         })?;
     if checkpoint.is_some() {
         log.push(format!(
-            "incremental routing: reused {}/{} net trees before repair",
+            "incremental routing: reused {}/{} net trees before repair, {} in part",
             stats.reused_nets,
-            requests.len()
+            requests.len(),
+            stats.partly_reused_nets
         ));
     }
     log.push(format!(

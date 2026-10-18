@@ -41,7 +41,56 @@ naming, mapping and packing far beyond the edited expression. The modified Euler
 solvers intentionally solve different problems; original golden answers do not
 apply to these variants.
 
-## Results
+## Results with the repair policy
+
+Same method, edits and seeds, measured later on 2026-10-18 in a different cloud
+VM (absolute times are not comparable with the original table below; compare
+the fresh and incremental columns of one table). Changes since the original
+implementation:
+
+- **Skip hopeless repairs.** If fewer than 60% of the cells keep their place,
+  incremental PnR gives up before routing and runs fresh PnR, instead of
+  repairing for up to 30 s and falling back anyway.
+- **Refine the repaired placement.** A cold, short-move annealing refines the
+  units placed anew (all units, colder, when more than 5% of the cells are new)
+  instead of leaving them where greedy repair put them.
+- **Route around kept trees.** Repair routing starts with a high present
+  congestion cost, so new routes avoid the kept ones rather than negotiate with
+  them (Euler48 small: 12.5 s of repair routing became 1.5 s). Saved trees are
+  matched by source and pruned to the sinks a net still has; a net that gained
+  sinks grows its pruned tree. A repair stalled for 30 iterations gives up.
+- **Protect QoR.** Checkpoints record each clock's period; an incremental result
+  more than 5% slower on any clock than the checkpointed run is replaced by fresh
+  PnR (as is one that misses a target).
+
+[Per-run data](benchmarks/incremental-2026-10-18-repair.json).
+
+| Design / edit | Fresh s | Incremental s | Speedup | Fresh Fmax MHz | Incremental Fmax MHz | Fallbacks |
+|---|---:|---:|---:|---:|---:|---:|
+| blinky_ram / unchanged | 0.069 | 0.070 | 0.98× | 192.6 | 192.6 | 0/3 |
+| blinky_ram / small | 0.066 | 0.063 | 1.05× | 192.6 | 192.6 | 0/3 |
+| blinky_ram / large | 0.083 | 0.077 | 1.08× | 192.6 | 192.6 | 0/3 |
+| picosoc / unchanged | 7.264 | 0.774 | 9.38× | 66.7–74.3 | 66.7–74.3 | 0/3 |
+| picosoc / small | 6.783 | 0.681 | 9.96× | 66.7–74.3 | 66.7–74.3 | 0/3 |
+| picosoc / large | 9.927 | 10.144 | 0.98× | 60.5–70.4 | 60.5–70.4 | 3/3 |
+| picosoc / multiply | 9.526 | 9.909 | 0.96× | 65.0–66.2 | 65.0–66.2 | 3/3 |
+| euler31 / unchanged | 2.040 | 0.368 | 5.54× | 126.7–136.1 | 126.7–136.1 | 0/3 |
+| euler31 / small | 2.075 | 1.145 | 1.81× | 117.0–136.9 | 125.7–140.7 | 0/3 |
+| euler31 / large | 1.452 | 1.623 | 0.89× | 108.5–125.7 | 108.5–125.7 | 3/3 |
+| euler48 / unchanged | 42.866 | 3.007 | 14.26× | 51.5–57.4 | 51.5–57.4 | 0/3 |
+| euler48 / small | 40.980 | 4.090 | 10.02× | 50.6–59.1 | 53.4–57.4 | 0/3 |
+| euler48 / large | 16.227 | 16.068 | 1.01× | 65.9–70.7 | 65.9–70.7 | 3/3 |
+
+Every incremental result is now within the fresh results' seed spread or
+better, and no edit is meaningfully slower than fresh PnR: structural edits that
+keep few cells cost 0.9–1.0× a fresh build (the attempt is cheap before the
+fallback). Euler48 small edits went from 3.15× to 10×, Euler31 small edits keep
+their 1.8× without the former 28–33% Fmax loss, and PicoRV32 structural edits
+went from 0.23–0.44× to 0.96–0.98×.
+
+## Original implementation
+
+### Results
 
 All **90 builds succeeded and met their targets**. All 12 unchanged incremental
 bitstreams were byte-identical to the corresponding fresh output. Packed resource
@@ -156,26 +205,20 @@ the RTL, and inspect reset/generated-clock behavior before attributing it to a
 specific pass. The benchmark does not establish the root cause.
 
 
-1. **Bound repair cost and skip unlikely wins.** Barrel-shifter and multiplier
-   edits leave only 34% and 12% of cells reusable. A preflight estimate based on
-   placement/route reuse and changed connectivity should choose fresh PnR early.
-   Add an incremental routing work budget, using deterministic work counters if
-   reproducibility is required. The benchmark's external timeout is not such a
-   production safeguard.
-2. **Repair placement locally.** Greedy placement of changed units, while keeping
-   every reusable unit fixed, can create long routes. Unlock neighbors of changed
-   or critical nets and run bounded timing/congestion-driven local placement.
-   Expand the repair region only when necessary.
-3. **Define a timing-margin policy.** Passing a loose target can accept a much
-   worse Fmax than fresh PnR. Persist per-clock baseline timing, expose before/after
-   margins and optionally reject excessive degradation. A previous checkpoint is
-   only a reference: it cannot predict the fresh optimum after an architectural
-   edit. Keep paired fresh builds in the regression benchmark to measure that gap.
-4. **Improve matching across synthesis changes.** Match with stable hierarchical
+Bounding repair cost, local placement repair and a timing-margin policy (items 1–3
+of the original list) are done; see "Results with the repair policy". Still open:
+
+1. **Tune the policy on more edit histories.** The 60% reuse floor, 5% wide-edit
+   threshold and 5% slowdown tolerance are set from these four designs; cumulative
+   edit sequences (each from the previous checkpoint) are not benchmarked yet.
+2. **Improve matching across synthesis changes.** Match with stable hierarchical
    provenance and structural signatures rather than relying primarily on generated
    names. First instrument why candidates fail to match or fail placement legality;
    the observed reuse percentages alone do not prove naming is the only cause.
-5. **Cache synthesis separately.** Even perfect PnR reuse still reruns synthesis.
+   (For Euler48's small edit, synthesis is already stable: 11,540 of 11,551
+   cells keep their names and parameters, and all but 13 keep their
+   connections, by driver name.)
+3. **Cache synthesis separately.** Even perfect PnR reuse still reruns synthesis.
    Add module/cone-level caching with dependency-aware invalidation after the
    PnR repair policy is robust. Continue to check runtime, area, timing and
    functional correctness together.
