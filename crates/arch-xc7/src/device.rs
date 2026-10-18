@@ -112,6 +112,11 @@ pub struct Pip {
     pub feature: String,
     /// Worst slow-corner delay in ps, None when upstream has no timing.
     pub delay: Option<f32>,
+    /// Drive resistance (ohm) and input capacitance (fF) of the pip, and
+    /// whether it buffers (otherwise a pass transistor).
+    pub res: f32,
+    pub cap: f32,
+    pub buffered: bool,
     pub fixed: bool,
     pub config: Vec<String>,
 }
@@ -119,6 +124,8 @@ pub struct Pip {
 pub struct Template {
     pub kind: String,
     pub wires: Vec<String>,
+    /// Resistance (ohm) and capacitance (fF) of each wire, where known.
+    pub wire_rc: Vec<(f32, f32)>,
     pub sites: Vec<SiteTemplate>,
     pub pips: Vec<Pip>,
 }
@@ -371,9 +378,23 @@ impl Template {
     fn load(root: &Path, kind: &str) -> Result<Self, String> {
         let path = root.join(format!("tile_type_{kind}.json"));
         let j = read_json(&path)?;
+        let number = |v: Option<&Value>| match v {
+            Some(Value::String(s)) => s.parse::<f32>().ok().filter(|x| x.is_finite()),
+            _ => None,
+        };
+        let wires = j.get("wires")?.object()?;
         let mut t = Self {
             kind: kind.into(),
-            wires: j.get("wires")?.object()?.keys().cloned().collect(),
+            wires: wires.keys().cloned().collect(),
+            wire_rc: wires
+                .values()
+                .map(|w| match w {
+                    Value::Object(o) => {
+                        (number(o.get("res")).unwrap_or(0.0), number(o.get("cap")).unwrap_or(0.0))
+                    }
+                    _ => (0.0, 0.0),
+                })
+                .collect(),
             sites: Vec::new(),
             pips: Vec::new(),
         };
@@ -417,38 +438,42 @@ impl Template {
             });
         }
         for p in j.get("pips")?.object()?.values() {
-            let src = p.get("src_wire")?.string()?;
-            let dst = p.get("dst_wire")?.string()?;
-            let feature = format!("{kind}.{dst}.{src}");
-            let extra = crate::routing::pseudo_config(kind, src, dst);
-            if !known.contains(&feature) && !fixed.contains(&feature) && extra.is_none() {
-                continue;
-            }
-            let config = extra.unwrap_or_else(|| {
-                if fixed.contains(&feature) {
-                    Vec::new()
-                } else {
-                    vec![feature[kind.len() + 1..].into()]
-                }
-            });
-            let delay = pip_delay(p.get("src_to_dst")?.get("delay")?)?;
-            let s = t.wire(src)?;
-            let d = t.wire(dst)?;
-            let is_fixed = fixed.contains(&feature);
-            t.pips.push(Pip {
-                src: s,
-                dst: d,
-                feature: feature[kind.len() + 1..].into(),
-                delay,
-                fixed: is_fixed,
-                config: config.clone(),
-            });
+            let (src, dst) = (p.get("src_wire")?.string()?, p.get("dst_wire")?.string()?);
+            // A bidirectional pip is configured separately for each direction,
+            // as `dst.src` of the wire it drives.
+            let mut directions = vec![(src, dst, "src_to_dst")];
             if p.get("is_directional")?.integer()? == 0 {
+                directions.push((dst, src, "dst_to_src"));
+            }
+            for (src, dst, timing) in directions {
+                if !crate::routing::general_routing(kind, src) {
+                    continue;
+                }
+                let feature = format!("{kind}.{dst}.{src}");
+                let extra = crate::routing::pseudo_config(kind, src, dst);
+                let is_fixed = fixed.contains(&feature);
+                if !known.contains(&feature) && !is_fixed && extra.is_none() {
+                    continue;
+                }
+                let name: String = feature[kind.len() + 1..].into();
+                let config =
+                    extra.unwrap_or_else(|| if is_fixed { Vec::new() } else { vec![name.clone()] });
+                let arc = p.get(timing)?;
+                let field = |k: &str| match arc {
+                    Value::Object(o) => number(o.get(k)),
+                    _ => None,
+                };
                 t.pips.push(Pip {
-                    src: d,
-                    dst: s,
-                    feature: feature[kind.len() + 1..].into(),
-                    delay: pip_delay(p.get("dst_to_src")?.get("delay")?)?,
+                    src: t.wire(src)?,
+                    dst: t.wire(dst)?,
+                    feature: name,
+                    delay: pip_delay(arc.get("delay")?)?,
+                    res: field("res").unwrap_or(0.0),
+                    cap: field("in_cap").unwrap_or(0.0),
+                    buffered: !matches!(
+                        p.get("is_pass_transistor"),
+                        Ok(Value::Number(v) | Value::String(v)) if v == "1"
+                    ),
                     fixed: is_fixed,
                     config,
                 });

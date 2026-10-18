@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Independent Artix-7 primitive validation. Requires Yosys and Icarus.
 
-XILINX_UNISIM must contain RAMB18E1.v from tools/fetch_xc7_models.sh.
+XILINX_UNISIM must contain the vendor models from tools/fetch_xc7_models.sh
+(RAMB18E1, RAM32M, RAM64M, SRLC32E, MUXF7 and MUXF8); they replace Yosys's.
 SYNTH and YOSYS_DATDIR override the synth binary and Yosys model directory.
 All artifacts are retained in the required --out directory.
 """
@@ -42,10 +43,17 @@ def main():
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     cells = DATA / "xilinx/cells_sim.v"
-    unisim = Path(os.environ["XILINX_UNISIM"]) / "RAMB18E1.v"
-    # Replace Yosys's black-box RAM declaration with the independent vendor model.
+    vendor = ["RAMB18E1", "RAM32M", "RAM64M", "SRLC32E", "MUXF7", "MUXF8"]
+    # Replace Yosys's models (a black box for RAMB18E1) with the independent
+    # vendor models, concatenated into one file.
+    unisim = out / "unisim.v"
+    unisim.write_text("".join((Path(os.environ["XILINX_UNISIM"]) / f"{m}.v").read_text() + "\n"
+                              for m in vendor))
     models = out / "cells.v"
-    models.write_text(re.sub(r"module RAMB18E1\s*\(.*?endmodule", "", cells.read_text(), flags=re.S))
+    text = cells.read_text()
+    for m in vendor:
+        text = re.sub(rf"module {m}\s*\(.*?endmodule", "", text, flags=re.S)
+    models.write_text(text)
     glbl = out / "glbl.v"
     glbl.write_text("`timescale 1ps/1ps\nmodule glbl; reg GSR = 0; initial begin #1 GSR=1; #100 GSR=0; end endmodule\n")
 
@@ -114,11 +122,16 @@ def main():
                 (4, 256, 0, 0, 0), (9, 128, 3, 1, 0), (18, 128, 0, 0, 0),
                 (18, 1100, 5, 0, 0), (35, 128, 0, 1, 0), (4, 256, 0, 0, 1),
                 (24, 512, 0, 0, 0), (32, 128, 3, 1, 0), (36, 512, 0, 0, 0),
-                (36, 1100, 5, 1, 0), (37, 512, 0, 0, 0), (36, 128, 0, 0, 1)]:
+                (36, 1100, 5, 1, 0), (37, 512, 0, 0, 0), (36, 128, 0, 0, 1),
+                # Distributed RAM: 32-word RAM32M halves, 64-word RAM64M,
+                # partial depths, per-bit enable groups and port D sharing.
+                (1, 16, 0, 0, 0), (7, 32, 3, 1, 0), (13, 40, 0, 0, 0),
+                (6, 64, 5, 0, 0), (5, 24, 0, 1, 1), (9, 64, 0, 0, 1)]:
             name = f"memory-{w}-{d}-{offset}-{neg}-{mask}"
             params = [f"W={w}", f"D={d}", f"OFFSET={offset}", f"NEG={neg}", f"MASK={mask}"]
             net = synth(SRC / "memory.v", "memory", out / name, params)
-            assert "RAMB18E1" in net.read_text(), name
+            primitive = "RAMB18E1" if d > 64 else "RAM32M" if d <= 32 else "RAM64M"
+            assert primitive in net.read_text(), name
             if w >= 24 and not mask:
                 assert '.RAM_MODE("SDP")' in net.read_text(), name
             tb = out / f"{name}.tb.v"

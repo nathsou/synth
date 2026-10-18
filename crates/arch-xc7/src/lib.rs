@@ -5,7 +5,10 @@ pub mod device;
 mod dsp;
 pub mod fasm;
 mod json;
+mod lutram;
 mod physical_dsp;
+mod srl;
+pub mod sta;
 pub mod synth;
 pub mod xdc;
 

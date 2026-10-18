@@ -205,10 +205,14 @@ fn packing_enforces_shared_control_sets() {
         "module top(input aclk,bclk,en,rst,input [7:0] d,output reg [7:0] a,b,c); always @(posedge aclk) if(en) a<=d; always @(negedge aclk) if(rst)b<=0;else b<=d; always @(posedge bclk or posedge rst) if(rst)c<=0;else c<=d; endmodule",
     );
     let p = arch_xc7::pack::pack(&mut nl).unwrap();
-    // Twenty-four direct-data registers use six slices and only the two
-    // shared constant LUTs. AX-DX bypasses must not allocate data-buffer LUTs.
-    assert_eq!(p.slices.len(), 6);
-    assert_eq!(nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count(), 2);
+    // Twenty-four direct-data registers in three control sets fill three
+    // slices: four through the AX-DX bypasses and four through O5 route-
+    // throughs into the second bank. A fourth slice holds the two shared
+    // constant LUTs; the route-throughs are the only other LUTs.
+    assert_eq!(p.slices.len(), 4);
+    let luts = nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count();
+    let through: usize = p.slices.iter().map(|s| s.lut5.iter().flatten().count()).sum();
+    assert_eq!((luts, through), (14, 12));
     for slice in &p.slices {
         for ff in slice.ffs.iter().flatten() {
             let ctrl = slice.controls.as_ref().unwrap();
@@ -330,4 +334,38 @@ fn shared_propagate_luts_are_replicated_without_an_extra_logic_level() {
             assert_eq!(out["y"], (510 - a - b) & 255);
         }
     }
+}
+
+fn count(nl: &Netlist, kind: &str) -> usize {
+    nl.live_cells().filter(|&c| nl.cell_kind(c) == kind).count()
+}
+
+#[test]
+fn shallow_memories_become_distributed_ram() {
+    // Seven bits read at another address take four RAM32M ports of two bits
+    // (three per primitive); a second read at the write address can use
+    // port D. Writes keep one write enable per primitive.
+    let nl = synth(
+        "module m(input clk, we, input [3:0] wa, ra, input [6:0] d, output [6:0] q, p);
+         reg [6:0] mem [0:15];
+         always @(posedge clk) if (we) mem[wa] <= d;
+         assign q = mem[ra];
+         assign p = mem[wa];
+         endmodule",
+    );
+    assert_eq!(count(&nl, "RAM32M"), 2);
+    assert_eq!(count(&nl, "RAMB18E1"), 0);
+    let deep = synth(
+        "module m(input clk, input [1:0] we, input [5:0] a, input [3:0] d, output reg [3:0] q);
+         reg [3:0] mem [0:63];
+         always @(posedge clk) begin
+           if (we[0]) mem[a][1:0] <= d[1:0];
+           if (we[1]) mem[a][3:2] <= d[3:2];
+           q <= mem[a];
+         end
+         endmodule",
+    );
+    // Two write-enable groups of two bits, each read at the write address.
+    assert_eq!(count(&deep, "RAM64M"), 2);
+    assert_eq!(count(&deep, "FDRE"), 4);
 }

@@ -718,7 +718,7 @@ pub fn optimize(g: &mut Aig, m: &mut Mapping, opts: &MfsOptions, timing: &Timing
         net.arrival[d as usize] =
             opts.lut_delay + fanins.iter().map(|&f| net.arrival[f as usize]).max().unwrap_or(0);
         net.fanins[d as usize] = fanins;
-        net.truth[d as usize] = l.truth;
+        net.truth[d as usize] = l.truth6();
         luts.push(d);
     }
     let outs: Vec<u32> = g.outputs.iter().map(|o| source(&mut net, o.node(), &mut dense)).collect();
@@ -771,7 +771,7 @@ pub fn optimize(g: &mut Aig, m: &mut Mapping, opts: &MfsOptions, timing: &Timing
                 out.push(Lut {
                     node: net.node[x as usize],
                     leaves: net.fanins[x as usize].iter().map(|&f| net.node[f as usize]).collect(),
-                    truth: net.truth[x as usize],
+                    truth: [net.truth[x as usize], 0, 0, 0],
                 });
                 continue;
             }
@@ -819,7 +819,7 @@ mod tests {
                 for (j, &leaf) in l.leaves.iter().enumerate() {
                     idx |= ((val[&leaf] >> bit) & 1) << j;
                 }
-                out |= ((l.truth >> idx) & 1) << bit;
+                out |= ((l.truth6() >> idx) & 1) << bit;
             }
             val.insert(l.node, out);
         }

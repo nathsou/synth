@@ -65,7 +65,8 @@ ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
               --device <xc7a35tftg256-1|xc7a100tcsg324-1|...>
               --db <prjxray-db/artix7> --xdc <file> [-o <out.bit>]
               [--fasm <out.fasm>] [--seed <n>] [--effort <n>] --timing-allow-fail
-              pnr accepts the same physical options with a mapped RTLIL input.
+              pnr accepts the same physical options with a mapped RTLIL input;
+              pnr --pack-stats reports its native packing (alone without --db).
               Native Rust packing, placement, routing and frame generation.
               Timing closure is not certified; --timing-allow-fail is required.
     synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
@@ -215,20 +216,7 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
     }
     let nl = synthesize(&mut a)?;
     if a.flag("--pack-stats") {
-        let mut packed_netlist = nl.clone();
-        let packed = arch_xc7::pack::pack(&mut packed_netlist)?;
-        let luts = packed_netlist
-            .live_cells()
-            .filter(|&c| arch_xc7::pack::is_lut(packed_netlist.cell_kind(c)))
-            .count();
-        let carries = packed_netlist
-            .live_cells()
-            .filter(|&c| packed_netlist.cell_kind(c) == "CARRY4")
-            .count();
-        eprintln!(
-            "info: packed {{\"slices\":{},\"lut\":{luts},\"carry4\":{carries}}}",
-            packed.slices.len()
-        );
+        xc7::pack_stats(&nl)?;
     }
     if let Some(out) = a.value("--verilog") {
         let name = a.value("--rename").unwrap_or_else(|| {
@@ -364,7 +352,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--route-timing-rounds",
             "--incremental",
         ],
-        &["--timing-allow-fail"],
+        &["--timing-allow-fail", "--pack-stats"],
         &["--incremental"],
     )?;
     let input = a.positional(0, "netlist")?;
@@ -376,6 +364,12 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
     if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
         let design = synth_rtlil::parse(&read(&input)?).map_err(|e| e.to_string())?;
         let nl = synth_rtlil::to_netlist(&design, &xc7::Library)?;
+        if a.flag("--pack-stats") {
+            xc7::pack_stats(&nl)?;
+            if a.value("--db").is_none() {
+                return Ok(());
+            }
+        }
         return xc7::finish(nl, &mut a);
     }
     for option in ["--db", "--xdc", "--fasm"] {

@@ -51,6 +51,15 @@ pub(crate) fn pseudo_config(kind: &str, src: &str, dst: &str) -> Option<Vec<Stri
     None
 }
 
+/// Whether a tile pip is general routing. The BRAM address cascade from
+/// the tile below (`BRAM_CASCINBOT_*`) exists for cascaded RAMB36s: other
+/// nets would reach it through the address pins of the block RAM below.
+/// The in-tile path (`BRAM_CASCINTOP_*`) lets the two RAMB18 halves share
+/// an address net and stays available.
+pub(crate) fn general_routing(kind: &str, src: &str) -> bool {
+    !(kind.starts_with("BRAM_") && src.starts_with("BRAM_CASCINBOT_"))
+}
+
 #[derive(Debug)]
 pub struct RoutingGraph {
     pub offsets: Vec<u32>,

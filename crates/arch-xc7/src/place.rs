@@ -106,6 +106,10 @@ pub fn place(
         }
     }
     let all = sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
+    let is_m: Vec<bool> = all
+        .iter()
+        .map(|s| db.templates[db.tiles[s.tile].template].sites[s.index].kind == "SLICEM")
+        .collect();
     let by_xy: BTreeMap<_, _> = all.iter().enumerate().map(|(i, s)| ((s.x, s.y), i)).collect();
     let mut macros = p.chains.clone();
     let chained: BTreeSet<_> = macros.iter().flatten().copied().collect();
@@ -114,15 +118,20 @@ pub fn place(
             macros.push(vec![i]);
         }
     }
-    macros.sort_by_key(|m| (std::cmp::Reverse(m.len()), m[0]));
-    let mut choices: BTreeMap<usize, Vec<Vec<usize>>> = BTreeMap::new();
-    for m in &macros {
-        choices.entry(m.len()).or_insert_with(|| {
+    // A macro of slices needing LUT RAM or shift registers needs SLICEMs.
+    let needs_m = |m: &[usize]| m.iter().any(|&s| p.slices[s].needs_m(nl));
+    // SLICEM macros go first: their sites are the scarcer.
+    macros.sort_by_key(|m| (std::cmp::Reverse(m.len()), !needs_m(m), m[0]));
+    let macro_m: Vec<bool> = macros.iter().map(|m| needs_m(m)).collect();
+    let mut choices: BTreeMap<(usize, bool), Vec<Vec<usize>>> = BTreeMap::new();
+    for (m, &mm) in macros.iter().zip(&macro_m) {
+        choices.entry((m.len(), mm)).or_insert_with(|| {
             all.iter()
                 .filter_map(|s| {
                     (0..m.len())
                         .map(|i| by_xy.get(&(s.x, s.y + i as u32)).copied())
                         .collect::<Option<Vec<_>>>()
+                        .filter(|v| !mm || v.iter().all(|&i| is_m[i]))
                 })
                 .collect()
         });
@@ -132,12 +141,15 @@ pub fn place(
     let mut macro_sites = vec![Vec::new(); macros.len()];
     let mut rng = Rng::new(seed);
     for (i, m) in macros.iter().enumerate() {
-        let mut candidates = choices[&m.len()].clone();
+        let mut candidates = choices[&(m.len(), macro_m[i])].clone();
         rng.shuffle(&mut candidates);
-        let v = candidates
-            .into_iter()
-            .find(|v| v.iter().all(|&s| occupied[s].is_none()))
-            .ok_or("not enough legal slice sites for carry macros")?;
+        let v = candidates.into_iter().find(|v| v.iter().all(|&s| occupied[s].is_none())).ok_or(
+            if macro_m[i] {
+                "not enough SLICEM sites for LUT RAM and shift registers"
+            } else {
+                "not enough legal slice sites for carry macros"
+            },
+        )?;
         for (&cluster, &s) in m.iter().zip(&v) {
             loc[cluster] = s;
             occupied[s] = Some(i);
@@ -193,7 +205,7 @@ pub fn place(
             let temperature = 20.0 * (0.85f64).powi(round);
             for _ in 0..((macros.len() * 10) as f64 * effort) as usize {
                 let m = rng.below(macros.len());
-                let candidates = &choices[&macros[m].len()];
+                let candidates = &choices[&(macros[m].len(), macro_m[m])];
                 let target = &candidates[rng.below(candidates.len())];
                 if *target == macro_sites[m] {
                     continue;
@@ -205,6 +217,8 @@ pub fn place(
                 } else if owners.len() == 1
                     && macros[m].len() == 1
                     && macros[*owners.first().unwrap()].len() == 1
+                    // The displaced slice takes this one's site.
+                    && (!macro_m[*owners.first().unwrap()] || is_m[macro_sites[m][0]])
                 {
                     owners.first().copied()
                 } else {
@@ -294,8 +308,17 @@ pub fn place(
             placed.insert(c, site.clone());
         }
     }
-    let mut clock_nets: BTreeSet<_> =
-        p.slices.iter().filter_map(|s| s.controls.as_ref().map(|c| c.clock)).collect();
+    let mut clock_nets: BTreeSet<_> = p
+        .slices
+        .iter()
+        .flat_map(|s| {
+            s.controls
+                .as_ref()
+                .map(|c| c.clock)
+                .into_iter()
+                .chain(s.memory.as_ref().map(|m| m.clock))
+        })
+        .collect();
     for &c in rams.keys() {
         for pin in ["CLKARDCLK", "CLKBWRCLK"] {
             if let Some(n) = nl.pin_net(c, pin)

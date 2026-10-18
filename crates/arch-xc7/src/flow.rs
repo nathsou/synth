@@ -25,6 +25,8 @@ pub struct FlowResult {
     pub bitstream: Vec<u8>,
     pub log: Vec<String>,
     pub placement: Placement,
+    /// Estimated worst register-to-register periods.
+    pub timing: Vec<crate::sta::Clock>,
 }
 
 pub fn implement(
@@ -42,7 +44,7 @@ pub fn implement(
     let placement = place::place(&db, &nl, &p, xdc, opts.seed, opts.effort)?;
     log.push(format!("placed: HPWL {:.0}", placement.hpwl));
     let mut features = cell_features(&db, &nl, &p, &placement, xdc)?;
-    let (requests, names) = requests(&db, &nl, &p, &placement)?;
+    let (requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;
     let graph = RoutingGraph::new(&db)?;
     log.push(format!("routing {} physical nets on {} edges", requests.len(), graph.dst.len()));
     for line in &log {
@@ -64,16 +66,22 @@ pub fn implement(
     };
     let hooks = synth_route::RouteHooks { progress: Some(&mut progress), ..Default::default() };
     let (routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
-        .map_err(|e| {
-            format!(
-                "{e:?}; physical nets: {}",
-                names
+        .map_err(|e| match &e {
+            synth_route::RouteError::Congested { nodes, nets, .. } => {
+                let nets: Vec<_> = nets.iter().map(|&i| names[i].as_str()).collect();
+                let at: Vec<_> = nodes
                     .iter()
-                    .enumerate()
-                    .map(|(i, n)| format!("{i}={n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+                    .map(|n| match owners.get(n) {
+                        Some(pins) => format!("node {n}: {}", describe(&nl, pins)),
+                        None => format!("node {n}: {}", node_name(&db, *n)),
+                    })
+                    .collect();
+                format!("{e}; nets {}; {}", nets.join(", "), at.join("; "))
+            }
+            synth_route::RouteError::Unroutable { net, sink } => {
+                let pins = owners.get(sink).map(|p| describe(&nl, p)).unwrap_or_default();
+                format!("{e} ({}; {pins})", names[*net])
+            }
         })?;
     crate::routing::verify(graph.graph(), &requests, &routes)?;
     features.extend(graph.features(&db, &routes));
@@ -92,11 +100,76 @@ pub fn implement(
         features.len(),
         start.elapsed().as_secs_f64()
     ));
+    let timing = crate::sta::analyze(
+        root,
+        &db,
+        &nl,
+        &p,
+        &graph,
+        &requests,
+        &request_nets,
+        &routes,
+        &owners,
+    )?;
+    if !coverage.missing_pip_types.is_empty() {
+        log.push(format!(
+            "timing estimate counts {} uncharacterized pip types as zero delay",
+            coverage.missing_pip_types.len()
+        ));
+    }
+    for clock in &timing {
+        let name = nl.str(nl.nets[clock.net].name);
+        let target = xdc
+            .clocks
+            .iter()
+            .find(|(port, _)| {
+                nl.live_cells().any(|c| {
+                    nl.str(nl.cells[c].name) == port.as_str()
+                        && nl.pin_net(c, "PAD") == Some(clock.net)
+                })
+            })
+            .map(|(_, &ns)| {
+                format!(
+                    ", target {ns:.3} ns: {}",
+                    if clock.period <= ns * 1000.0 { "met" } else { "MISSED" }
+                )
+            })
+            .unwrap_or_default();
+        log.push(format!(
+            "timing estimate: clock {name}: {:.3} ns ({:.1} MHz){target}",
+            clock.period / 1000.0,
+            1e6 / clock.period.max(1.0)
+        ));
+        if let (Some(first), Some(last)) = (clock.path.first(), clock.path.last()) {
+            log.push(format!("critical path: {first} -> {last} ({} pins)", clock.path.len()));
+        }
+    }
     log.push(
-        "timing is not certified: complete cell and wire RC timing integration remains required"
+        "timing is not certified: the estimate uses nextpnr-xilinx's routing model of X-Ray data, \
+         uncalibrated against vendor timing or hardware, without clock skew or I/O paths"
             .into(),
     );
-    Ok(FlowResult { features, bitstream, log, placement })
+    Ok(FlowResult { features, bitstream, log, placement, timing })
+}
+/// Cell pins and their nets, for diagnostics.
+fn describe(nl: &Netlist, pins: &[(CellId, String, NetId)]) -> String {
+    let names: Vec<_> = pins
+        .iter()
+        .map(|(c, pin, n)| {
+            format!("{}.{pin} ({})", nl.str(nl.cells[*c].name), nl.str(nl.nets[*n].name))
+        })
+        .collect();
+    names.join(", ")
+}
+
+/// Some tile wire of routing node `node`, for diagnostics.
+fn node_name(db: &Device, node: u32) -> String {
+    for t in &db.tiles {
+        if let Some(w) = t.nodes.iter().position(|&n| n == node) {
+            return format!("{}.{}", t.name, db.templates[t.template].wires[w]);
+        }
+    }
+    "unknown wire".into()
 }
 fn lut_source(db: &Device, p: &Packed, pl: &Placement, c: CellId) -> Result<u32, String> {
     let (s, l) = p.slots[&c];
@@ -119,8 +192,22 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
     let lane = char::from(b'A' + l as u8);
     let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
     match nl.cell_kind(d.cell) {
-        k if pack::is_lut(k) => site.node(db, &lane.to_string()),
-        k if pack::is_ff(k) => site.node(db, &format!("{lane}Q")),
+        k if pack::is_lut(k) && p.slices[s].lut5[l] == Some(d.cell) => {
+            site.node(db, &format!("{lane}MUX"))
+        }
+        k if pack::is_lut(k) || pack::is_srl(k) => site.node(db, &lane.to_string()),
+        // The second bank leaves through the lane's output multiplexer.
+        k if pack::is_ff(k) => {
+            let lane = char::from(b'A' + (l % 4) as u8);
+            site.node(db, &if l < 4 { format!("{lane}Q") } else { format!("{lane}MUX") })
+        }
+        k if pack::is_ram(k) => {
+            let (l, o5) = pack::ram_output(nl, d.cell, pin).ok_or("unknown LUT RAM output")?;
+            let lane = char::from(b'A' + l as u8);
+            site.node(db, &if o5 { format!("{lane}MUX") } else { lane.to_string() })
+        }
+        "MUXF7" => site.node(db, if l == 0 { "AMUX" } else { "CMUX" }),
+        "MUXF8" => site.node(db, "BMUX"),
         "CARRY4" => {
             if pin == "CO[3]"
                 && nl.nets[n].users.iter().any(|u| {
@@ -139,49 +226,105 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
         k => Err(format!("unsupported driver {k}")),
     }
 }
-fn requests(
-    db: &Device,
-    nl: &Netlist,
-    p: &Packed,
-    pl: &Placement,
-) -> Result<(Vec<synth_route::NetRequest>, Vec<String>), String> {
+/// The cell input pins (and their nets) at each routed sink node.
+pub(crate) type Owners = BTreeMap<u32, Vec<(CellId, String, NetId)>>;
+/// Routing requests with their names and nets (none for a clock's route to
+/// its buffer), and the cell pins at the sinks.
+type Requests = (Vec<synth_route::NetRequest>, Vec<String>, Vec<Option<NetId>>, Owners);
+
+fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Requests, String> {
     let mut sinks: BTreeMap<NetId, BTreeSet<u32>> = BTreeMap::new();
+    let mut owners: Owners = BTreeMap::new();
+    let mut add = |n: NetId, node: u32, c: CellId, pin: &str| {
+        sinks.entry(n).or_default().insert(node);
+        owners.entry(node).or_default().push((c, pin.to_string(), n));
+    };
     for c in nl.live_cells() {
         if let Some(site) = pl.ports.get(&c) {
             if nl.cell_kind(c) == "$output" {
                 let n = nl.pin_net(c, "PAD").ok_or("unconnected output")?;
-                sinks.entry(n).or_default().insert(site.node(db, "O")?);
+                add(n, site.node(db, "O")?, c, "PAD");
                 let (&zero, _) = p
                     .constant_luts
                     .iter()
                     .find(|(n, _)| !p.constants[n])
                     .ok_or("missing physical ground source")?;
-                sinks.entry(zero).or_default().insert(site.node(db, "T")?);
+                add(zero, site.node(db, "T")?, c, "T");
             }
             continue;
         }
         if let Some(site) = pl.rams.get(&c) {
             for (pin, n) in crate::physical_bram::inputs(nl, c, p)? {
-                sinks.entry(n).or_default().insert(site.node(db, &pin)?);
+                add(n, site.node(db, &pin)?, c, &pin);
             }
             continue;
         }
         if let Some(site) = pl.dsps.get(&c) {
             for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site) {
-                sinks.entry(n).or_default().insert(site.node(db, &pin)?);
+                add(n, site.node(db, &pin)?, c, &pin);
             }
             continue;
         }
         let (s, l) = p.slots[&c];
         let site = &pl.slices[s];
-        let lane = char::from(b'A' + l as u8);
+        let lane = char::from(b'A' + (l % 4) as u8);
         for pin in &nl.cells[c].pins {
             if pin.dir != Dir::Input {
                 continue;
             }
             let Some(n) = pin.net else { continue };
             let name = nl.str(pin.name);
+            // An unrouted LUT input reads 1 (the interconnect default).
+            let tied_high = pack::value(nl, n) == Some(true);
             let target = match nl.cell_kind(c) {
+                k if pack::is_srl(k) => match name {
+                    "D" if k == "SRL16E" => Some(format!("{lane}X")),
+                    "D" => Some(format!("{lane}I")),
+                    "CE" => Some("WE".into()),
+                    "CLK" => Some("CLK".into()),
+                    // Address bit i is LUT input i + 2; input 1 stays high.
+                    _ => {
+                        let i: usize = name
+                            .trim_start_matches('A')
+                            .trim_matches(['[', ']'])
+                            .parse()
+                            .map_err(|_| format!("unknown shift register pin {name}"))?;
+                        (!tied_high).then(|| format!("{lane}{}", i + 2))
+                    }
+                },
+                k if pack::is_ram(k) => match name {
+                    "WE" => Some("WE".into()),
+                    "WCLK" => Some("CLK".into()),
+                    _ => {
+                        let (port, rest) = name
+                            .strip_prefix("ADDR")
+                            .map(|r| (true, r))
+                            .or_else(|| name.strip_prefix("DI").map(|r| (false, r)))
+                            .ok_or_else(|| format!("unknown LUT RAM pin {name}"))?;
+                        let x = char::from(rest.as_bytes()[0]);
+                        let bit: usize = rest[1..].trim_matches(['[', ']']).parse().unwrap_or(0);
+                        if port {
+                            (!tied_high).then(|| format!("{x}{}", bit + 1))
+                        } else if bit == 1 {
+                            // RAM32M: bit 1 is written through DI2, the X input.
+                            Some(format!("{x}X"))
+                        } else {
+                            Some(format!("{x}I"))
+                        }
+                    }
+                },
+                "MUXF7" | "MUXF8" => match name {
+                    "S" => Some(
+                        match (nl.cell_kind(c), l) {
+                            ("MUXF8", _) => "BX",
+                            (_, 0) => "AX",
+                            _ => "CX",
+                        }
+                        .into(),
+                    ),
+                    // Data inputs are the slice's own LUT and MUXF7 outputs.
+                    _ => None,
+                },
                 k if pack::is_lut(k) => {
                     let init = pack::param(nl, c, "INIT", 0);
                     let k: usize = k[3..].parse().map_err(|_| "invalid LUT")?;
@@ -189,11 +332,11 @@ fn requests(
                     if init & mask == 0 || init & mask == mask {
                         continue;
                     }
-                    let i: usize = name
-                        .strip_prefix('I')
-                        .ok_or("unexpected LUT pin")?
-                        .parse()
-                        .map_err(|_| "invalid LUT input")?;
+                    let i = p.slices[s]
+                        .lane_inputs(nl, l)
+                        .iter()
+                        .position(|&x| x == n)
+                        .ok_or("LUT input missing from its site")?;
                     Some(format!("{lane}{}", i + 1))
                 }
                 k if pack::is_ff(k) => match name {
@@ -222,12 +365,13 @@ fn requests(
                 k => return Err(format!("unsupported input on {k}")),
             };
             if let Some(target) = target {
-                sinks.entry(n).or_default().insert(site.node(db, &target)?);
+                add(n, site.node(db, &target)?, c, name);
             }
         }
     }
     let mut requests = Vec::new();
     let mut names = Vec::new();
+    let mut nets = Vec::new();
     for (n, sinks) in sinks {
         if sinks.is_empty() {
             continue;
@@ -240,6 +384,7 @@ fn requests(
                 criticality: vec![0.0],
             });
             names.push(format!("{}:BUFG-input", nl.str(nl.nets[n].name)));
+            nets.push(None);
             requests.push(synth_route::NetRequest {
                 source: buf.node(db, "O")?,
                 sinks: sinks.into_iter().collect(),
@@ -253,12 +398,92 @@ fn requests(
             });
         }
         names.push(nl.str(nl.nets[n].name).into());
+        nets.push(Some(n));
     }
-    Ok((requests, names))
+    Ok((requests, names, nets, owners))
 }
 fn enable(f: &mut BTreeSet<String>, prefix: &str, s: &str) {
     f.insert(format!("{prefix}.{s}"));
 }
+/// Whether net `n` is read outside the slice's dedicated paths (a flip-flop
+/// or MUXF8 of the same slice reading it directly).
+fn external(nl: &Netlist, p: &Packed, n: NetId) -> bool {
+    let driver = nl.nets[n].driver.and_then(|d| p.slots.get(&d.cell)).map(|&(s, _)| s);
+    nl.nets[n].users.iter().any(|u| {
+        let Some(&(s, l)) = p.slots.get(&u.cell) else { return true };
+        let slice = &p.slices[s];
+        let internal = Some(s) == driver
+            && (slice.f8 == Some(u.cell)
+                || pack::is_ff(nl.cell_kind(u.cell))
+                    && pack::ff_mux(nl, slice, l, u.cell) != "BYPASS");
+        !internal
+    })
+}
+
+/// The physical INIT and mode features of lane `l`'s LUT, if it is used.
+fn lut_config(
+    nl: &Netlist,
+    s: &pack::Slice,
+    l: usize,
+) -> Result<Option<(u64, Vec<String>)>, String> {
+    let lane = char::from(b'A' + l as u8);
+    // Data input 1 comes from the lane's I input (D has no other choice).
+    let di1 = (l < 3).then(|| format!("DI1MUX.{lane}I"));
+    if let Some(r) = s.ram {
+        let init = pack::param(nl, r, &format!("INIT_{lane}"), 0);
+        if nl.cell_kind(r) == "RAM64M" {
+            return Ok(Some((init, ["RAM".to_string()].into_iter().chain(di1).collect())));
+        }
+        // RAM32M interleaves its two bits; the LUT keeps bit 0 in the
+        // lower half (O5) and bit 1 in the upper half (O6, with A6 high).
+        let mut phys = 0u64;
+        for k in 0..32 {
+            phys |= (init >> (2 * k) & 1) << k | (init >> (2 * k + 1) & 1) << (32 + k);
+        }
+        let modes = ["RAM".to_string(), "SMALL".to_string()].into_iter().chain(di1).collect();
+        return Ok(Some((phys, modes)));
+    }
+    let Some(c) = s.luts[l].or(s.lut5[l]) else { return Ok(None) };
+    let kind = nl.cell_kind(c);
+    let init = pack::param(nl, c, "INIT", 0);
+    if pack::is_srl(kind) {
+        // The address drives inputs 2-6 with input 1 high: bit i of the
+        // shift register appears at LUT bits 2i and 2i + 1.
+        let len = if kind == "SRL16E" { 16 } else { 32 };
+        let phys = (0..64).fold(0u64, |t, j| t | (init >> ((j >> 1) % len) & 1) << j);
+        let modes = if kind == "SRL16E" {
+            vec!["SRL".into(), "SMALL".into()]
+        } else {
+            ["SRL".to_string()].into_iter().chain(di1).collect()
+        };
+        return Ok(Some((phys, modes)));
+    }
+    // Physical input j + 1 carries the lane's j-th input net; unrouted
+    // inputs read 1. With an O5 LUT, A6 is high: O6 reads the upper half.
+    let pins = s.lane_inputs(nl, l);
+    let value = |c: CellId, j: usize| -> Result<u64, String> {
+        let mut idx = 0;
+        for i in 0..pack::lut_size(nl.cell_kind(c)) {
+            let n = nl.pin_net(c, &format!("I{i}")).ok_or("unconnected LUT input")?;
+            let pos = pins.iter().position(|&x| x == n).ok_or("LUT input missing from its site")?;
+            idx |= (j >> pos & 1) << i;
+        }
+        Ok(pack::param(nl, c, "INIT", 0) >> idx & 1)
+    };
+    let mut phys = 0u64;
+    for j in 0..64 {
+        let cell = match (s.luts[l], s.lut5[l]) {
+            (Some(o6), Some(_)) if j >= 32 => o6,
+            (_, Some(o5)) if j < 32 => o5,
+            (Some(o6), _) => o6,
+            (None, Some(o5)) => o5,
+            (None, None) => unreachable!(),
+        };
+        phys |= value(cell, j)? << j;
+    }
+    Ok(Some((phys, Vec::new())))
+}
+
 fn cell_features(
     db: &Device,
     nl: &Netlist,
@@ -269,30 +494,65 @@ fn cell_features(
     let mut f = BTreeSet::new();
     for (i, s) in p.slices.iter().enumerate() {
         let prefix = pl.slices[i].prefix(db);
-        for (l, &lut) in s.luts.iter().enumerate() {
-            if let Some(c) = lut {
-                let k: usize = nl.cell_kind(c)[3..].parse().map_err(|_| "invalid LUT type")?;
-                let init = pack::param(nl, c, "INIT", 0);
-                let lane = char::from(b'A' + l as u8);
-                for bit in 0..64 {
-                    if init >> (bit % (1 << k)) & 1 != 0 {
-                        enable(&mut f, &prefix, &format!("{lane}LUT.INIT[{bit}]"));
-                    }
+        for l in 0..4 {
+            let lane = char::from(b'A' + l as u8);
+            let Some((init, modes)) = lut_config(nl, s, l)? else { continue };
+            for bit in 0..64 {
+                if init >> bit & 1 != 0 {
+                    enable(&mut f, &prefix, &format!("{lane}LUT.INIT[{bit}]"));
                 }
             }
+            for mode in modes {
+                enable(&mut f, &prefix, &format!("{lane}LUT.{mode}"));
+            }
+            if let Some(n) = s.lut5[l].and_then(|c| nl.pin_net(c, "O"))
+                && external(nl, p, n)
+            {
+                enable(&mut f, &prefix, &format!("{lane}OUTMUX.O5"));
+            }
+            // A RAM32M port's bit 0 leaves through the O5 output.
+            if let Some(r) = s.ram.filter(|&r| nl.cell_kind(r) == "RAM32M")
+                && nl.pin_net(r, &format!("DO{lane}[0]")).is_some_and(|n| external(nl, p, n))
+            {
+                enable(&mut f, &prefix, &format!("{lane}OUTMUX.O5"));
+            }
         }
-        for (l, &ff) in s.ffs.iter().enumerate() {
+        for (half, &mux) in s.f7.iter().enumerate() {
+            if let Some(n) = mux.and_then(|c| nl.pin_net(c, "O"))
+                && external(nl, p, n)
+            {
+                enable(&mut f, &prefix, &format!("{}OUTMUX.F7", if half == 0 { 'A' } else { 'C' }));
+            }
+        }
+        if let Some(n) = s.f8.and_then(|c| nl.pin_net(c, "O"))
+            && external(nl, p, n)
+        {
+            enable(&mut f, &prefix, "BOUTMUX.F8");
+        }
+        if let Some(m) = &s.memory {
+            enable(&mut f, &prefix, if m.inverted { "CLKINV" } else { "NOCLKINV" });
+        }
+        for (k, &ff) in s.ffs.iter().enumerate() {
             if let Some(c) = ff {
-                let lane = char::from(b'A' + l as u8);
+                let lane = char::from(b'A' + (k % 4) as u8);
                 let kind = nl.cell_kind(c);
-                let mux = pack::ff_mux(nl, s, l, c);
-                let mux = if mux == "BYPASS" { format!("{lane}X") } else { mux.into() };
-                enable(&mut f, &prefix, &format!("{lane}FFMUX.{mux}"));
+                let mux = pack::ff_mux(nl, s, k, c);
+                // The second bank takes O5 (IN_A) or the X input (IN_B).
+                let (ff, mux) = if k < 4 {
+                    (
+                        format!("{lane}FF"),
+                        if mux == "BYPASS" { format!("{lane}X") } else { mux.into() },
+                    )
+                } else {
+                    enable(&mut f, &prefix, &format!("{lane}OUTMUX.{lane}5Q"));
+                    (format!("{lane}5FF"), if mux == "O5" { "IN_A".into() } else { "IN_B".into() })
+                };
+                enable(&mut f, &prefix, &format!("{ff}MUX.{mux}"));
                 if pack::param(nl, c, "INIT", u64::from(matches!(kind, "FDSE" | "FDPE"))) == 0 {
-                    enable(&mut f, &prefix, &format!("{lane}FF.ZINI"));
+                    enable(&mut f, &prefix, &format!("{ff}.ZINI"));
                 }
                 if matches!(kind, "FDRE" | "FDCE") {
-                    enable(&mut f, &prefix, &format!("{lane}FF.ZRST"));
+                    enable(&mut f, &prefix, &format!("{ff}.ZRST"));
                 }
             }
         }

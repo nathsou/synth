@@ -22,6 +22,9 @@ use crate::aig::{Aig, Node};
 pub struct MapOptions {
     /// LUT size (at most 6).
     pub k: usize,
+    /// Functions of up to `k + levels` inputs built from `k`-LUTs and a
+    /// tree of dedicated 2:1 multiplexers, if the target has them.
+    pub wide: Option<Wide>,
     /// Cuts kept per node.
     pub cuts_per_node: usize,
     /// Area-flow recovery passes.
@@ -35,6 +38,15 @@ pub struct MapOptions {
     pub lut_delay: u32,
     /// How the delay pass picks among cuts of equal arrival.
     pub delay_tiebreak: Tiebreak,
+}
+
+/// Dedicated multiplexers combining LUT outputs (Xilinx MUXF7/MUXF8): a
+/// function of `k + j` inputs is a Shannon expansion on `j` of them, `2^j`
+/// LUTs joined by `j` levels of multiplexers.
+#[derive(Clone, Debug)]
+pub struct Wide {
+    /// Delay added by each multiplexer level, nearest the LUTs first.
+    pub delay: Vec<u32>,
 }
 
 /// Preference among cuts of equal arrival in the delay pass. Either way the
@@ -52,6 +64,7 @@ impl Default for MapOptions {
     fn default() -> Self {
         MapOptions {
             k: 4,
+            wide: None,
             cuts_per_node: 8,
             area_flow_passes: 2,
             exact_area_passes: 2,
@@ -86,14 +99,34 @@ pub struct BoxArc {
     pub delay: u32,
 }
 
+/// A truth table of up to eight variables, least significant word first.
+pub type Truth = [u64; 4];
+
+/// Largest cut: six LUT inputs and two multiplexer levels.
+const MAX_LEAVES: usize = 8;
+
 /// A LUT of the mapping: computes AIG node `node` (positive polarity) from
 /// the values of the `leaves` nodes. Bit `i` of `truth` is the output when
-/// leaf `j` has the value of bit `j` of `i`.
+/// leaf `j` has the value of bit `j` of `i`. More than `k` leaves (only with
+/// [`MapOptions::wide`]) make a wide function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lut {
     pub node: u32,
     pub leaves: Vec<u32>,
-    pub truth: u64,
+    pub truth: Truth,
+}
+
+impl Lut {
+    /// The truth table of a LUT of at most six inputs.
+    pub fn truth6(&self) -> u64 {
+        debug_assert!(self.leaves.len() <= 6, "wide function");
+        self.truth[0]
+    }
+}
+
+/// Bit `i` of a truth table.
+pub fn truth_bit(t: &Truth, i: usize) -> bool {
+    t[i / 64] >> (i % 64) & 1 != 0
 }
 
 /// The result of mapping: LUTs in topological order.
@@ -109,43 +142,54 @@ pub struct Mapping {
 /// `truth` is the value when leaf `j` has the value of bit `j` of `i`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Cut {
-    leaves: [u32; 6],
+    leaves: [u32; MAX_LEAVES],
     len: u8,
     sig: u64,
-    truth: u64,
+    truth: Truth,
 }
 
 /// All-ones over the truth table of `len` variables.
-fn truth_mask(len: usize) -> u64 {
-    if len >= 6 { !0 } else { (1u64 << (1 << len)) - 1 }
+fn truth_mask(len: usize) -> Truth {
+    if len < 6 {
+        return [(1u64 << (1 << len)) - 1, 0, 0, 0];
+    }
+    std::array::from_fn(|w| if w < 1 << (len - 6) { !0 } else { 0 })
+}
+
+fn and(a: Truth, b: Truth) -> Truth {
+    std::array::from_fn(|w| a[w] & b[w])
+}
+
+fn xor(a: Truth, b: Truth) -> Truth {
+    std::array::from_fn(|w| a[w] ^ b[w])
 }
 
 /// Re-expresses truth table `t` over leaves `from` as a table over `to`
 /// (a superset, both sorted).
-fn expand(t: u64, from: &[u32], to: &[u32]) -> u64 {
+fn expand(t: Truth, from: &[u32], to: &[u32]) -> Truth {
     if from == to {
         return t;
     }
-    let mut pos = [0usize; 6];
+    let mut pos = [0usize; MAX_LEAVES];
     for (j, l) in from.iter().enumerate() {
         pos[j] = to.iter().position(|x| x == l).expect("leaf in merged cut");
     }
-    let mut out = 0u64;
+    let mut out = [0u64; 4];
     for idx in 0..(1usize << to.len()) {
         let mut src = 0;
         for (j, &p) in pos[..from.len()].iter().enumerate() {
             src |= ((idx >> p) & 1) << j;
         }
-        out |= ((t >> src) & 1) << idx;
+        out[idx / 64] |= u64::from(truth_bit(&t, src)) << (idx % 64);
     }
     out
 }
 
 impl Cut {
     fn trivial(n: u32) -> Cut {
-        let mut leaves = [0; 6];
+        let mut leaves = [0; MAX_LEAVES];
         leaves[0] = n;
-        Cut { leaves, len: 1, sig: 1 << (n % 64), truth: 0b10 }
+        Cut { leaves, len: 1, sig: 1 << (n % 64), truth: [0b10, 0, 0, 0] }
     }
 
     fn is_trivial_of(&self, n: u32) -> bool {
@@ -162,7 +206,7 @@ impl Cut {
             return None;
         }
         let (x, y) = (a.leaves(), b.leaves());
-        let mut out = [0u32; 6];
+        let mut out = [0u32; MAX_LEAVES];
         let (mut i, mut j, mut n) = (0, 0, 0);
         while i < x.len() || j < y.len() {
             let v = if j == y.len() || (i < x.len() && x[i] < y[j]) {
@@ -182,7 +226,7 @@ impl Cut {
             out[n] = v;
             n += 1;
         }
-        Some(Cut { leaves: out, len: n as u8, sig: a.sig | b.sig, truth: 0 })
+        Some(Cut { leaves: out, len: n as u8, sig: a.sig | b.sig, truth: [0; 4] })
     }
 
     /// Whether every leaf of `self` is a leaf of `other`.
@@ -255,6 +299,7 @@ fn map_impl(
     timing: &Timing,
 ) -> Mapping {
     assert!((2..=6).contains(&opts.k));
+    assert!(opts.wide.as_ref().is_none_or(|w| opts.k == 6 && w.delay.len() <= 2));
     let n = g.nodes.len();
     let fanouts = g.fanout_counts();
     let (arcs_into, arcs_from) = box_arcs(g, timing);
@@ -289,9 +334,25 @@ fn map_impl(
 }
 
 impl Mapper<'_> {
+    /// Largest cut: one LUT, or a wide function on the multiplexers.
+    fn max_leaves(&self) -> usize {
+        self.opts.k + self.opts.wide.as_ref().map_or(0, |w| w.delay.len())
+    }
+
+    /// LUTs implementing a cut of `len` leaves.
+    fn area(&self, len: u8) -> u32 {
+        1 << (len as usize).saturating_sub(self.opts.k)
+    }
+
+    /// Delay of a cut of `len` leaves.
+    fn delay(&self, len: u8) -> u32 {
+        let levels = (len as usize).saturating_sub(self.opts.k);
+        let muxes = self.opts.wide.as_ref().map_or(0, |w| w.delay[..levels].iter().sum());
+        self.opts.lut_delay + muxes
+    }
+
     fn cut_arrival(&self, c: &Cut) -> u32 {
-        self.opts.lut_delay
-            + c.leaves().iter().map(|&l| self.arrival[l as usize]).max().unwrap_or(0)
+        self.delay(c.len) + c.leaves().iter().map(|&l| self.arrival[l as usize]).max().unwrap_or(0)
     }
 
     /// Arrival time at a graph input, given the arrival times `arr` of the
@@ -307,11 +368,12 @@ impl Mapper<'_> {
     }
 
     fn cut_area_flow(&self, c: &Cut) -> f32 {
-        1.0 + c.leaves().iter().map(|&l| self.area_flow[l as usize]).sum::<f32>()
+        self.area(c.len) as f32
+            + c.leaves().iter().map(|&l| self.area_flow[l as usize]).sum::<f32>()
     }
 
     fn compute_cuts(&mut self, mode: Mode) {
-        let k = self.opts.k;
+        let k = self.max_leaves();
         for oi in 0..self.order.len() {
             let i = self.order[oi] as usize;
             let Node::And(a, b) = self.g.nodes[i] else {
@@ -340,11 +402,16 @@ impl Mapper<'_> {
                         continue;
                     }
                     let mask = truth_mask(c.len as usize);
-                    let ta = expand(ca.truth, ca.leaves(), c.leaves())
-                        ^ if a.is_compl() { mask } else { 0 };
-                    let tb = expand(cb.truth, cb.leaves(), c.leaves())
-                        ^ if b.is_compl() { mask } else { 0 };
-                    c.truth = ta & tb & mask;
+                    let zero = [0; 4];
+                    let ta = xor(
+                        expand(ca.truth, ca.leaves(), c.leaves()),
+                        if a.is_compl() { mask } else { zero },
+                    );
+                    let tb = xor(
+                        expand(cb.truth, cb.leaves(), c.leaves()),
+                        if b.is_compl() { mask } else { zero },
+                    );
+                    c.truth = and(and(ta, tb), mask);
                     add(&mut cand, c);
                 }
             }
@@ -357,7 +424,7 @@ impl Mapper<'_> {
                         }
                         let mut c = *c;
                         if phase {
-                            c.truth ^= truth_mask(c.len as usize);
+                            c.truth = xor(c.truth, truth_mask(c.len as usize));
                         }
                         add(&mut cand, c);
                     }
@@ -444,7 +511,7 @@ impl Mapper<'_> {
             if self.map_refs[i] > 0
                 && let Some(c) = self.best[i]
             {
-                let r = self.required[i].saturating_sub(self.opts.lut_delay);
+                let r = self.required[i].saturating_sub(self.delay(c.len));
                 for &l in c.leaves() {
                     let lr = &mut self.required[l as usize];
                     *lr = (*lr).min(r);
@@ -461,7 +528,7 @@ impl Mapper<'_> {
     /// Adds references for cut `c` of a node (recursively mapping leaves that
     /// become used); returns the number of LUTs added.
     fn cut_ref(&mut self, c: &Cut) -> u32 {
-        let mut area = 1;
+        let mut area = self.area(c.len);
         for &l in c.leaves() {
             let l = l as usize;
             self.map_refs[l] += 1;
@@ -475,7 +542,7 @@ impl Mapper<'_> {
     }
 
     fn cut_deref(&mut self, c: &Cut) -> u32 {
-        let mut area = 1;
+        let mut area = self.area(c.len);
         for &l in c.leaves() {
             let l = l as usize;
             self.map_refs[l] -= 1;
@@ -554,7 +621,7 @@ impl Mapper<'_> {
             }
             if let Some(c) = self.best[i] {
                 let leaves = c.leaves().to_vec();
-                level[i] = self.opts.lut_delay
+                level[i] = self.delay(c.len)
                     + leaves.iter().map(|&l| level[l as usize]).max().unwrap_or(0);
                 luts.push(Lut { node: i as u32, leaves, truth: c.truth });
             }
@@ -639,7 +706,10 @@ pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) ->
                 arcs_into[i].iter().map(|&(o, d)| arr[o as usize] + d).fold(a, u32::max)
             }
             _ => match lut_of.get(&(i as u32)) {
-                Some(l) => lut_delay + l.leaves.iter().map(|&x| arr[x as usize]).max().unwrap_or(0),
+                Some(l) => {
+                    debug_assert!(l.leaves.len() <= 6, "wide functions are mapped last");
+                    lut_delay + l.leaves.iter().map(|&x| arr[x as usize]).max().unwrap_or(0)
+                }
                 None => 0,
             },
         };
@@ -685,9 +755,9 @@ pub fn lut_graph(g: &Aig, m: &Mapping) -> Aig {
         vars.clear();
         vars.extend(l.leaves.iter().map(|&x| map[x as usize]));
         map[l.node as usize] = if vars.len() <= 4 {
-            lib.build(&mut out, l.truth, &vars)
+            lib.build(&mut out, l.truth6(), &vars)
         } else {
-            crate::refactor::sop(&mut out, l.truth, &vars)
+            crate::refactor::sop(&mut out, l.truth6(), &vars)
         };
     }
     out.outputs = g.outputs.iter().map(|o| map[o.node() as usize].xor(o.is_compl())).collect();
@@ -720,7 +790,7 @@ mod tests {
                     let v = val[leaf as usize].expect("leaf computed before use");
                     idx |= ((v >> bit) & 1) << j;
                 }
-                out |= ((l.truth >> idx) & 1) << bit;
+                out |= u64::from(truth_bit(&l.truth, idx as usize)) << bit;
             }
             val[l.node as usize] = Some(out);
         }
@@ -841,6 +911,35 @@ mod tests {
             // Remapping the LUT graph finds the same number of LUTs or fewer.
             assert!(map(&h, &opts).luts.len() <= m.luts.len());
         }
+    }
+
+    #[test]
+    fn wide_functions_use_the_multiplexers() {
+        // A random function of eight inputs (a 256-entry ROM bit): five
+        // LUT6s without multiplexers, four with MUXF7/MUXF8.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..8).map(|_| g.input()).collect();
+        let mut rng = synth_core::rng::Rng::new(5);
+        let mut lvl: Vec<Lit> = (0..256)
+            .map(|_| if rng.next_u64() & 1 != 0 { Lit::TRUE } else { Lit::FALSE })
+            .collect();
+        for &sel in &x {
+            lvl = lvl.chunks(2).map(|p| g.mux(sel, p[1], p[0])).collect();
+        }
+        g.output(lvl[0]);
+        let area = |m: &Mapping| {
+            m.luts.iter().map(|l| 1 << l.leaves.len().saturating_sub(6)).sum::<usize>()
+        };
+        let opts = MapOptions { k: 6, ..MapOptions::default() };
+        let plain = map(&g, &opts);
+        check(&g, &plain, 6);
+        let wide = MapOptions { wide: Some(Wide { delay: vec![50, 25] }), lut_delay: 100, ..opts };
+        let m = map(&g, &wide);
+        check(&g, &m, 8);
+        assert_eq!(m.luts.len(), 1);
+        assert_eq!(area(&m), 4);
+        assert!(area(&plain) > 4, "{} LUTs", area(&plain));
+        assert_eq!(m.depth, 175);
     }
 
     #[test]

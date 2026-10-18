@@ -3,7 +3,7 @@
 use synth_core::{FxHashMap, Logic};
 use synth_logic::aig::{Lit, Node};
 use synth_logic::ff::FfRules;
-use synth_logic::lutmap::{self, MapOptions};
+use synth_logic::lutmap::{self, MapOptions, Truth};
 use synth_logic::net::{Bit, LogicNet};
 use synth_netlist::{Bit as PBit, CellId, Const, Dir, NetId, Netlist, Param};
 use synth_rtl::{Attr, MemId, Module, PortDir, dff, mem, opt};
@@ -31,6 +31,20 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
         opt::clean(&mut m)?;
     }
     mem::merge_write_ports(&mut m);
+    // Shallow memories become LUT RAM with asynchronous reads; their read
+    // registers stay ordinary flip-flops that pack beside the RAM outputs.
+    let mut lutram = false;
+    for mi in (0..m.memories.len()).map(MemId::new) {
+        if m.memories[mi].alive && crate::lutram::eligible(&m.memories[mi]) {
+            let n = crate::lutram::map(&mut m, mi);
+            let kind = if m.memories[mi].depth <= 32 { "RAM32M" } else { "RAM64M" };
+            log.push(format!("{n} {kind} for {}", m.memories[mi].name));
+            lutram = true;
+        }
+    }
+    if lutram {
+        opt::clean(&mut m)?;
+    }
     // Read-register initialization belongs to the RAM output latch after
     // absorption. Keep it before the shared pass removes those registers.
     let mut read_init = FxHashMap::default();
@@ -108,72 +122,103 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
             initial.carries.iter().any(|c| c.a.len() < min + if c.sum.is_empty() { 2 } else { 0 })
         })
         .collect();
-    let mut best_log = Vec::new();
-    let (mut best, mut delay) = map_logic(initial, 8, &mut best_log)?;
-    let mut cost = resources(&best);
-    let mut selected = 3;
-    for min in alternatives {
-        let net = synth_logic::lower::lower(
+    let lower = |min| {
+        synth_logic::lower::lower(
             &m,
             &synth_logic::lower::LowerOptions { carry_min_width: Some(min) },
-        )?;
-        let mut candidate_log = Vec::new();
-        let (candidate, candidate_delay) = map_logic(net, 8, &mut candidate_log)?;
-        let candidate_cost = resources(&candidate);
-        if candidate_delay <= delay
-            && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
-            && (candidate_delay < delay || candidate_cost != cost)
-        {
-            (best, delay, cost, best_log, selected) =
-                (candidate, candidate_delay, candidate_cost, candidate_log, min);
+        )
+    };
+    let mut best = map_logic(initial, 8)?;
+    let mut selected = 3;
+    for min in alternatives {
+        let candidate = map_logic(lower(min)?, 8)?;
+        if candidate.improves(&best) {
+            (best, selected) = (candidate, min);
         }
     }
     // More cuts can improve LUT6 area, but can also steer area recovery into
     // a worse local optimum. Retry only the selected arithmetic partition
     // and keep the existing mapping when any cost increases.
-    let net = synth_logic::lower::lower(
-        &m,
-        &synth_logic::lower::LowerOptions { carry_min_width: Some(selected) },
-    )?;
-    let mut candidate_log = Vec::new();
-    let (candidate, candidate_delay) = map_logic(net, 16, &mut candidate_log)?;
-    let candidate_cost = resources(&candidate);
     let mut cuts = 8;
-    if candidate_delay <= delay
-        && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
-        && (candidate_delay < delay || candidate_cost != cost)
-    {
-        (best, delay, best_log, cuts) = (candidate, candidate_delay, candidate_log, 16);
+    let candidate = map_logic(lower(selected)?, 16)?;
+    if candidate.improves(&best) {
+        (best, cuts) = (candidate, 16);
     }
-    merge_luts(&mut best)?;
-    sweep(&mut best);
-    cost = resources(&best);
+    best.share_luts()?;
     // Sharing arithmetic changes mapper heuristics as well as removing boxes.
     // Keep it only when the final resource vector and delay dominate the
     // unshared mapping; fewer LUTs alone must not buy extra carry blocks.
-    let mut shared = synth_logic::lower::lower(
-        &m,
-        &synth_logic::lower::LowerOptions { carry_min_width: Some(selected) },
-    )?;
+    let mut shared = lower(selected)?;
     if synth_logic::carry::merge_duplicate_carries(&mut shared) != 0 {
-        let mut candidate_log = Vec::new();
-        let (mut candidate, candidate_delay) = map_logic(shared, cuts, &mut candidate_log)?;
-        merge_luts(&mut candidate)?;
-        sweep(&mut candidate);
-        let candidate_cost = resources(&candidate);
-        if candidate_delay <= delay
-            && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
-            && (candidate_delay < delay || candidate_cost != cost)
-        {
-            (best, cost, best_log) = (candidate, candidate_cost, candidate_log);
-            best_log.push("shared equivalent carry chains".into());
+        let mut candidate = map_logic(shared, cuts)?;
+        candidate.share_luts()?;
+        if candidate.improves(&best) {
+            best = candidate;
+            best.log.push("shared equivalent carry chains".into());
         }
     }
-    log.extend(best_log);
+    // Wide functions remap the selected partition only: comparing every
+    // candidate with them would let their small savings steer the choice.
+    let wide = MapOptions { wide: Some(lutmap::Wide { delay: vec![F7, F8] }), ..map_options(cuts) };
+    if let Some((graph, mapping)) =
+        synth_logic::mapping::widen(&best.net, &best.mapping, &wide, chain_timing, netlist_luts)?
+    {
+        let mut net = best.net.clone();
+        net.aig = graph;
+        let mut candidate = Mapped::new(net, mapping, best.log.clone())?;
+        candidate.share_luts()?;
+        if candidate.improves(&best) {
+            let n = candidate.mapping.luts.iter().filter(|l| l.leaves.len() > 6).count();
+            candidate.log.push(format!("{n} wide functions on MUXF7/MUXF8"));
+            best = candidate;
+        }
+    }
+    log.append(&mut best.log);
+    let mut nl = best.nl;
+    let srls = crate::srl::infer(&mut nl)?;
+    if srls != 0 {
+        log.push(format!("{srls} SRLC32E shift registers"));
+    }
+    let cost = resources(&nl);
     log.push(format!(
         "selected minimum carry width {selected}, {cuts} cuts; LUT/FF/CARRY4/BRAM18/DSP48 {cost:?}"
     ));
-    Ok((best, log))
+    Ok((nl, log))
+}
+
+/// MUXF7 and MUXF8 delays relative to a LUT and its routing (mapping
+/// heuristics, like the carry weights below).
+const F7: u32 = 50;
+const F8: u32 = 25;
+
+/// A candidate implementation: the logic network after optimization, its
+/// mapping, and the emitted netlist.
+struct Mapped {
+    net: LogicNet,
+    mapping: lutmap::Mapping,
+    nl: Netlist,
+    log: Vec<String>,
+}
+
+impl Mapped {
+    fn new(net: LogicNet, mapping: lutmap::Mapping, log: Vec<String>) -> Result<Self, String> {
+        let nl = emit(&net, &mapping)?;
+        Ok(Mapped { net, mapping, nl, log })
+    }
+
+    /// Whether `self` dominates `other`: no resource count and no estimated
+    /// delay increases, and something improves.
+    fn improves(&self, other: &Mapped) -> bool {
+        let (a, b) = (resources(&self.nl), resources(&other.nl));
+        let (d, e) = (self.mapping.depth, other.mapping.depth);
+        d <= e && a.iter().zip(b).all(|(&x, y)| x <= y) && (d < e || a != b)
+    }
+
+    fn share_luts(&mut self) -> Result<(), String> {
+        merge_luts(&mut self.nl)?;
+        sweep(&mut self.nl);
+        Ok(())
+    }
 }
 
 fn resources(nl: &Netlist) -> [usize; 5] {
@@ -197,11 +242,11 @@ fn resources(nl: &Netlist) -> [usize; 5] {
     counts
 }
 
-fn map_logic(
-    mut net: LogicNet,
-    cuts_per_node: usize,
-    log: &mut Vec<String>,
-) -> Result<(Netlist, u32), String> {
+fn map_options(cuts_per_node: usize) -> MapOptions {
+    MapOptions { k: 6, cuts_per_node, lut_delay: 100, ..Default::default() }
+}
+
+fn map_logic(mut net: LogicNet, cuts_per_node: usize) -> Result<Mapped, String> {
     synth_logic::ff::legalize(
         &mut net,
         &FfRules { init_one: true, srst_with_arst: false, srst_over_en: true },
@@ -217,10 +262,11 @@ fn map_logic(
         }
     }
     net.cleanup();
-    let opts = MapOptions { k: 6, cuts_per_node, lut_delay: 100, ..Default::default() };
+    let mut log = Vec::new();
+    let opts = map_options(cuts_per_node);
     let mapping =
-        synth_logic::mapping::optimize(&mut net, &opts, 6, chain_timing, netlist_luts, log)?;
-    Ok((emit(&net, &mapping)?, mapping.depth))
+        synth_logic::mapping::optimize(&mut net, &opts, 6, chain_timing, netlist_luts, &mut log)?;
+    Mapped::new(net, mapping, log)
 }
 
 // Relative mapping costs, not device STA or an Fmax prediction. Keep paths
@@ -304,7 +350,7 @@ struct Emitter<'a> {
     net: &'a LogicNet,
     nl: Netlist,
     src: Vec<NetId>,
-    lut_of: FxHashMap<u32, (NetId, Vec<u32>, u64)>,
+    lut_of: FxHashMap<u32, (NetId, Vec<u32>, Truth)>,
     /// Mapped nodes whose LUT outputs the complement (chosen when most
     /// uses outside the LUT network want the complement).
     phase: FxHashMap<u32, bool>,
@@ -314,7 +360,7 @@ struct Emitter<'a> {
     one: Option<NetId>,
 }
 
-fn lut_init(truth: u64, k: usize) -> Param {
+pub(crate) fn lut_init(truth: u64, k: usize) -> Param {
     Param::Bits(
         (0..1usize << k)
             .map(|i| if truth >> i & 1 == 1 { PBit::One } else { PBit::Zero })
@@ -360,11 +406,25 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
         let (pos, neg) = refs.get(&l.node).copied().unwrap_or_default();
         e.phase.insert(l.node, neg > pos);
     }
+    // LUT levels, to give wide functions' multiplexer selects the latest
+    // leaves: a select only passes through the multiplexers.
+    let mut level: FxHashMap<u32, u32> = FxHashMap::default();
+    for l in &mapping.luts {
+        let deepest = l.leaves.iter().filter_map(|x| level.get(x)).max().copied().unwrap_or(0);
+        level.insert(l.node, deepest + 1);
+    }
     for l in &mapping.luts {
         let out = e.lut_of[&l.node].0;
         let ins: Vec<NetId> = l.leaves.iter().map(|&x| e.node_net(x)).collect::<Result<_, _>>()?;
         let truth = e.net_truth(l.node, &l.leaves, l.truth, false);
-        e.lut(&format!("$lut{}", l.node), &ins, truth, out)?;
+        let name = format!("$lut{}", l.node);
+        if ins.len() <= 6 {
+            e.lut(&name, &ins, truth[0], out)?;
+        } else {
+            let mut order: Vec<usize> = (0..ins.len()).collect();
+            order.sort_by_key(|&j| (level.get(&l.leaves[j]).copied().unwrap_or(0), l.leaves[j]));
+            e.wide(&name, &ins, truth, &order, out)?;
+        }
     }
     // Ports.
     for p in &net.ports {
@@ -518,6 +578,53 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A function of seven or eight inputs: LUT6 cofactors of the inputs
+    /// last in `order`, joined by MUXF7 (and MUXF8) cells selected by them.
+    fn wide(
+        &mut self,
+        name: &str,
+        ins: &[NetId],
+        truth: Truth,
+        order: &[usize],
+        out: NetId,
+    ) -> Result<(), String> {
+        let (data, selects) = order.split_at(6);
+        let data_nets: Vec<NetId> = data.iter().map(|&j| ins[j]).collect();
+        let mut level = Vec::new();
+        for v in 0..1usize << selects.len() {
+            let mut t = 0u64;
+            for x in 0..64usize {
+                let mut idx = 0;
+                for (b, &j) in data.iter().enumerate() {
+                    idx |= (x >> b & 1) << j;
+                }
+                for (b, &j) in selects.iter().enumerate() {
+                    idx |= (v >> b & 1) << j;
+                }
+                t |= u64::from(lutmap::truth_bit(&truth, idx)) << x;
+            }
+            let o = self.nl.add_net(&format!("{name}_{v}"));
+            self.lut(&format!("{name}_{v}"), &data_nets, t, o)?;
+            level.push(o);
+        }
+        for (b, &j) in selects.iter().enumerate() {
+            let kind = if b == 0 { "MUXF7" } else { "MUXF8" };
+            let last = b + 1 == selects.len();
+            let mut next = Vec::new();
+            for pair in level.chunks(2) {
+                let o = if last { out } else { self.nl.add_net(&format!("{name}_f7")) };
+                let c = self.nl.add_cell(&format!("{name}_{}", kind.to_lowercase()), kind);
+                self.pin(c, "I0", Dir::Input, Some(pair[0]))?;
+                self.pin(c, "I1", Dir::Input, Some(pair[1]))?;
+                self.pin(c, "S", Dir::Input, Some(ins[j]))?;
+                self.pin(c, "O", Dir::Output, Some(o))?;
+                next.push(o);
+            }
+            level = next;
+        }
+        Ok(())
+    }
+
     fn xor(&mut self, a: NetId, b: NetId, name: &str) -> Result<NetId, String> {
         if a == b {
             return Ok(self.konst(false));
@@ -613,19 +720,16 @@ impl Emitter<'_> {
     /// Truth table over the leaves' nets (which carry complemented values
     /// for leaves in negative phase) computing node `root`, complemented if
     /// the node's phase (xor `invert`) says so.
-    fn net_truth(&self, root: u32, leaves: &[u32], truth: u64, invert: bool) -> u64 {
+    fn net_truth(&self, root: u32, leaves: &[u32], truth: Truth, invert: bool) -> Truth {
         let k = leaves.len();
         let mask: usize =
             leaves.iter().enumerate().map(|(j, &l)| (self.phase(l) as usize) << j).sum();
-        let mut t = 0u64;
+        let flip = self.phase(root) ^ invert;
+        let mut t = [0u64; 4];
         for x in 0..(1usize << k) {
-            if (truth >> (x ^ mask)) & 1 == 1 {
-                t |= 1 << x;
+            if lutmap::truth_bit(&truth, x ^ mask) != flip {
+                t[x / 64] |= 1 << (x % 64);
             }
-        }
-        if self.phase(root) ^ invert {
-            let all = if k >= 6 { u64::MAX } else { (1u64 << (1 << k)) - 1 };
-            t = !t & all;
         }
         t
     }
@@ -662,13 +766,13 @@ impl Emitter<'_> {
         let out = self.nl.add_net(&format!("$inv{}", l.node()));
         match self.lut_of.get(&l.node()).cloned() {
             // A second LUT computing the other polarity.
-            Some((_, leaves, truth)) => {
+            Some((_, leaves, truth)) if leaves.len() <= 6 => {
                 let ins: Vec<NetId> =
                     leaves.iter().map(|&x| self.node_net(x)).collect::<Result<_, _>>()?;
                 let t = self.net_truth(l.node(), &leaves, truth, true);
-                self.lut(&format!("$lutn{}", l.node()), &ins, t, out)?;
+                self.lut(&format!("$lutn{}", l.node()), &ins, t[0], out)?;
             }
-            None => self.lut(&format!("$not{}", l.node()), &[n], 0b01, out)?,
+            _ => self.lut(&format!("$not{}", l.node()), &[n], 0b01, out)?,
         }
         self.inverted.insert(l.node(), out);
         Ok(out)
@@ -724,6 +828,10 @@ fn merge_luts(nl: &mut Netlist) -> Result<(), String> {
                 continue;
             };
             let Some(out) = nl.pin_net(c, "O") else { continue };
+            // A multiplexer's data inputs are its own LUTs in the slice.
+            if nl.nets[out].users.iter().any(|u| nl.cell_kind(u.cell).starts_with("MUXF")) {
+                continue;
+            }
             let mut order: Vec<_> = (0..k).collect();
             order.sort_by_key(|&i| ins[i]);
             let inputs: Vec<_> = order.iter().map(|&i| ins[i]).collect();
