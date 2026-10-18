@@ -115,6 +115,7 @@ impl Server {
                 "textDocument/prepareRename" => Ok(self.prepare_rename(params)),
                 "textDocument/rename" => self.rename(params),
                 "textDocument/semanticTokens/full" => Ok(self.semantic_tokens(params)),
+                "textDocument/formatting" => Ok(self.formatting(params)),
                 _ => Err((-32601, format!("unsupported method `{method}`"))),
             };
             out.push(match result {
@@ -184,6 +185,7 @@ impl Server {
             .with("referencesProvider", true)
             .with("documentHighlightProvider", true)
             .with("documentSymbolProvider", true)
+            .with("documentFormattingProvider", true)
             .with("renameProvider", Json::obj().with("prepareProvider", true))
             .with("completionProvider", Json::obj().with("triggerCharacters", vec!["."]))
             .with(
@@ -511,6 +513,17 @@ impl Server {
         let snap = self.snapshots.get(uri);
         let items = complete(&text, off, snap, &self.snapshots);
         Json::obj().with("isIncomplete", false).with("items", items)
+    }
+
+    fn formatting(&self, params: &Json) -> Json {
+        let Some(uri) = params.at(&["textDocument", "uri"]).as_str() else { return Json::Null };
+        let Some(text) = self.text_of(uri) else { return Json::Null };
+        let out = synth_weft::fmt::format(&text);
+        if out == text {
+            return Json::Arr(Vec::new());
+        }
+        let ix = LineIndex::new(&text, self.utf8);
+        Json::Arr(vec![Json::obj().with("range", ix.range(0, text.len())).with("newText", out)])
     }
 
     fn semantic_tokens(&self, params: &Json) -> Json {

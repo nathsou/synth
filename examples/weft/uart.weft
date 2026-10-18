@@ -6,8 +6,8 @@ enum TxState { Idle, Start, Data, Stop }
 /// Sends `byte` when `start` is high while idle. CLKS_PER_BIT is the clock
 /// frequency divided by the baud rate.
 module uart_tx<CLKS_PER_BIT: int>(
-    in start: bool,
-    in byte: uint<8>,
+    in  start: bool,
+    in  byte: uint<8>,
     out tx: bool,
     out busy: bool,
 ) {
@@ -88,9 +88,9 @@ module uart_rx<CLKS_PER_BIT: int>(in rx: bool @async, out byte: uint<8>, out val
 /// A first-in first-out queue. `pop` takes the oldest element, which
 /// appears on `head` in the next cycle (like a block RAM read).
 module fifo<T: type, DEPTH: int = 16>(
-    in push: bool,
-    in data: T,
-    in pop: bool,
+    in  push: bool,
+    in  data: T,
+    in  pop: bool,
     out head: T,
     out empty: bool,
     out full: bool,

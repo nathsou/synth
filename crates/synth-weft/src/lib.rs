@@ -7,6 +7,7 @@
 
 pub mod ast;
 mod check;
+pub mod fmt;
 mod elab;
 pub mod lexer;
 pub mod parser;

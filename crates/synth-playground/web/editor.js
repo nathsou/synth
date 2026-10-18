@@ -12,8 +12,9 @@ export { langOf };
 const KIND_ICON = { Module: 'M', Function: 'ƒ', Type: 'T', Variant: '·', Field: '.', Port: 'p', Wire: 'w', Register: 'r', Memory: 'm', Instance: 'i', Domain: '@', Const: 'c', Value: 'v', Variable: 'v', Generic: 'g', keyword: 'k' };
 
 export class Editor {
-  constructor(host, { onChange, onRun, onNavigate }) {
+  constructor(host, { onChange, onRun, onNavigate, onFormat }) {
     this.onChange = onChange;
+    this.onFormat = onFormat;
     this.onRun = onRun;
     this.onNavigate = onNavigate;
     this.lang = 'text';
@@ -265,6 +266,20 @@ export class Editor {
     }
   }
 
+  /** Replaces the whole text, keeping the caret's line and undo history. */
+  replaceAll(text) {
+    const line = this.ta.value.slice(0, this.ta.selectionStart).split('\n').length - 1;
+    const top = this.ta.scrollTop;
+    this.insert(text, 0, this.ta.value.length);
+    const lines = text.split('\n');
+    let off = 0;
+    for (let i = 0; i < Math.min(line, lines.length - 1); i++) off += lines[i].length + 1;
+    off += /^\s*/.exec(lines[Math.min(line, lines.length - 1)])[0].length;
+    this.ta.setSelectionRange(off, off);
+    this.ta.scrollTop = top;
+    this.syncScroll();
+  }
+
   lineStart(pos) { return this.ta.value.lastIndexOf('\n', pos - 1) + 1; }
 
   key(e) {
@@ -274,6 +289,11 @@ export class Editor {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && (e.key === 'Control' || e.key === 'Meta')) this.el.classList.add('link-mode');
     if (this.completion && this.completionKey(e)) return;
+    if (e.shiftKey && e.altKey && (e.key === 'F' || e.key === 'f' || e.code === 'KeyF')) {
+      e.preventDefault();
+      this.onFormat();
+      return;
+    }
     if (mod && (e.key === 'Enter' || e.key === 's')) {
       e.preventDefault();
       this.onRun();

@@ -50,6 +50,7 @@ class App {
     this.editor = new Editor($('editor'), {
       onChange: (text) => this.edited(text),
       onRun: () => this.run(),
+      onFormat: () => this.format(),
       onNavigate: (file, s, e) => this.revealIndex(file, s, e),
     });
     this.editor.allRefs = () => this.allRefs();
@@ -270,7 +271,18 @@ class App {
         ondblclick: () => this.renameFile(f),
       }, h('span', { class: `lang-${langOf(f.name)}` }, f.name), close);
     });
-    tabs.replaceChildren(...items, h('button', { class: 'add', title: 'New file', onclick: () => this.newFile() }, icon('plus')));
+    tabs.replaceChildren(
+      ...items,
+      h('button', { class: 'add', title: 'New file', onclick: () => this.newFile() }, icon('plus')),
+      h('span', { style: { flex: 1 } }),
+      h('button', { class: 'add', title: 'Format the file (Shift+Alt+F)', onclick: () => this.format() }, icon('format'), 'Format'));
+  }
+
+  async format() {
+    const name = this.project.active;
+    if (!name.endsWith('.weft')) return toast('Only Weft files can be formatted');
+    const { text } = await this.backend.format(this.editor.text);
+    if (text !== this.editor.text) this.editor.replaceAll(text);
   }
 
   newFile() {

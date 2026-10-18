@@ -11,6 +11,7 @@
 //!   and the decoded configuration bits.
 //! - `analyze`: diagnostics and the name index of Weft sources, for the
 //!   editor (hover, go to definition).
+//! - `format`: a Weft source, formatted.
 //! - `examples`, `devices`: what the app offers to start from.
 
 pub mod chip;
@@ -104,6 +105,10 @@ pub fn handle(method: &str, body: &str) -> String {
     let out = match method {
         "run" => run(&req),
         "analyze" => analyze(&req),
+        "format" => {
+            let text = req.at(&["text"]).as_str().unwrap_or("");
+            Json::obj().with("text", synth_weft::fmt::format(text))
+        }
         "examples" => examples(),
         "devices" => devices(),
         other => Json::obj().with("error", format!("unknown method `{other}`")),
