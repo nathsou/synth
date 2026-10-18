@@ -236,14 +236,15 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     ));
     // Remapping: the mapped LUTs as a graph, restructured, with the previous
     // structure as choices; kept while the netlist shrinks without getting
-    // deeper.
+    // deeper, or gets shallower without growing.
     let mut prev = main;
     for round in 1..=opts.remap_rounds {
         let lg = lutmap::lut_graph(&best.graph, &best.mapping);
         let restructured = synth_logic::opt::compress2(&lg);
         let choices = synth_logic::choice::build(&[&restructured, &lg, &prev], &Default::default());
         let c = map_best(&net, choices, &opts.map)?;
-        if c.luts >= best.luts || c.mapping.depth > best.mapping.depth {
+        let (d, bd) = (c.mapping.depth, best.mapping.depth);
+        if !(c.luts < best.luts && d <= bd || c.luts <= best.luts && d < bd) {
             break;
         }
         log.push(format!(
