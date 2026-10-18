@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: CERN-OHL-W-2.0
 // NTSC RP2C02 digital picture generator. Clock at one edge per PPU dot.
+// Palette RAM contents at power-up are unspecified and differ between chips;
+// these are the values blargg recorded on one NES, used here for determinism.
+const NES_POWER_UP_PALETTE: [uint<6>; 32] = [
+    0x09,0x01,0x00,0x01,0x00,0x02,0x02,0x0D,0x08,0x10,0x08,0x24,0x00,0x00,0x04,0x2C,
+    0x09,0x01,0x34,0x03,0x00,0x04,0x00,0x14,0x08,0x3A,0x00,0x02,0x00,0x20,0x2C,0x08,
+];
 fn nes_palette_index(address: uint<5>) -> uint<5> {
     if address[1:0] == 0 { address & 0x0F } else { address }
 }
@@ -61,7 +67,7 @@ module nes_ppu(
     reg oam_address: uint<8> = 0;
     mem oam: [uint<8>; 256];
     mem vram: [uint<8>; 4096];
-    mem palette: [uint<6>; 32];
+    mem palette: [uint<6>; 32] init NES_POWER_UP_PALETTE;
     reg secondary: [uint<8>; 32] = [0xFF; 32];
     reg secondary_zero: [bool; 8] = [false; 8];
     reg eval_n: uint<6> = 0;

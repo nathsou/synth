@@ -5,6 +5,7 @@
 #include "verilated.h"
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -83,18 +84,20 @@ struct Input { unsigned frame; unsigned p1; unsigned p2; };
 
 int main(int argc, char **argv) {
     try {
-        if (argc < 2) throw std::runtime_error("usage: nes_sim ROM [--frames N] [--test] [--legacy-result HEX_ADDRESS] [--ppm FILE] [--wav FILE] [--input FILE] [--save FILE] [--trace FILE]");
+        if (argc < 2) throw std::runtime_error("usage: nes_sim ROM [--frames N] [--test] [--legacy-result HEX_ADDRESS] [--console-code] [--console-test] [--console-pass TEXT] [--console-fail TEXT] [--console-crc HEX] [--ppm FILE] [--ppm-every N] [--wav FILE] [--input FILE] [--save FILE] [--trace FILE]");
         Verilated::commandArgs(argc, argv);
         std::string ppm_name, wav_name, input_name, save_name, trace_name;
-        unsigned max_frames = 600;
+        unsigned max_frames = 600, ppm_every = 0;
         bool test = false;
         bool console_test = false;
-        std::vector<std::string> console_crcs;
+        bool console_code = false;
+        std::vector<std::string> console_crcs, console_pass{"Passed"}, console_fail{"Failed"};
         int legacy_address = -1, legacy_code = -1;
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--test") { test = true; continue; }
             if (arg == "--console-test") { test = true; console_test = true; continue; }
+            if (arg == "--console-code") { test = true; console_code = true; continue; }
             if (i + 1 == argc) throw std::runtime_error("missing value for " + arg);
             const std::string value = argv[++i];
             if (arg == "--frames") { max_frames = std::stoul(value); if (!max_frames) throw std::runtime_error("frames must be positive"); }
@@ -108,13 +111,20 @@ int main(int argc, char **argv) {
                     throw std::runtime_error("console CRC must be 8 uppercase hexadecimal digits");
                 console_crcs.push_back(value); console_test = true; test = true;
             }
+            else if (arg == "--console-pass" || arg == "--console-fail") {
+                if (value.empty()) throw std::runtime_error("console text must not be empty");
+                (arg == "--console-pass" ? console_pass : console_fail).push_back(value);
+                console_test = true; test = true;
+            }
             else if (arg == "--ppm") ppm_name = value;
+            else if (arg == "--ppm-every") { ppm_every = std::stoul(value); if (!ppm_every) throw std::runtime_error("--ppm-every must be positive"); }
             else if (arg == "--wav") wav_name = value;
             else if (arg == "--input") input_name = value;
             else if (arg == "--save") save_name = value;
             else if (arg == "--trace") trace_name = value;
             else throw std::runtime_error("unknown argument " + arg);
         }
+        if (ppm_every && ppm_name.empty()) throw std::runtime_error("--ppm-every requires --ppm");
         Cartridge cart(argv[1]);
         if (!save_name.empty()) {
             if (!cart.battery) throw std::runtime_error("--save requires a battery-backed cartridge");
@@ -139,12 +149,17 @@ int main(int argc, char **argv) {
         }
         std::ofstream trace;
         if (!trace_name.empty()) { trace.open(trace_name); if (!trace) throw std::runtime_error("cannot open trace"); trace << "cycle,address,write,data,fetch,pc,a,x,y,s,p,line,dot,irq,ppu_address\n"; }
+        std::array<uint32_t, 256 * 240> pixels{};
+        const auto write_ppm = [&](const std::string &name) {
+            std::ofstream f(name, std::ios::binary); if (!f) throw std::runtime_error("cannot write PPM");
+            f << "P6\n256 240\n255\n";
+            for (auto p : pixels) { f.put((p >> 16) & 255); f.put((p >> 8) & 255); f.put(p & 255); }
+        };
         auto model = std::make_unique<Vnes>();
         auto &nes = *model;
         nes.mapper = cart.mapper; nes.prg_mask = cart.prg.size() / 8192 - 1; nes.chr_mask = cart.chr.size() / 1024 - 1;
         nes.vertical = cart.vertical; nes.four_screen = cart.four; nes.chr_ram = cart.chr_ram;
         nes.pad1 = 0; nes.pad2 = 0; nes.reset = 1; nes.clk = 0; nes.eval(); nes.clk = 1; nes.eval(); nes.reset = 0;
-        std::array<uint32_t, 256 * 240> pixels{};
         std::array<uint8_t, 4096> console{};
         console.fill(' ');
         std::vector<int16_t> audio;
@@ -157,6 +172,27 @@ int main(int argc, char **argv) {
         bool reset_armed = true;
         unsigned self_jumps = 0;
         int result = test ? 2 : 0;
+        const auto console_text = [&] {
+            std::string text;
+            for (unsigned page = 0; page < 4; ++page) {
+                for (unsigned row = 0; row < 30; ++row) {
+                    for (unsigned col = 0; col < 32; ++col) {
+                        const uint8_t c = console[page * 1024 + row * 32 + col];
+                        text.push_back(c >= 32 && c < 127 ? char(c) : ' ');
+                    }
+                    text.push_back('\n');
+                }
+            }
+            return text;
+        };
+        const auto print_console = [](const std::string &text) {
+            std::istringstream lines(text);
+            std::string line;
+            while (std::getline(lines, line)) {
+                const auto end = line.find_last_not_of(' ');
+                if (end != std::string::npos) std::cout << line.substr(0, end + 1) << '\n';
+            }
+        };
         double previous_mix = 0, hp90 = 0, hp440 = 0, previous_hp90 = 0, lp = 0;
         // Clock-derived bounds catch hangs even if the frame output breaks.
         while (frames < max_frames && dots < uint64_t(max_frames + 2) * 341 * 262) {
@@ -189,7 +225,14 @@ int main(int argc, char **argv) {
                 }
                 pixels[nes.pixel_y * 256 + nes.pixel_x] = color; ++pixel_count;
             }
-            if (nes.frame) ++frames;
+            if (nes.frame) {
+                ++frames;
+                if (ppm_every && frames % ppm_every == 0) {
+                    const auto dot = ppm_name.rfind('.');
+                    const auto stem = dot == std::string::npos ? ppm_name : ppm_name.substr(0, dot);
+                    write_ppm(stem + "-" + std::to_string(frames) + ".ppm");
+                }
+            }
             if (nes.audio_valid && !wav_name.empty()) {
                 const double pulses = nes.audio_pulse1 + nes.audio_pulse2;
                 const double tnd = nes.audio_triangle / 8227.0 + nes.audio_noise / 12241.0 + nes.audio_dmc / 22638.0;
@@ -205,14 +248,14 @@ int main(int argc, char **argv) {
                 }
             }
             if (nes.debug_cpu_tick) {
-                if (console_test && nes.debug_write && (nes.debug_address & 0xe007) == 0x2007 &&
+                if ((console_test || console_code) && nes.debug_write && (nes.debug_address & 0xe007) == 0x2007 &&
                     nes.debug_ppu_address >= 0x2000 && nes.debug_ppu_address < 0x3f00) {
                     console[nes.debug_ppu_address & 0xfff] = nes.debug_data;
                     console_changed = true;
                 }
                 if (legacy_address >= 0 && nes.debug_write && (nes.debug_address & 0xf800) == 0 &&
                     (nes.debug_address & 0x7ff) == unsigned(legacy_address)) legacy_code = nes.debug_data;
-                if (legacy_address >= 0 && nes.debug_fetch && nes.debug_pc >= 0x8000) {
+                if ((legacy_address >= 0 || console_code) && nes.debug_fetch && nes.debug_pc >= 0x8000) {
                     const size_t pa = nes.prg_address;
                     const bool self_jump = pa + 2 < cart.prg.size() && cart.prg[pa] == 0x4c &&
                         (cart.prg[pa + 1] | (cart.prg[pa + 2] << 8)) == nes.debug_pc;
@@ -228,29 +271,30 @@ int main(int argc, char **argv) {
             if (nes.chr_write) cart.chr[nes.chr_address] = nes.chr_write_data;
             nes.clk = 1; nes.eval(); ++dots;
             if (nes.halted) throw std::runtime_error("CPU executed a KIL opcode");
-            if (console_changed) {
-                std::string text;
-                for (unsigned page = 0; page < 4; ++page) {
-                    for (unsigned row = 0; row < 30; ++row) {
-                        for (unsigned col = 0; col < 32; ++col) {
-                            const uint8_t c = console[page * 1024 + row * 32 + col];
-                            text.push_back(c >= 32 && c < 127 ? char(c) : ' ');
-                        }
-                        text.push_back('\n');
-                    }
-                }
-                const bool passed = text.find("Passed") != std::string::npos ||
-                    std::any_of(console_crcs.begin(), console_crcs.end(), [&](const std::string &crc) { return text.find(crc) != std::string::npos; });
-                const bool failed = text.find("Failed") != std::string::npos;
+            if (console_test && console_changed) {
+                const std::string text = console_text();
+                const auto shows = [&](const std::vector<std::string> &strings) {
+                    return std::any_of(strings.begin(), strings.end(), [&](const std::string &s) { return text.find(s) != std::string::npos; });
+                };
+                const bool passed = shows(console_pass) || shows(console_crcs);
+                const bool failed = shows(console_fail);
                 if (passed || failed) {
                     result = failed ? 1 : 0;
                     std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " ASCII console result\n";
-                    std::istringstream lines(text);
-                    std::string line;
-                    while (std::getline(lines, line)) {
-                        const auto end = line.find_last_not_of(' ');
-                        if (end != std::string::npos) std::cout << line.substr(0, end + 1) << '\n';
-                    }
+                    print_console(text);
+                    break;
+                }
+            }
+            // 2005-era blargg tests print the final code as "$hh", then
+            // loop forever; $01 always means that every test passed.
+            if (console_code && self_jumps >= 3) {
+                const std::string text = console_text();
+                const auto at = text.find('$');
+                if (at != std::string::npos && at + 2 < text.size() && std::isxdigit(text[at + 1]) && std::isxdigit(text[at + 2])) {
+                    const unsigned code = std::stoul(text.substr(at + 1, 2), nullptr, 16);
+                    result = code == 1 ? 0 : 1;
+                    std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " console code=" << code << '\n';
+                    print_console(text);
                     break;
                 }
             }
@@ -277,11 +321,7 @@ int main(int argc, char **argv) {
             }
         }
         if (test && result == 2) std::cerr << "TIMEOUT " << argv[1] << " PC=" << std::hex << nes.debug_pc << std::dec << '\n';
-        if (!ppm_name.empty()) {
-            std::ofstream f(ppm_name, std::ios::binary); if (!f) throw std::runtime_error("cannot write PPM");
-            f << "P6\n256 240\n255\n";
-            for (auto p : pixels) { f.put((p >> 16) & 255); f.put((p >> 8) & 255); f.put(p & 255); }
-        }
+        if (!ppm_name.empty()) write_ppm(ppm_name);
         if (!wav_name.empty()) wav(wav_name, audio);
         if (!save_name.empty()) {
             std::ofstream f(save_name, std::ios::binary); if (!f) throw std::runtime_error("cannot write save");

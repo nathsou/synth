@@ -19,7 +19,7 @@ jobs:
     # Match the main workflow: expensive simulations wait for ready-for-review.
     if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -46,7 +46,7 @@ jobs:
       - name: CPU trace and NES diagnostic ROMs
         run: |
           make -C examples/nes SYNTH=../../target/ci/synth cpu-test
-          python3 examples/nes/tests/run.py --sim work/nes/obj/Vnes --roms work/nes-test-roms --report work/nes/results.json
+          python3 examples/nes/tests/run.py --sim work/nes/obj/Vnes --roms work/nes-test-roms --jobs 4 --report work/nes/results.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
