@@ -64,24 +64,25 @@ Whole flow to a bitstream (logic cells, Fmax, time):
 
 | Design            | synth cells | synth Fmax | synth time | Y+N cells | Y+N Fmax | Y+N time |
 |-------------------|------------:|-----------:|-----------:|----------:|---------:|---------:|
-| PicoRV32 SoC      |        1592 |   76.4 MHz |       14 s |      1549 | 63.5 MHz |     17 s |
-| SERV SoC          |         548 |   83.7 MHz |        3 s |       714 | 77.4 MHz |     10 s |
-| SERV, Go Board    |         581 |   88.4 MHz |        2 s |       752 | 80.5 MHz |      7 s |
-| Hazard3 SoC (Cu)  |        2237 |   39.1 MHz |       19 s |      2339 | 34.4 MHz |     55 s |
-| Euler 14          |       6161* |   49.9 MHz |      128 s |      6343 | 66.6 MHz |     44 s |
-| Euler 25          |        1390 |   50.1 MHz |        4 s |      1743 | 56.1 MHz |     10 s |
-| Euler 31          |        1011 |  116.6 MHz |        4 s |      1387 |105.4 MHz |     11 s |
-| Euler 43          |        6235 |   39.2 MHz |       56 s |      6164 | 47.4 MHz |    150 s |
-| Euler 48          |       6863* |   41.0 MHz |      451 s |      6597 | 62.8 MHz |     44 s |
-| Euler 57          |        2719 |   56.3 MHz |       11 s |      3602 | 62.0 MHz |     22 s |
-| Euler 58          |        7423 |   45.2 MHz |      112 s |      7403 | 57.4 MHz |     82 s |
-| Euler 92          |        3928 |   70.9 MHz |       15 s |      4168 | 67.3 MHz |     20 s |
-| Euler 97          |        1534 |   68.2 MHz |        7 s |      1617 | 54.2 MHz |      9 s |
+| PicoRV32 SoC      |        1592 |   83.5 MHz |        7 s |      1549 | 63.5 MHz |     18 s |
+| SERV SoC          |         548 |   86.9 MHz |        2 s |       714 | 77.4 MHz |     11 s |
+| SERV, Go Board    |         581 |   89.8 MHz |        1 s |       752 | 80.5 MHz |      8 s |
+| Hazard3 SoC (Cu)  |        2237 |   41.9 MHz |       13 s |      2339 | 34.4 MHz |     62 s |
+| Euler 14          |        6161 |   63.3 MHz |       38 s |      6343 | 66.6 MHz |     51 s |
+| Euler 25          |        1390 |   50.9 MHz |        3 s |      1743 | 56.1 MHz |     11 s |
+| Euler 31          |        1011 |  128.0 MHz |        2 s |      1387 | 105.4 MHz |     11 s |
+| Euler 43          |        6235 |   43.4 MHz |       41 s |      6164 | 47.4 MHz |    159 s |
+| Euler 48          |        6863 |   48.1 MHz |       43 s |      6597 | 62.8 MHz |     54 s |
+| Euler 57          |        2719 |   56.4 MHz |        7 s |      3602 | 62.0 MHz |     24 s |
+| Euler 58          |        7423 |   59.5 MHz |       71 s |      7403 | 57.4 MHz |    102 s |
+| Euler 92          |        3928 |   73.7 MHz |       12 s |      4168 | 67.3 MHz |     23 s |
+| Euler 97          |        1534 |   68.8 MHz |        4 s |      1617 | 54.2 MHz |     10 s |
 
-\* One of the three seeds failed to route (being worked on). Synthesis is
-smaller and much faster across the board, and the processors and control-heavy
-designs end up faster too; the arithmetic-heavy Euler solvers on a nearly full
-HX8K are where placement and routing still trail nextpnr, in Fmax and in time.
+Every seed of every design routes. Synthesis is smaller on 14 of the 16
+designs and much faster on all, the whole flow is faster than Yosys + nextpnr
+on every design, and the processors and four of the nine solvers end up with
+a higher Fmax; the other, arithmetic-heavy solvers (multipliers and many carry
+chains, Euler 48 most of all) are where Fmax still trails nextpnr.
 
 Artix-7 is next.
 
