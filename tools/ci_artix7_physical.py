@@ -125,6 +125,7 @@ def main():
         ("single_io", "module top(input a,b,output y,z); assign y=~a; assign z=~b; endmodule", ["a","y","b","z"], []),
         ("counter", "module top(input clk,output y); reg [16:0] q=17'h12345; always @(posedge clk) q<=q+1; assign y=q[16]; endmodule", ["clk", "y"], ["clk"]),
         ("controls", "module top(input clk,rst,ce,d,output reg [3:0] q=4'h6); always @(posedge clk) if(rst) q[0]<=0; else if(ce) q[0]<=d; always @(negedge clk) if(rst) q[1]<=1; else if(ce) q[1]<=d; always @(posedge clk or posedge rst) if(rst) q[2]<=0; else q[2]<=d; always @(negedge clk or posedge rst) if(rst) q[3]<=1; else q[3]<=d; endmodule", ["clk","rst","ce","d"]+[f"q[{i}]" for i in range(4)], ["clk"]),
+        ("sharedcarry", "module top(input [7:0] a,b,input cin,output [7:0] x,y,d,output lt); assign x=a+b; assign y=(~a)+(~b)+cin; assign d=a-b; assign lt=a<b; endmodule", ["cin","lt"]+[f"{p}[{i}]" for p in ["a","b","x","y","d"] for i in range(8)], []),
         ("dsp", "module top(input [11:0] a,b,c,d,output [23:0] y); assign y=a*b+c*d; endmodule", [f"{p}[{i}]" for p,n in [("a",12),("b",12),("c",12),("d",12),("y",24)] for i in range(n)], []),
         ("ram", "module top(input clk,we,input [8:0] addr,input [7:0] din,output reg [7:0] q=8'h93); reg [7:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^8'hA5; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",8),("q",8)] for i in range(n)], ["clk"]),
     ]

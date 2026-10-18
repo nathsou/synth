@@ -43,7 +43,7 @@ when writes use a different clock. Such reads remain asynchronous instead of
 being updated only on the address clock.
 
 AIG optimization, structural choices, carry-aware LUT mapping, remapping and
-SAT-based don't-care optimization now live in `synth-logic::mapping`. Backends
+window-based don't-care optimization now live in `synth-logic::mapping`. Backends
 provide hard-block timing and emitted-netlist cost callbacks. The carry/DSP timing
 weights for Artix-7 are **mapping heuristics, not calibrated device delays**;
 the printed LUT-level delay is not an Fmax prediction.
@@ -55,8 +55,18 @@ estimated delay does not increase, and at least one measure improves. This
 lets three-bit additions fit directly into LUT6s and exposes neighboring
 logic to optimization. The selected arithmetic partition is also tried with
 16 priority cuts per node instead of 8, under the same acceptance rule. This
-can require up to four mapping runs; these are synthesis heuristics, not
-guarantees about placed timing or slice count.
+can require up to four mapping runs. A further candidate shares identical
+carry chains (including subtraction/comparison pairs and commuted operands),
+and is accepted under the same resource and delay constraints.
+
+After selection, exact duplicate LUT functions are merged with canonical pin
+ordering, including propagate LUTs created after the main mapper. Dedicated
+carry inputs still require a LUT in their own slice lane: the packer replicates
+the function there instead of adding a buffer after the shared LUT. Thus a
+lower synthesis LUT count does not imply the same reduction after packing.
+These are synthesis/packing heuristics, not guarantees about routed timing.
+`--pack-stats` on `synth --family artix7` reports native packed slice, LUT and
+CARRY4 counts without a device database; the QoR report records them separately.
 
 ## Native physical flow
 
@@ -132,7 +142,8 @@ Python dependencies are pinned in `tools/xc7-test-requirements.txt`.
 These are test dependencies only. See [THIRD_PARTY.md](../THIRD_PARTY.md).
 
 The suite implements an inverter, clocked counter, mixed reset/enable/clock
-edge registers, initialized block RAM, paired DSP multipliers, single-site
+edge registers, shared carry-propagate functions, initialized block RAM,
+paired DSP multipliers, single-site
 boundary I/O, and optionally
 Euler 31 and 97 on both 35T and 100T. For each routed design, independent X-Ray FASM
 assembly must match every native configuration frame. X-Ray's C++ packet
@@ -141,9 +152,9 @@ same bits, including ECC, from both streams. Counter builds also check
 byte-for-byte repeatability and the timing-failure gate. `--full-luts`
 randomizes every LUT INIT in the fabric to exercise configuration addressing.
 Sources, XDC, FASM, bitstreams, frames and reports are retained. The latest
-local [physical validation report](ARTIX7_PHYSICAL.json) records 18 passing
+local [physical validation report](ARTIX7_PHYSICAL.json) records 20 passing
 checks, source/constraint hashes and independent tool revisions. The updated
-workspace passes 120 tests, warnings-denied Clippy and Rust 1.88 checks.
+workspace passes 125 tests, warnings-denied Clippy and Rust 1.88 checks.
 
 A 35T full-fabric run covered 1,044,018 enabled LUT INIT bits and all 5,408
 frames. The raw native startup/frame stream with CRC packets disabled also
@@ -206,9 +217,12 @@ MUXF7/F8 cell counts are retained separately in `results.json`; LUT counts
 alone do not describe total resource use. Tool versions, source SHA-256 hashes,
 netlists, reports and single-run wall times are recorded. Wall times on a
 shared development machine are indicative, not a controlled speed benchmark.
-No placed area, routing success or Fmax is claimed.
+The native timed command also gathers packing statistics. `synth_packed`
+reports the native packer's resource counts, including legalization and
+replication; there is no matched Yosys packing baseline. No placed area or
+Fmax is claimed.
 
-Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `65bcd4e`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
+Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f90`) and the PR working tree based on `25354ca`. Each resource column is **synth / Yosys**. Full cell counts, input hashes and wall times are in [ARTIX7_QOR.json](ARTIX7_QOR.json).
 
 | Design | LUTs incl. INV | FFs | CARRY4 | BRAM18 equivalents | DSP48 |
 |---|---:|---:|---:|---:|---:|
@@ -216,13 +230,30 @@ Measured on 2026-10-18 with Yosys 0.52 (`fee39a3284c90249e1d9684cf6944ffbbcbb8f9
 | Euler 25 | 492 / 543 | 187 / 187 | 125 / 143 | 0 / 0 | 0 / 0 |
 | Euler 31 | 198 / 297 | 402 / 404 | 65 / 54 | 6 / 6 | 0 / 0 |
 | Euler 43 | 3819 / 3404 | 1497 / 1517 | 339 / 320 | 0 / 0 | 0 / 0 |
-| Euler 48 | 3548 / 3336 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 |
+| Euler 48 | 3230 / 3336 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 |
 | Euler 57 | 1073 / 1070 | 857 / 1114 | 291 / 224 | 16 / 0 | 0 / 0 |
-| Euler 58 | 4028 / 4769 | 2158 / 2030 | 192 / 225 | 0 / 0 | 0 / 0 |
-| Euler 92 | 921 / 948 | 2807 / 2660 | 173 / 181 | 11 / 7 | 0 / 1 |
-| Euler 97 | 600 / 621 | 445 / 445 | 126 / 125 | 0 / 0 | 3 / 3 |
+| Euler 58 | 4027 / 4769 | 2158 / 2030 | 192 / 225 | 0 / 0 | 0 / 0 |
+| Euler 92 | 910 / 948 | 2807 / 2660 | 173 / 181 | 11 / 7 | 0 / 1 |
+| Euler 97 | 547 / 621 | 445 / 445 | 126 / 125 | 0 / 0 | 3 / 3 |
 
-LUT count is lower on six of nine designs, but three regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
+LUT count is lower on seven of nine designs, but two regress and several designs trade extra carries or block RAMs for other resources. For example, Yosys uses 44 RAM32M cells on Euler 57, while synth uses 16 RAMB18E1 blocks. Euler 92 also uses more FFs and RAM blocks. **These results do not meet the requested QoR criterion.**
+
+Exact LUT sharing reduces Euler 48 from 3,548 to 3,230 LUTs (9.0%) and
+Euler 97 from 600 to 547 (8.8%), with unchanged FF/CARRY4/BRAM/DSP counts.
+Euler 58 saves one LUT and Euler 92 saves eleven. These reductions are at
+synthesis; carry-lane replication can consume the saved LUTs during packing.
+The native packed counts are recorded separately for every benchmark.
+Euler 97 still packs into 205 slices, as before this change; its 53-LUT
+synthesis reduction is not a 53-LUT physical saving.
+
+The QoR investigation compared [ABC's priority-cut mapper](https://github.com/berkeley-abc/abc/blob/master/src/map/if/ifMap.c)
+and [Yosys's Xilinx arithmetic mapping](https://github.com/YosysHQ/yosys/blob/fee39a3284c90249e1d9684cf6944ffbbcbb8f90/techlibs/xilinx/arith_map.v).
+Regenerating cuts during exact-area recovery was tested and rejected: it
+improved none of the nine designs and increased LUT counts on seven.
+Unconditionally changing carry sharing or the mapper's cost feedback also
+found smaller LUT counts with worse carry counts/delay on Euler 43. The final
+implementation retains the original candidate in those cases. No benchmark
+sources or Yosys optimization settings were changed.
 
 Euler 10 was attempted but its Yosys mapping was stopped after more than ten minutes without a completed result. Its full gate-level simulation was also not completed (the initial run hit a five-minute timeout). It is omitted from the numerical comparison rather than assigned an estimated or zero result. The optional long simulation now has a 30-minute command limit.
 

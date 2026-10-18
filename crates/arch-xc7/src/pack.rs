@@ -89,6 +89,26 @@ fn buffer(nl: &mut Netlist, n: NetId) -> Result<CellId, String> {
     Ok(c)
 }
 
+// A shared propagate function may be needed at several dedicated carry
+// inputs. Replicate the function into each required LUT slot; buffering its
+// output would introduce an unnecessary extra LUT level and routed net.
+fn replicate_lut(nl: &mut Netlist, original: CellId) -> Result<CellId, String> {
+    let old = nl.cells[original].clone();
+    let kind = nl.cell_kind(original).to_string();
+    let c = nl.add_cell("$carry_replicated_lut", &kind);
+    nl.cells[c].params = old.params;
+    nl.cells[c].attrs = old.attrs;
+    for pin in old.pins {
+        if pin.dir == Dir::Input {
+            let name = nl.str(pin.name).to_string();
+            nl.add_pin(c, &name, Dir::Input, pin.net).map_err(|e| e.to_string())?;
+        }
+    }
+    let o = nl.add_net("$carry_replicated_lut_o");
+    output(nl, c, "O", o)?;
+    Ok(c)
+}
+
 pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
     nl.check().map_err(|e| e.to_string())?;
     // Canonicalize constant nets before packing. Multiple constant drivers
@@ -214,16 +234,17 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
         for lane in 0..4 {
             let pin = format!("S[{lane}]");
             let n = nl.pin_net(c, &pin).ok_or("carry missing S pin")?;
-            let existing = nl.nets[n]
-                .driver
-                .map(|d| d.cell)
-                .filter(|d| is_lut(nl.cell_kind(*d)) && !p.slots.contains_key(d));
-            let lut = if let Some(l) = existing {
-                l
-            } else {
-                let l = buffer(nl, n)?;
-                rewire(nl, c, &pin, nl.pin_net(l, "O").unwrap())?;
-                l
+            let existing = nl.nets[n].driver.map(|d| d.cell).filter(|d| is_lut(nl.cell_kind(*d)));
+            let lut = match existing {
+                Some(l) if !p.slots.contains_key(&l) => l,
+                driver => {
+                    let l = match driver {
+                        Some(l) => replicate_lut(nl, l)?,
+                        None => buffer(nl, n)?,
+                    };
+                    rewire(nl, c, &pin, nl.pin_net(l, "O").unwrap())?;
+                    l
+                }
             };
             slice.luts[lane] = Some(lut);
             p.slots.insert(lut, (idx, lane));

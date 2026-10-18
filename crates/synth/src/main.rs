@@ -175,9 +175,31 @@ fn timing_weight(a: &mut Args) -> Result<f64, String> {
 }
 
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
-    let mut a =
-        Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family"], &[])?;
+    let mut a = Args::parse(
+        argv,
+        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family"],
+        &["--pack-stats"],
+    )?;
+    if a.flag("--pack-stats") && !matches!(a.value("--family").as_deref(), Some("artix7" | "xc7")) {
+        return Err("--pack-stats currently requires --family artix7".into());
+    }
     let nl = synthesize(&mut a)?;
+    if a.flag("--pack-stats") {
+        let mut packed_netlist = nl.clone();
+        let packed = arch_xc7::pack::pack(&mut packed_netlist)?;
+        let luts = packed_netlist
+            .live_cells()
+            .filter(|&c| arch_xc7::pack::is_lut(packed_netlist.cell_kind(c)))
+            .count();
+        let carries = packed_netlist
+            .live_cells()
+            .filter(|&c| packed_netlist.cell_kind(c) == "CARRY4")
+            .count();
+        eprintln!(
+            "info: packed {{\"slices\":{},\"lut\":{luts},\"carry4\":{carries}}}",
+            packed.slices.len()
+        );
+    }
     if let Some(out) = a.value("--verilog") {
         let name = a.value("--rename").unwrap_or_else(|| {
             nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into())

@@ -4,7 +4,7 @@
     "xray": "c9f02d8576042325425824647ab5555b1bc77833",
     "xc7frames2bit_sha256": "8755618d80393f45dd96d484870932fc1380515eb2b43369127a54e5ceac5e48",
     "bitread_sha256": "1ae5e0569f741b6294400afcf771d5e3a1fbd5fcb4516f37e2cb6a7d7ce94739",
-    "synth_sha256": "1ba8e53e60e3b047d43a9bb575934a13560113f0d2d1c6e3a074638b3b607fad"
+    "synth_sha256": "0807e822f4f92ecb77c5251d8bc9e708bc3dff5a4fbd144ca028cdc2c4286def"
   },
   "checks": [
     {
@@ -14,7 +14,7 @@
       "sha256": "ecea36c9d0e4ac4199738ed541427e6a39eb4a437b280fa2f00ad033241e67ac",
       "source_sha256": "0529e8efbdc0c50bf7fa6cb5959ee965e31930e794f0871c9f290eaa5c211750",
       "constraints_sha256": "71c5f1d4de82ca368f4f7917326ba96bad003851cddc705d8d7347133d210ef5",
-      "seconds": 5.580299686000217
+      "seconds": 9.55265720999887
     },
     {
       "part": "xc7a35tftg256-1",
@@ -23,7 +23,7 @@
       "sha256": "89c1c2a1414a8b9223d11b6494c0751b2f71e6d5d33533e4ba9015d8e4b92175",
       "source_sha256": "99da6e400ce899edc6ffaff1fb41cce146e316a6850c6d75e800213f432d5d17",
       "constraints_sha256": "b3165efe3e8fd871699602d9a428df10bc50bbe7bdc50c8a19997a84c942c59b",
-      "seconds": 3.8729919430006703
+      "seconds": 5.526710807998825
     },
     {
       "part": "xc7a35tftg256-1",
@@ -32,7 +32,7 @@
       "sha256": "8e98f65ab289df1dc00870b9223d874105355eb7a5b1613d329959f4695c5284",
       "source_sha256": "e64d95a20a43c8c1d9a3d583fd20a87810a2435cb491632de14d3ec059e9671e",
       "constraints_sha256": "7bcd01bf1e18b28e33135b315131c8dd91c4bf6cd05e0b3954837ffaa56de871",
-      "seconds": 9.134383014999912
+      "seconds": 24.813534019000144
     },
     {
       "part": "xc7a35tftg256-1",
@@ -41,7 +41,16 @@
       "sha256": "21da359041897fb72de63e6e96efe1e862327bcc537f1fc6c502d0327eede5bc",
       "source_sha256": "338ab0c62ce0b1c69be455c595f3df516e63d7e2b50ed6d57f8ca30790d8e2c1",
       "constraints_sha256": "ba6b3cd6beb64acdeebe1ee89091e092aaafbf513e6fe45cde7d27143eb2fa60",
-      "seconds": 4.838166988998637
+      "seconds": 13.937831299999743
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "sharedcarry",
+      "frames": 5408,
+      "sha256": "ceba8341300a3537c9b6d0086b1d2eb6992e38694f12eeccfdd38323d6670d7c",
+      "source_sha256": "329ff34c22c5154914cf52a126d41542c8c767d605da55239a8c1d0b43261458",
+      "constraints_sha256": "f5a3e6adf44d93751b39fbdc85770f0ee6f2da2e6d777c42e7f1dda00c6ae676",
+      "seconds": 12.141944164999586
     },
     {
       "part": "xc7a35tftg256-1",
@@ -50,7 +59,7 @@
       "sha256": "70df34c3233e4bebc216dbca8275e0b5ab9460c7c665282ce883816155fdd0ac",
       "source_sha256": "738d76b0c450f847416dde4c627793765fe5129b376d26054fb9599dc3099e5e",
       "constraints_sha256": "b839b420e14ee8996d8470ad95d38e433642b68e433a7a68dca05df422772c14",
-      "seconds": 9.6476412789998
+      "seconds": 14.794708727000398
     },
     {
       "part": "xc7a35tftg256-1",
@@ -59,7 +68,7 @@
       "sha256": "bf9ac1aa5e74431b0045b71dcda65750d6058d4cd520e7c642cf3420a0dc00c0",
       "source_sha256": "92575c8a6e0a642001c822de9c245ac00d22157b1613110ffeb239a70805e870",
       "constraints_sha256": "08d6ef20e853a026ec0d8c4b26a423b724e70cead1f77bcb8d16ced7a8edb413",
-      "seconds": 8.727079173000675
+      "seconds": 7.946983443000136
     },
     {
       "part": "xc7a35tftg256-1",
@@ -68,7 +77,16 @@
       "sha256": "51634aae7fa04ed04ea5dc7695af108b5cfc02709342654cd1a71bdf151e26be",
       "source_sha256": "2bbf6bb493bccea35ac2338f11a1eec6f7fc82b64a4195216d0a731864a7ece6",
       "constraints_sha256": "8f8c025dab190fa42ac3e15b24a7f99977b7a9ec8c7b716851664de826cc3fdf",
-      "seconds": 52.45722750999994
+      "seconds": 52.94787611599895
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "euler97",
+      "frames": 5408,
+      "sha256": "6a40ab163eb4fbd295bb6d08377953ab6f379ce30a7ee0fafdd961ca761f90a1",
+      "source_sha256": "fb703b049825fdb7e2b6402d8b3fb2038ecf706b382eed4ee5935d85548d8afe",
+      "constraints_sha256": "c6ffcfd2c28ded2d0c6c374c83d6cbf40363ec957addd126217563f32d346ef7",
+      "seconds": 88.99182000699875
     },
     {
       "part": "xc7a35tftg256-1",
@@ -82,7 +100,7 @@
       "sha256": "ab2423ba5d51cda847dedccb107888a18dc08c28caca768e583e1e132c981d2c",
       "source_sha256": "0529e8efbdc0c50bf7fa6cb5959ee965e31930e794f0871c9f290eaa5c211750",
       "constraints_sha256": "3317aeec7ffb064210b47971128df7ea3404c08c158649fb9222da5698eb07da",
-      "seconds": 7.9813366510006745
+      "seconds": 13.315225012000155
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -91,7 +109,7 @@
       "sha256": "ffa8620228cf1221752cc2b99d606d2f070e908ec59d78209d4e00dca5ecbdb7",
       "source_sha256": "99da6e400ce899edc6ffaff1fb41cce146e316a6850c6d75e800213f432d5d17",
       "constraints_sha256": "d711607f019b646b694f6fe36c0f1adeec86751434a7545be012bb92e06fc896",
-      "seconds": 11.431149890000597
+      "seconds": 5.667681468999945
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -100,7 +118,7 @@
       "sha256": "8b01cb5114bbd5723e172b2ff23e57bb5680fa98b44446896209c2cd3d703d74",
       "source_sha256": "e64d95a20a43c8c1d9a3d583fd20a87810a2435cb491632de14d3ec059e9671e",
       "constraints_sha256": "0c5cfa5929244dba271eb3090f77f2f16d5baf3eefc2c85f5ef96c1656b24674",
-      "seconds": 17.600755883000602
+      "seconds": 13.559410831001514
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -109,7 +127,16 @@
       "sha256": "08e2c62a06fcdefa755b161ddaede9f96c0c118c558ec5acb3f3cf9b26b11947",
       "source_sha256": "338ab0c62ce0b1c69be455c595f3df516e63d7e2b50ed6d57f8ca30790d8e2c1",
       "constraints_sha256": "7fa2e84745422e50a2512d4d961c282a89413aec3e62bdfc96fc6bc292c9bce9",
-      "seconds": 7.07590926299963
+      "seconds": 6.045137811999666
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "sharedcarry",
+      "frames": 9448,
+      "sha256": "5e5f9e47a3cca504d4a496d575b34a23d1da730af000d353af2d971902a7de51",
+      "source_sha256": "329ff34c22c5154914cf52a126d41542c8c767d605da55239a8c1d0b43261458",
+      "constraints_sha256": "56ede543686682c435ffdbb9f89f02129c41107fd49ef8de45ed728042ae9a3c",
+      "seconds": 8.804011573000025
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -118,7 +145,7 @@
       "sha256": "95e7c8c1e4860aac96f8bf826dc4343fac52a7bec807f1c34b4590dca32198dd",
       "source_sha256": "738d76b0c450f847416dde4c627793765fe5129b376d26054fb9599dc3099e5e",
       "constraints_sha256": "5a7b2a70d91b6c71d228152b2d5dc16710fd05c7d83e034508b45b53ebaa07f5",
-      "seconds": 12.23840897899936
+      "seconds": 9.56657500700021
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -127,7 +154,7 @@
       "sha256": "21c7b14b5ac31aa0a49d609af8b14ea2e23743420b5391a0a1919f27d65fc157",
       "source_sha256": "92575c8a6e0a642001c822de9c245ac00d22157b1613110ffeb239a70805e870",
       "constraints_sha256": "04fa343495ccd19f8349db3142fa5ce9464f401bcf9bfc23a8007900dbda0671",
-      "seconds": 11.905232503000661
+      "seconds": 10.714587792001112
     },
     {
       "part": "xc7a100tcsg324-1",
@@ -136,30 +163,21 @@
       "sha256": "4eb7cff13a73085a0e49e485ad9250305206ac99d6b7883d1496d3f7389c5b08",
       "source_sha256": "2bbf6bb493bccea35ac2338f11a1eec6f7fc82b64a4195216d0a731864a7ece6",
       "constraints_sha256": "bec00d844f3e649f6d14dc619f8dca924a1b4b9a4d6736b2a32b41748710b908",
-      "seconds": 48.34117551399868
-    },
-    {
-      "part": "xc7a100tcsg324-1",
-      "design": "all-luts",
-      "frames": 9448
-    },
-    {
-      "part": "xc7a35tftg256-1",
-      "design": "euler97",
-      "frames": 5408,
-      "sha256": "2c1ec23768ff1b1691f706e125692aca15cc6a3fe99c6d5bd6e9eb4bea7ee288",
-      "source_sha256": "fb703b049825fdb7e2b6402d8b3fb2038ecf706b382eed4ee5935d85548d8afe",
-      "constraints_sha256": "c6ffcfd2c28ded2d0c6c374c83d6cbf40363ec957addd126217563f32d346ef7",
-      "seconds": 73.41080160000092
+      "seconds": 65.41847324800074
     },
     {
       "part": "xc7a100tcsg324-1",
       "design": "euler97",
       "frames": 9448,
-      "sha256": "106f3f074eaa97a40870999c96ac1ae022762479b472581fa9674af76fef33f0",
+      "sha256": "ec0c3685602a33e7f2837d4f6527b40288212a0ff530ecf076313c1ec812b8cd",
       "source_sha256": "fb703b049825fdb7e2b6402d8b3fb2038ecf706b382eed4ee5935d85548d8afe",
       "constraints_sha256": "f9c9069fc9df4330763d3ec145d7f46c61f6e2cba158c8074c8de6bdf3cefb7a",
-      "seconds": 89.0902785849994
+      "seconds": 86.69565299999886
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "all-luts",
+      "frames": 9448
     }
   ],
   "hardware_validated": false,

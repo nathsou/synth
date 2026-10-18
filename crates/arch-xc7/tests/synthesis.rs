@@ -259,3 +259,51 @@ fn dsp_packing_rejects_unsupported_modes_and_controls() {
     nl.connect(pin, dynamic).unwrap();
     assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("fixed multiplier control"));
 }
+
+#[test]
+fn subtraction_and_comparison_share_carry_hardware() {
+    // Both result orderings exercise a comparison (no sum output) being
+    // encountered before or after the subtraction during lowering.
+    for assignments in ["assign d=a-b; assign lt=a<b;", "assign lt=a<b; assign d=a-b;"] {
+        let nl = synth(&format!(
+            "module top(input [7:0] a,b, output [7:0] d, output lt); {assignments} endmodule"
+        ));
+        assert_eq!(nl.live_cells().filter(|&c| nl.cell_kind(c) == "CARRY4").count(), 2);
+        for a in 0..256 {
+            for b in [0, 1, 127, 128, 254, 255, a, a ^ 255] {
+                let out = evaluate(&nl, &[("a", a), ("b", b)]);
+                assert_eq!(out["d"], a.wrapping_sub(b) & 255);
+                assert_eq!(out["lt"], u64::from(a < b));
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_propagate_luts_are_replicated_without_an_extra_logic_level() {
+    let mut nl = synth(
+        "module top(input [7:0] a,b,output [7:0] x,y); assign x=a+b; assign y=(~a)+(~b); endmodule",
+    );
+    arch_xc7::pack::pack(&mut nl).unwrap();
+    let replicated: Vec<_> = nl
+        .live_cells()
+        .filter(|&c| nl.str(nl.cells[c].name).starts_with("$carry_replicated_lut"))
+        .collect();
+    assert!(!replicated.is_empty());
+    for c in replicated {
+        assert_eq!(nl.cell_kind(c), "LUT2");
+        for pin in ["I0", "I1"] {
+            let n = nl.pin_net(c, pin).unwrap();
+            let driver = nl.nets[n].driver.unwrap().cell;
+            assert_eq!(nl.cell_kind(driver), synth_netlist::INPUT_PORT);
+        }
+    }
+    nl.check().unwrap();
+    for a in 0..256 {
+        for b in [0, 1, 127, 128, 254, 255, a, a ^ 255] {
+            let out = evaluate(&nl, &[("a", a), ("b", b)]);
+            assert_eq!(out["x"], (a + b) & 255);
+            assert_eq!(out["y"], (510 - a - b) & 255);
+        }
+    }
+}

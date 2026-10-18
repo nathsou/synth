@@ -143,7 +143,31 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
         && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
         && (candidate_delay < delay || candidate_cost != cost)
     {
-        (best, cost, best_log, cuts) = (candidate, candidate_cost, candidate_log, 16);
+        (best, delay, best_log, cuts) = (candidate, candidate_delay, candidate_log, 16);
+    }
+    merge_luts(&mut best)?;
+    sweep(&mut best);
+    cost = resources(&best);
+    // Sharing arithmetic changes mapper heuristics as well as removing boxes.
+    // Keep it only when the final resource vector and delay dominate the
+    // unshared mapping; fewer LUTs alone must not buy extra carry blocks.
+    let mut shared = synth_logic::lower::lower(
+        &m,
+        &synth_logic::lower::LowerOptions { carry_min_width: Some(selected) },
+    )?;
+    if synth_logic::carry::merge_duplicate_carries(&mut shared) != 0 {
+        let mut candidate_log = Vec::new();
+        let (mut candidate, candidate_delay) = map_logic(shared, cuts, &mut candidate_log)?;
+        merge_luts(&mut candidate)?;
+        sweep(&mut candidate);
+        let candidate_cost = resources(&candidate);
+        if candidate_delay <= delay
+            && candidate_cost.iter().zip(cost).all(|(&a, b)| a <= b)
+            && (candidate_delay < delay || candidate_cost != cost)
+        {
+            (best, cost, best_log) = (candidate, candidate_cost, candidate_log);
+            best_log.push("shared equivalent carry chains".into());
+        }
     }
     log.extend(best_log);
     log.push(format!(
@@ -667,5 +691,113 @@ fn sweep(nl: &mut Netlist) {
         for c in dead {
             nl.remove_cell(c);
         }
+    }
+}
+
+/// Fold exact duplicate LUT functions, including carry-propagate LUTs emitted
+/// after mapping. Canonicalize the pin order so permuted functions can share.
+/// Iterate because merging a driver can expose duplicates at its fanouts.
+fn merge_luts(nl: &mut Netlist) -> Result<(), String> {
+    loop {
+        let mut functions = FxHashMap::default();
+        let cells: Vec<_> = nl.live_cells().collect();
+        let mut merged = 0;
+        for c in cells {
+            let Some(k) = nl.cell_kind(c).strip_prefix("LUT").and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if !(1..=6).contains(&k)
+                || !nl.cells[c].attrs.is_empty()
+                || nl.cells[c].params.len() != 1
+            {
+                continue;
+            }
+            let Some(Param::Bits(bits)) = nl.param(c, "INIT") else { continue };
+            if bits.len() != 1 << k || bits.iter().any(|b| !matches!(b, PBit::Zero | PBit::One)) {
+                continue;
+            }
+            let truth = nl.param(c, "INIT").and_then(Param::as_u64).unwrap();
+            let Some(ins) =
+                (0..k).map(|i| nl.pin_net(c, &format!("I{i}"))).collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let Some(out) = nl.pin_net(c, "O") else { continue };
+            let mut order: Vec<_> = (0..k).collect();
+            order.sort_by_key(|&i| ins[i]);
+            let inputs: Vec<_> = order.iter().map(|&i| ins[i]).collect();
+            let mut canonical = 0u64;
+            for x in 0..1usize << k {
+                let original =
+                    order.iter().enumerate().map(|(j, &i)| ((x >> j) & 1) << i).sum::<usize>();
+                canonical |= ((truth >> original) & 1) << x;
+            }
+            if let Some(&existing) = functions.get(&(inputs.clone(), canonical)) {
+                nl.remove_cell(c);
+                nl.merge_nets(out, existing).map_err(|e| e.0)?;
+                merged += 1;
+            } else {
+                functions.insert((inputs, canonical), out);
+            }
+        }
+        if merged == 0 {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(test)]
+mod lut_sharing_tests {
+    use super::*;
+
+    fn lut(nl: &mut Netlist, name: &str, ins: &[NetId], truth: u64) -> NetId {
+        let c = nl.add_cell(name, &format!("LUT{}", ins.len()));
+        let out = nl.add_net(name);
+        for (i, &n) in ins.iter().enumerate() {
+            nl.add_pin(c, &format!("I{i}"), Dir::Input, Some(n)).unwrap();
+        }
+        nl.add_pin(c, "O", Dir::Output, Some(out)).unwrap();
+        nl.set_param(c, "INIT", lut_init(truth, ins.len()));
+        out
+    }
+
+    #[test]
+    fn shares_permuted_functions_and_their_fanouts() {
+        let mut nl = Netlist::new();
+        let a = nl.add_net("a");
+        let b = nl.add_net("b");
+        let x = lut(&mut nl, "x", &[a, b], 0b0010); // a & !b
+        let y = lut(&mut nl, "y", &[b, a], 0b0100); // a & !b
+        let p = lut(&mut nl, "p", &[x, a], 0b0110);
+        let q = lut(&mut nl, "q", &[a, y], 0b0110);
+        let ports: Vec<_> = [p, q]
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| {
+                let c = nl.add_cell(&format!("out{i}"), synth_netlist::OUTPUT_PORT);
+                nl.add_pin(c, "PAD", Dir::Input, Some(n)).unwrap();
+                c
+            })
+            .collect();
+        merge_luts(&mut nl).unwrap();
+        assert_eq!(nl.live_cells().filter(|&c| crate::pack::is_lut(nl.cell_kind(c))).count(), 2);
+        assert_eq!(nl.pin_net(ports[0], "PAD"), nl.pin_net(ports[1], "PAD"));
+        nl.check().unwrap();
+    }
+
+    #[test]
+    fn distinguishes_functions_and_preserves_unknown_initialization() {
+        let mut nl = Netlist::new();
+        let a = nl.add_net("a");
+        let b = nl.add_net("b");
+        lut(&mut nl, "and", &[a, b], 0b1000);
+        lut(&mut nl, "or", &[a, b], 0b1110);
+        let x = lut(&mut nl, "unknown", &[a, b], 0b1000);
+        let c = nl.nets[x].driver.unwrap().cell;
+        nl.set_param(c, "INIT", Param::Bits(vec![PBit::X, PBit::Zero, PBit::Zero, PBit::One]));
+        merge_luts(&mut nl).unwrap();
+        assert_eq!(nl.live_cells().count(), 3);
+        nl.check().unwrap();
     }
 }

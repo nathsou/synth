@@ -11,6 +11,7 @@ from collections import Counter
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -68,13 +69,17 @@ def main():
         row = {"design": top, "sources": hashes}
         net = out / f"{top}.synth.v"
         sj, yj = out / f"{top}.synth.json", out / f"{top}.yosys.json"
-        row["synth_seconds"] = run([SYNTH, "synth", *files, "--top", top, "--family", "artix7", "--verilog", net], out / f"{top}.synth.log")
+        row["synth_seconds"] = run([SYNTH, "synth", *files, "--top", top, "--family", "artix7", "--pack-stats", "--verilog", net], out / f"{top}.synth.log")
         run(["yosys", "-Q", "-T", "-p",
              f'read_verilog -lib +/xilinx/cells_sim.v; read_verilog "{net}"; hierarchy -check -top {top}; check -assert; blackbox =A:whitebox; write_json "{sj}"'],
             out / f"{top}.validate.log")
         src = " ".join(f'"{p}"' for p in files)
         row["yosys_seconds"] = run(["yosys", "-Q", "-T", "-p",
              f'read_verilog {src}; synth_xilinx -family xc7 -flatten -top {top} -noiopad -noclkbuf; write_json "{yj}"'], out / f"{top}.yosys.log")
+        packed = re.search(r"^info: packed (.+)$", (out / f"{top}.synth.log").read_text(), re.M)
+        if packed is None:
+            raise RuntimeError(f"missing native packed statistics for {top}")
+        row["synth_packed"] = json.loads(packed[1])
         row["synth"], row["yosys"] = counts(sj, top), counts(yj, top)
         report["designs"].append(row)
         (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
