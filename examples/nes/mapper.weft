@@ -26,12 +26,13 @@ module nes_mapper(
     reg irq_enabled: bool = false;
     reg irq_flag: bool = false;
     reg a12_previous: bool = false;
-    reg a12_low: uint<4> = 0;
+    reg a12_low: uint<2> = 0;
     a12_previous := ppu_address[12];
     if !ppu_address[12] {
-        if a12_low != 15 { a12_low := a12_low +% 1; }
+        if cpu_tick && a12_low != 3 { a12_low := a12_low +% 1; }
     } else { a12_low := 0; }
-    let a12_clock = ppu_address[12] && !a12_previous && a12_low >= 8;
+    // Filter in the M2 domain: three falling edges while A12 stays low.
+    let a12_clock = ppu_address[12] && !a12_previous && a12_low == 3;
     let next_count = if irq_count == 0 || irq_reload { irq_latch } else { irq_count -% 1 };
     if mapper == 4 && a12_clock {
         irq_count := next_count; irq_reload := false;

@@ -111,19 +111,20 @@ enum NesCpuCycle {
 }
 
 module nes_cpu(
-    in enable: bool, in sample_tick: bool = true, in nmi: bool, in irq: bool, in data: uint<8>,
+    in enable: bool, in sample_tick: bool = true, in reset_line: bool = false,
+    in nmi: bool, in irq: bool, in data: uint<8>,
     out address: uint<16>, out write: bool, out write_data: uint<8>,
     out sync_fetch: bool, out halted: bool,
     out debug_pc: uint<16>, out debug_a: uint<8>, out debug_x: uint<8>,
     out debug_y: uint<8>, out debug_s: uint<8>, out debug_p: uint<8>,
 ) {
     reg cycle: NesCpuCycle = .Reset0;
-    reg pc: uint<16> = 0;
-    reg a: uint<8> = 0;
-    reg x: uint<8> = 0;
-    reg y: uint<8> = 0;
-    reg s: uint<8> = 0;
-    reg p: uint<8> = 0x24;
+    reg pc: uint<16> init 0;
+    reg a: uint<8> init 0;
+    reg x: uint<8> init 0;
+    reg y: uint<8> init 0;
+    reg s: uint<8> init 0;
+    reg p: uint<8> init 0x24;
     reg opcode: uint<8> = 0xEA;
     reg lo: uint<8> = 0;
     reg ea: uint<16> = 0;
@@ -190,7 +191,7 @@ module nes_cpu(
     if cycle == .RmwDummy { write = true; write_data = old_data; }
     if cycle == .RmwWrite { write = true; write_data = rmw_alu.value; }
 
-    if enable {
+    if enable && !reset_line {
         irq_sample := irq_level && !p[2];
         nmi_sample := nmi_pending;
         match cycle {
@@ -317,6 +318,7 @@ module nes_cpu(
             .Jam => {}
         }
     }
+    if reset_line { p := p | 4; }
 }
 
 module nes_cpu_test(
@@ -328,7 +330,7 @@ module nes_cpu_test(
     out debug_s: uint<8>, out debug_p: uint<8>,
 ) {
     default domain sys { clock: clk, reset: reset }
-    inst cpu = nes_cpu(enable: enable, nmi: nmi, irq: irq, data: data);
+    inst cpu = nes_cpu(enable: enable, reset_line: reset, nmi: nmi, irq: irq, data: data);
     address = cpu.address; write = cpu.write; write_data = cpu.write_data;
     sync_fetch = cpu.sync_fetch; halted = cpu.halted;
     debug_pc = cpu.debug_pc; debug_a = cpu.debug_a; debug_x = cpu.debug_x;

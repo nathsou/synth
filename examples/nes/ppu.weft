@@ -37,6 +37,8 @@ module nes_ppu(
     reg dot: index<341> = 0;
     reg line: index<262> = 0;
     reg odd: bool = false;
+    reg skipped_idle: bool = false;
+    reg warming_up: bool = true;
     reg ctrl: uint<8> = 0;
     reg mask: uint<8> = 0;
     reg v: uint<15> = 0;
@@ -49,7 +51,13 @@ module nes_ppu(
     reg suppress_vblank: bool = false;
     reg nmi_delay: uint<2> = 0;
     reg io_latch: uint<8> = 0;
+    // A deterministic 600 ms approximation of the PPU's dynamic bus charge.
+    // Actual decay varies among chips and with temperature.
+    reg io_decay: [uint<22>; 8] = [0; 8];
     reg read_buffer: uint<8> = 0;
+    reg last_read: uint<8> = 0;
+    reg read_cooldown: uint<3> = 0;
+    if read_cooldown != 0 { read_cooldown := read_cooldown -% 1; }
     reg oam_address: uint<8> = 0;
     mem oam: [uint<8>; 256];
     mem vram: [uint<8>; 4096];
@@ -76,6 +84,11 @@ module nes_ppu(
     reg attr_low: uint<16> = 0;
     reg attr_high: uint<16> = 0;
 
+    for i in 0..8 {
+        if io_decay[i] != 0 { io_decay[i] := io_decay[i] -% 1; }
+        if io_decay[i] == 1 { io_latch[i] := false; }
+    }
+
     let rendering = mask[3] || mask[4];
     let render_line = line < 240 || line == 261;
     let fetching = rendering && render_line;
@@ -99,6 +112,9 @@ module nes_ppu(
     fetch_address = v[13:0];
     if fetching {
         fetch_address = name_address;
+        // The visible-line idle dot begins an aborted low-pattern fetch.
+        // After an odd-frame skip it instead completes the dummy NT fetch.
+        if dot == 0 && line < 240 && !skipped_idle { fetch_address = bg_pattern; }
         if bg_fetch {
             fetch_address = match phase {
                 1 | 2 => name_address, 3 | 4 => attr_address,
@@ -125,7 +141,8 @@ module nes_ppu(
     cpu_read = match cpu_register {
         2 => status,
         4 => if oam_address[1:0] == 2 { oam_read & 0xE3 } else { oam_read },
-        7 => if v[13:8] == 0x3F { palette_read } else { read_buffer },
+        7 => if v[13:8] == 0x3F { palette_read }
+             else if read_cooldown != 0 { last_read } else { read_buffer },
         _ => io_latch,
     };
     // Delay the PPU's NMI output; a coincident status read cancels the pulse
@@ -166,10 +183,14 @@ module nes_ppu(
     debug_dot = dot; debug_line = line;
 
     dot := dot +% 1;
+    if dot == 0 { skipped_idle := false; }
     if dot == 340 { line := line +% 1; if line == 261 { odd := !odd; } }
-    if line == 261 && dot == 339 && odd && rendering { dot := 0; line := 0; odd := !odd; }
+    if line == 261 && dot == 339 && odd && rendering { dot := 0; line := 0; odd := !odd; skipped_idle := true; }
     if line == 241 && dot == 1 { vblank := !suppress_vblank; suppress_vblank := false; }
-    if line == 261 && dot == 1 { vblank := false; sprite_hit := false; overflow := false; suppress_vblank := false; }
+    if line == 261 && dot == 1 {
+        vblank := false; sprite_hit := false; overflow := false;
+        suppress_vblank := false; warming_up := false;
+    }
 
     if pixel_valid && bg_bits != 0 && sp_visible && sp_zero && dot != 256 { sprite_hit := true; }
     if fetching {
@@ -238,9 +259,10 @@ module nes_ppu(
     if cpu_access {
         if cpu_write {
             io_latch := cpu_data;
+            io_decay := [3_221_591; 8];
             match cpu_register {
-                0 => { ctrl := cpu_data; t := (t & 0x73FF) | (uint<15>(cpu_data[1:0]) << 10); }
-                1 => { mask := cpu_data; }
+                0 => if !warming_up { ctrl := cpu_data; t := (t & 0x73FF) | (uint<15>(cpu_data[1:0]) << 10); }
+                1 => if !warming_up { mask := cpu_data; }
                 3 => { oam_address := cpu_data; }
                 4 => {
                     if !fetching {
@@ -248,12 +270,12 @@ module nes_ppu(
                         oam_address := oam_address +% 1;
                     } else { oam_address := oam_address +% 4; }
                 }
-                5 => {
+                5 => if !warming_up {
                     second_write := !second_write;
                     if !second_write { t := (t & 0x7FE0) | uint<15>(cpu_data[7:3]); fine_x := cpu_data[2:0]; }
                     else { t := (t & 0x0C1F) | (uint<15>(cpu_data[7:3]) << 5) | (uint<15>(cpu_data[2:0]) << 12); }
                 }
-                6 => {
+                6 => if !warming_up {
                     second_write := !second_write;
                     if !second_write { t := (t & 0x00FF) | (uint<15>(cpu_data[5:0]) << 8); }
                     else { t := (t & 0x7F00) | uint<15>(cpu_data); v := (t & 0x7F00) | uint<15>(cpu_data); }
@@ -267,10 +289,16 @@ module nes_ppu(
         } else {
             if cpu_register == 2 {
                 io_latch := status; vblank := false; second_write := false;
+                for i in 5..8 { io_decay[i] := 3_221_591; }
                 if line == 241 && dot == 1 { suppress_vblank := true; }
             }
-            if cpu_register == 4 { io_latch := cpu_read; }
-            if cpu_register == 7 { io_latch := cpu_read; read_buffer := bus_data; }
+            if cpu_register == 4 { io_latch := cpu_read; io_decay := [3_221_591; 8]; }
+            if cpu_register == 7 {
+                io_latch := cpu_read; read_buffer := bus_data;
+                last_read := cpu_read; read_cooldown := 5;
+                for i in 0..6 { io_decay[i] := 3_221_591; }
+                if v[13:8] != 0x3F { io_decay[6] := 3_221_591; io_decay[7] := 3_221_591; }
+            }
         }
         if cpu_register == 7 {
             v := if fetching { nes_scroll_y(nes_scroll_x(v)) } else { v +% (if ctrl[2] { 32 } else { 1 }) };

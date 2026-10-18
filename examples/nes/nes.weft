@@ -20,6 +20,7 @@ module nes(
     out debug_cpu_tick: bool, out debug_fetch: bool, out debug_pc: uint<16>,
     out debug_a: uint<8>, out debug_x: uint<8>, out debug_y: uint<8>, out debug_s: uint<8>, out debug_p: uint<8>,
     out debug_address: uint<16>, out debug_write: bool, out debug_data: uint<8>,
+    out debug_irq: bool, out debug_ppu_address: uint<14>,
     out debug_dot: uint<9>, out debug_line: uint<9>, out halted: bool,
 ) {
     default domain sys { clock: clk, reset: reset }
@@ -35,7 +36,8 @@ module nes(
     reg oam_index: uint<8> = 0;
     reg oam_byte: uint<8> = 0;
     reg dmc_dma: NesDmcDma = .Idle;
-    let tick = divider == 2;
+    reg dmc_during_oam: bool = false;
+    let tick = divider == 2 && !reset;
     divider := divider +% 1;
     if tick { parity := !parity; }
 
@@ -45,13 +47,20 @@ module nes(
     wire bus_read_data: uint<8>;
     let dmc_halt = dmc_dma == .Idle && apu.dma_request && !cpu.write && oam_dma == .Idle;
     let dmc_busy = dmc_dma != .Idle || dmc_halt;
-    let cpu_running = (oam_dma == .Idle || (oam_dma == .Halt && cpu.write)) && !dmc_busy;
+    let dmc_start_oam = dmc_dma == .Idle && apu.dma_request && (oam_dma == .Get || oam_dma == .Put);
     let dmc_get = dmc_dma == .Get;
-    inst cpu = nes_cpu(enable: tick && cpu_running, sample_tick: tick, nmi: ppu.nmi, irq: apu.irq || cart.irq, data: bus_read_data);
+    let dmc_steal = dmc_get || (dmc_busy && !dmc_during_oam);
+    // On NES-001 the halted read strobes I/O once; dummy/alignment cycles
+    // keep the read asserted instead of producing additional register reads.
+    let io_cycle = (!(dmc_dma == .Dummy || dmc_dma == .Align) || dmc_during_oam)
+                   && oam_dma != .Align && !(oam_dma == .Get && parity && !dmc_get);
+    let cpu_running = (oam_dma == .Idle || (oam_dma == .Halt && cpu.write)) && !dmc_busy;
+    inst cpu = nes_cpu(enable: tick && cpu_running, sample_tick: tick, reset_line: reset,
+        nmi: ppu.nmi, irq: apu.irq || cart.irq, data: bus_read_data);
     inst ppu = nes_ppu(cpu_access: tick && bus_address >= 0x2000 && bus_address < 0x4000,
         cpu_write: bus_write, cpu_register: bus_address[2:0], cpu_data: bus_write_data,
         mirroring: cart.mirroring, chr_data: chr_data);
-    inst apu = nes_apu(tick: tick, access: bus_address >= 0x4000 && bus_address <= 0x4017,
+    inst apu = nes_apu(tick: tick, access: io_cycle && bus_address >= 0x4000 && bus_address <= 0x4017,
         write: bus_write, address: bus_address[4:0], data: bus_write_data,
         dma_ack: dmc_get, dma_data: bus_read_data);
     inst cart = nes_mapper(mapper: mapper, prg_mask: prg_mask, chr_mask: chr_mask, vertical: vertical,
@@ -59,9 +68,9 @@ module nes(
         cpu_data: bus_write_data, ppu_address: ppu.memory_address);
 
     bus_address = cpu.address; bus_write = cpu.write; bus_write_data = cpu.write_data;
-    if oam_dma == .Get { bus_address = concat(oam_page, oam_index); bus_write = false; }
+    if oam_dma == .Get && !parity { bus_address = concat(oam_page, oam_index); bus_write = false; }
     if oam_dma == .Put { bus_address = 0x2004; bus_write = true; bus_write_data = oam_byte; }
-    if dmc_busy { bus_address = if dmc_get { apu.dma_address } else { cpu.address }; bus_write = false; }
+    if dmc_steal { bus_address = if dmc_get { apu.dma_address } else { cpu.address }; bus_write = false; }
 
     bus_read_data = open_bus;
     if bus_address < 0x2000 { bus_read_data = ram[bus_address[10:0]]; }
@@ -82,23 +91,24 @@ module nes(
                 if bus_write_data[0] { shift1 := pad1; shift2 := pad2; }
             }
             if bus_address == 0x4014 { oam_dma := .Halt; oam_page := bus_write_data; oam_index := 0; }
-        } else if !strobe {
+        } else if !strobe && io_cycle {
             if bus_address == 0x4016 { shift1 := concat(true, shift1[7:1]); }
             if bus_address == 0x4017 { shift2 := concat(true, shift2[7:1]); }
         }
-        if dmc_halt { dmc_dma := .Dummy; }
+        if dmc_halt { dmc_dma := .Dummy; dmc_during_oam := false; }
+        if dmc_start_oam { dmc_dma := .Dummy; dmc_during_oam := true; }
         match dmc_dma {
             .Idle => {}
             .Dummy => { dmc_dma := if parity { .Get } else { .Align }; }
             .Align => { dmc_dma := .Get; }
-            .Get => { dmc_dma := .Idle; }
+            .Get => { dmc_dma := .Idle; dmc_during_oam := false; }
         }
-        if !dmc_busy {
+        if !dmc_steal {
             match oam_dma {
                 .Idle => {}
                 .Halt => if !cpu.write { oam_dma := if parity { .Get } else { .Align }; }
                 .Align => { oam_dma := .Get; }
-                .Get => { oam_byte := bus_read_data; oam_dma := .Put; }
+                .Get => if !parity { oam_byte := bus_read_data; oam_dma := .Put; }
                 .Put => {
                     oam_index := oam_index +% 1;
                     oam_dma := if oam_index == 255 { .Idle } else { .Get };
@@ -118,5 +128,6 @@ module nes(
     debug_pc = cpu.debug_pc; debug_a = cpu.debug_a; debug_x = cpu.debug_x; debug_y = cpu.debug_y;
     debug_s = cpu.debug_s; debug_p = cpu.debug_p;
     debug_address = bus_address; debug_write = bus_write; debug_data = if bus_write { bus_write_data } else { bus_read_data };
+    debug_irq = apu.irq || cart.irq; debug_ppu_address = ppu.memory_address;
     debug_dot = ppu.debug_dot; debug_line = ppu.debug_line; halted = cpu.halted;
 }

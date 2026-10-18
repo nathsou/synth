@@ -1,0 +1,55 @@
+name: NES hardware diagnostics
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'examples/nes/**'
+      - 'crates/synth-weft/**'
+      - 'crates/synth-rtl/**'
+      - '.github/workflows/nes.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: nes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnostics:
+    # Match the main workflow: expensive simulations wait for ready-for-review.
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends verilator
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: nes-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: nes-${{ hashFiles('Cargo.lock') }}-
+      - name: Build compiler and hardware simulator
+        run: |
+          cargo build --profile ci -p synth
+          make -C examples/nes SYNTH=../../target/ci/synth
+      - name: Fetch pinned public diagnostic ROMs
+        run: |
+          git init work/nes-test-roms
+          git -C work/nes-test-roms remote add origin https://github.com/christopherpow/nes-test-roms.git
+          git -C work/nes-test-roms fetch --depth 1 origin 95d8f621ae55cee0d09b91519a8989ae0e64753b
+          git -C work/nes-test-roms checkout --detach FETCH_HEAD
+      - name: CPU trace and NES diagnostic ROMs
+        run: |
+          make -C examples/nes SYNTH=../../target/ci/synth cpu-test
+          python3 examples/nes/tests/run.py --sim work/nes/obj/Vnes --roms work/nes-test-roms --report work/nes/results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nes-diagnostic-results
+          path: work/nes/results.json
+          if-no-files-found: ignore

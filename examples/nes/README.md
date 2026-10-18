@@ -12,7 +12,7 @@ cartridge storage, input scripts, RGB conversion and audio mixing/output.
 
 ## Build and run
 
-From the repository root, install Rust, a C++ compiler, make and Verilator, then:
+From the repository root, install Rust, a C++17 compiler, make and Verilator, then:
 
 ```sh
 cargo build --release -p synth
@@ -59,7 +59,9 @@ been validated.
 dot. `frame` pulses at vblank entry. Audio outputs are the raw channel DAC
 values; `audio_valid` marks a CPU cycle. The runner applies the nonlinear NES
 mixer and an approximate analog filter. Composite decoding, analog color and
-analog decay are outside the digital hardware boundary.
+OAM decay are outside the digital hardware boundary. The PPU I/O bus uses a
+deterministic 600 ms charge-decay model; physical decay varies with temperature
+and chip revision.
 
 ## Verification
 
@@ -76,9 +78,35 @@ work/nes/obj/Vnes work/nes-test-roms/ppu_vbl_nmi/rom_singles/01-vbl_basics.nes -
 
 The CPU trace test requires all 8,991 `nestest` instructions to match PC, A, X,
 Y, P, SP and cycle count. Diagnostic ROM mode recognizes the `$6000` test
-protocol and fails on a nonzero result, a KIL opcode or a timeout. Frame output
-alone is a smoke check, not a diagnostic pass. Timing/compatibility results and
-remaining failures will be recorded after the full validation run.
+protocol and fails on a nonzero result, a KIL opcode or a timeout. Reset requests
+(`$81`) wait at least 100 ms, then apply reset while preserving CPU/cartridge
+RAM. The runner does not modify the test's result memory.
+
+Older sprite tests use `--legacy-result f8`: the runner waits for the terminal
+self-jump before judging the result byte. Older ASCII-console tests use
+`--console-test` or explicit `--console-crc` values from the test's documented
+output. These modes are selected explicitly by `tests/run.py`; an ordinary
+frame or timeout is never counted as a pass.
+
+For independent per-cycle CPU checks, obtain the `nes6502/v1` JSON vectors from
+[SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) at revision
+`2f6980a2d95757486c7bee24355c360e40e2a224`, then run:
+
+```sh
+python3 examples/nes/tests/pack_vectors.py /path/to/nes6502/v1 work/nes-vectors.bin --per-op 128
+make -C examples/nes vectors-test
+```
+
+This checks 30,336 instructions across 237 stable opcodes, including every bus
+address, read/write direction, data byte and final state. State initialization
+runs real CPU instructions; the harness does not replace CPU state or execute
+the instruction in software. The nonphysical B flag is normalized for register
+comparisons; stack writes are checked byte for byte. KIL and electrically
+unstable opcodes are excluded from these stable-vector checks.
+
+The dedicated NES CI workflow runs the pinned public diagnostics when a PR is
+ready for review or when manually dispatched, following the repository's policy
+for expensive simulations. Uploaded commercial ROMs are not included in CI.
 
 ## References
 

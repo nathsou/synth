@@ -35,11 +35,11 @@ module nes_pulse<FIRST: int>(
     in enabled: bool, in write: bool, in address: uint<2>, in data: uint<8>,
     out sample: uint<4>, out active: bool,
 ) {
-    reg control: uint<8> = 0;
-    reg sweep: uint<8> = 0;
+    reg control: uint<8> init 0;
+    reg sweep: uint<8> init 0;
     reg sweep_reload: bool = false;
     reg sweep_divider: uint<3> = 0;
-    reg period: uint<11> = 0;
+    reg period: uint<11> init 0;
     reg timer: uint<11> = 0;
     reg sequence: uint<3> = 0;
     reg length: uint<8> = 0;
@@ -84,8 +84,8 @@ module nes_triangle(
     in write: bool, in address: uint<2>, in data: uint<8>,
     out sample: uint<4>, out active: bool,
 ) {
-    reg control: uint<8> = 0;
-    reg period: uint<11> = 0;
+    reg control: uint<8> init 0;
+    reg period: uint<11> init 0;
     reg timer: uint<11> = 0;
     reg length: uint<8> = 0;
     reg linear: uint<7> = 0;
@@ -124,9 +124,9 @@ module nes_noise(
     in write: bool, in address: uint<2>, in data: uint<8>,
     out sample: uint<4>, out active: bool,
 ) {
-    reg control: uint<8> = 0;
-    reg period: uint<4> = 0;
-    reg short_mode: bool = false;
+    reg control: uint<8> init 0;
+    reg period: uint<4> init 0;
+    reg short_mode: bool init false;
     reg timer: uint<12> = 0;
     reg shift: uint<15> = 1;
     reg length: uint<8> = 0;
@@ -153,18 +153,18 @@ module nes_noise(
 }
 
 module nes_dmc(
-    in tick: bool, in write: bool, in address: uint<2>, in data: uint<8>,
+    in tick: bool, in get_cycle: bool, in write: bool, in address: uint<2>, in data: uint<8>,
     in enable_write: bool, in enabled: bool,
     in dma_ack: bool, in dma_data: uint<8>,
     out dma_request: bool, out dma_address: uint<16>,
     out sample: uint<7>, out active: bool, out irq: bool,
 ) {
-    reg control: uint<8> = 0;
-    reg start: uint<8> = 0;
-    reg size: uint<8> = 0;
+    reg control: uint<8> init 0;
+    reg start: uint<8> init 0;
+    reg size: uint<8> init 0;
     reg current: uint<16> = 0xC000;
     reg remaining: uint<12> = 0;
-    reg level: uint<7> = 0;
+    reg level: uint<7> init 0;
     reg buffer: uint<8> = 0;
     reg buffer_full: bool = false;
     reg shift: uint<8> = 0;
@@ -172,10 +172,18 @@ module nes_dmc(
     reg silence: bool = true;
     reg timer: uint<9> = 0;
     reg irq_flag: bool = false;
-    dma_request = !buffer_full && remaining != 0;
+    reg request: bool = false;
+    reg load_delay: uint<3> = 0;
+    reg reload_wait: bool = false;
+    dma_request = request;
     dma_address = current;
     sample = level; active = remaining != 0; irq = irq_flag;
     if tick {
+        if load_delay != 0 {
+            load_delay := load_delay -% 1;
+            if load_delay == 1 { request := true; }
+        }
+        if reload_wait && get_cycle { request := true; reload_wait := false; }
         if timer == 0 {
             timer := NES_DMC_PERIOD[control[3:0]] -% 1;
             if !silence {
@@ -186,12 +194,18 @@ module nes_dmc(
             bits_left := bits_left -% 1;
             if bits_left == 0 {
                 shift := buffer; silence := !buffer_full; buffer_full := false;
+                if remaining != 0 && load_delay == 0 && !request {
+                    // Reload halts are scheduled on put; load halts are
+                    // scheduled on get during the second following APU cycle.
+                    if get_cycle { request := true; }
+                    else { reload_wait := true; }
+                }
             }
         } else { timer := timer -% 1; }
         if dma_ack {
-            buffer := dma_data; buffer_full := true;
+            buffer := dma_data; buffer_full := true; request := false;
             current := if current == 0xFFFF { 0x8000 } else { current +% 1 };
-            remaining := remaining -% 1;
+            if remaining != 0 { remaining := remaining -% 1; }
             if remaining == 1 {
                 if control[6] { current := concat(0b11, start, 0b000000); remaining := concat(size, 0b0000) +% 1; }
                 else if control[7] { irq_flag := true; }
@@ -207,8 +221,11 @@ module nes_dmc(
         }
         if enable_write {
             irq_flag := false;
-            if !enabled { remaining := 0; }
-            else if remaining == 0 { current := concat(0b11, start, 0b000000); remaining := concat(size, 0b0000) +% 1; }
+            if !enabled { remaining := 0; request := false; load_delay := 0; reload_wait := false; }
+            else if remaining == 0 {
+                current := concat(0b11, start, 0b000000); remaining := concat(size, 0b0000) +% 1;
+                if !buffer_full { load_delay := if get_cycle { 3 } else { 2 }; }
+            }
         }
     }
 }
@@ -221,8 +238,8 @@ module nes_apu(
 ) {
     reg parity: bool = false;
     reg counter: uint<16> = 0;
-    reg five_step: bool = false;
-    reg inhibit_irq: bool = false;
+    reg five_step: bool init false;
+    reg inhibit_irq: bool init false;
     reg frame_irq: bool = false;
     reg reset_delay: uint<3> = 0;
     reg enables: uint<4> = 0;
@@ -242,7 +259,7 @@ module nes_apu(
         write: access && write && address[4:2] == 2, address: address[1:0], data: data);
     inst noi = nes_noise(tick: tick, quarter: quarter, half: half, enabled: new_enables[3],
         write: access && write && address[4:2] == 3, address: address[1:0], data: data);
-    inst delta = nes_dmc(tick: tick, write: access && write && address[4:2] == 4,
+    inst delta = nes_dmc(tick: tick, get_cycle: !parity, write: access && write && address[4:2] == 4,
         address: address[1:0], data: data, enable_write: status_write, enabled: data[4], dma_ack: dma_ack, dma_data: dma_data);
     read_data = concat(delta.irq, frame_irq, false, delta.active, noi.active, tri.active, p2.active, p1.active);
     irq = frame_irq || delta.irq;

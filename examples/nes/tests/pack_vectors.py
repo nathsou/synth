@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: CERN-OHL-W-2.0
 """Convert local SingleStepTests nes6502/v1 JSON files to a compact bus test.
 
 Obtain vectors from https://github.com/SingleStepTests/65x02 at revision

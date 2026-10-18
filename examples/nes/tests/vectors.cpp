@@ -18,7 +18,10 @@ struct State {
     unsigned pc, a, x, y, p, s;
     explicit State(std::istream &f) : pc(u16(f)), a(u8(f)), x(u8(f)), y(u8(f)), p(u8(f)), s(u8(f)) {}
     bool matches(const Vnes_cpu_test &cpu) const {
-        return pc == cpu.debug_pc && a == cpu.debug_a && x == cpu.debug_x && y == cpu.debug_y && p == cpu.debug_p && s == cpu.debug_s;
+        // B is a synthesized stack bit, not a physical status latch. The
+        // vectors retain it in their software status representation.
+        return pc == cpu.debug_pc && a == cpu.debug_a && x == cpu.debug_x && y == cpu.debug_y &&
+            (p & 0xef) == (cpu.debug_p & 0xef) && s == cpu.debug_s;
     }
 };
 struct Byte { unsigned address, value; };
@@ -64,7 +67,12 @@ int main(int argc, char **argv) {
                 edge();
                 if (++setup_cycles > 100) throw std::runtime_error("setup failed");
             } while (true);
-            if (!initial.matches(cpu)) throw std::runtime_error("initial register setup failed");
+            if (!initial.matches(cpu)) {
+                std::fprintf(stderr, "setup opcode %02X vector %u expected PC:%04X A:%02X X:%02X Y:%02X P:%02X SP:%02X; actual PC:%04X A:%02X X:%02X Y:%02X P:%02X SP:%02X\n",
+                    opcode, index, initial.pc, initial.a, initial.x, initial.y, initial.p, initial.s,
+                    cpu.debug_pc, cpu.debug_a, cpu.debug_x, cpu.debug_y, cpu.debug_p, cpu.debug_s);
+                throw std::runtime_error("initial register setup failed");
+            }
             for (auto b : before) memory[b.address] = b.value;
             bool mismatch = false;
             for (unsigned i = 0; i < cycles.size(); ++i) {

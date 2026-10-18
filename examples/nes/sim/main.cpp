@@ -42,6 +42,9 @@ struct Cartridge {
             throw std::runtime_error("unsupported cartridge memory geometry");
         if ((mapper == 0 && (ps > 32768 || cs > 8192)) || (mapper == 1 && ps > 262144))
             throw std::runtime_error("unsupported board variant");
+        if ((mapper == 1 && cs > 131072) || (mapper == 2 && (ps > 262144 || cs > 8192)) ||
+            (mapper == 3 && ps > 32768) || (mapper == 4 && ps > 524288) ||
+            (mapper == 7 && (ps > 262144 || cs != 0))) throw std::runtime_error("unsupported board variant");
         if (b[8] > 1) throw std::runtime_error("banked cartridge RAM is not supported");
         size_t offset = 16 + ((b[6] & 4) ? 512 : 0);
         if (b.size() < offset + ps + cs) throw std::runtime_error("truncated cartridge image");
@@ -85,10 +88,13 @@ int main(int argc, char **argv) {
         std::string ppm_name, wav_name, input_name, save_name, trace_name;
         unsigned max_frames = 600;
         bool test = false;
+        bool console_test = false;
+        std::vector<std::string> console_crcs;
         int legacy_address = -1, legacy_code = -1;
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--test") { test = true; continue; }
+            if (arg == "--console-test") { test = true; console_test = true; continue; }
             if (i + 1 == argc) throw std::runtime_error("missing value for " + arg);
             const std::string value = argv[++i];
             if (arg == "--frames") { max_frames = std::stoul(value); if (!max_frames) throw std::runtime_error("frames must be positive"); }
@@ -96,6 +102,11 @@ int main(int argc, char **argv) {
                 legacy_address = std::stoul(value, nullptr, 16);
                 if (legacy_address < 0 || legacy_address > 0x7ff) throw std::runtime_error("legacy result must be in CPU RAM");
                 test = true;
+            }
+            else if (arg == "--console-crc") {
+                if (value.size() != 8 || value.find_first_not_of("0123456789ABCDEF") != std::string::npos)
+                    throw std::runtime_error("console CRC must be 8 uppercase hexadecimal digits");
+                console_crcs.push_back(value); console_test = true; test = true;
             }
             else if (arg == "--ppm") ppm_name = value;
             else if (arg == "--wav") wav_name = value;
@@ -127,28 +138,38 @@ int main(int argc, char **argv) {
             }
         }
         std::ofstream trace;
-        if (!trace_name.empty()) { trace.open(trace_name); if (!trace) throw std::runtime_error("cannot open trace"); trace << "cycle,address,write,data,fetch,pc,a,x,y,s,p,line,dot\n"; }
+        if (!trace_name.empty()) { trace.open(trace_name); if (!trace) throw std::runtime_error("cannot open trace"); trace << "cycle,address,write,data,fetch,pc,a,x,y,s,p,line,dot,irq,ppu_address\n"; }
         auto model = std::make_unique<Vnes>();
         auto &nes = *model;
         nes.mapper = cart.mapper; nes.prg_mask = cart.prg.size() / 8192 - 1; nes.chr_mask = cart.chr.size() / 1024 - 1;
         nes.vertical = cart.vertical; nes.four_screen = cart.four; nes.chr_ram = cart.chr_ram;
         nes.pad1 = 0; nes.pad2 = 0; nes.reset = 1; nes.clk = 0; nes.eval(); nes.clk = 1; nes.eval(); nes.reset = 0;
         std::array<uint32_t, 256 * 240> pixels{};
+        std::array<uint8_t, 4096> console{};
+        console.fill(' ');
         std::vector<int16_t> audio;
         uint64_t cycles = 0, dots = 0, pixel_count = 0;
         unsigned frames = 0, audio_phase = 0;
         size_t input_index = 0;
         bool test_started = false;
+        uint64_t reset_requested = 0;
+        unsigned reset_dots = 0;
+        bool reset_armed = true;
         unsigned self_jumps = 0;
         int result = test ? 2 : 0;
         double previous_mix = 0, hp90 = 0, hp440 = 0, previous_hp90 = 0, lp = 0;
         // Clock-derived bounds catch hangs even if the frame output breaks.
         while (frames < max_frames && dots < uint64_t(max_frames + 2) * 341 * 262) {
+            bool console_changed = false;
+            nes.reset = reset_dots != 0;
+            if (reset_dots) --reset_dots;
             while (input_index < input.size() && input[input_index].frame <= frames) {
                 nes.pad1 = input[input_index].p1; nes.pad2 = input[input_index].p2; ++input_index;
             }
-            nes.clk = 0; nes.eval();
-            // Settle the external combinational memories without advancing time.
+            nes.clk = 0;
+            // The preceding rising-edge evaluation already presents this
+            // dot's addresses. Settle memory data with the falling edge,
+            // without an extra evaluation before driving the read ports.
             for (int settle = 0; settle < 4; ++settle) {
                 const unsigned pa = nes.prg_address, ca = nes.chr_address, ra = nes.ram_address;
                 if (pa >= cart.prg.size() || ca >= cart.chr.size() || ra >= cart.ram.size())
@@ -184,6 +205,11 @@ int main(int argc, char **argv) {
                 }
             }
             if (nes.debug_cpu_tick) {
+                if (console_test && nes.debug_write && (nes.debug_address & 0xe007) == 0x2007 &&
+                    nes.debug_ppu_address >= 0x2000 && nes.debug_ppu_address < 0x3f00) {
+                    console[nes.debug_ppu_address & 0xfff] = nes.debug_data;
+                    console_changed = true;
+                }
                 if (legacy_address >= 0 && nes.debug_write && (nes.debug_address & 0xf800) == 0 &&
                     (nes.debug_address & 0x7ff) == unsigned(legacy_address)) legacy_code = nes.debug_data;
                 if (legacy_address >= 0 && nes.debug_fetch && nes.debug_pc >= 0x8000) {
@@ -195,13 +221,39 @@ int main(int argc, char **argv) {
                 if (trace) trace << std::dec << cycles << ',' << std::hex << nes.debug_address << ',' << unsigned(nes.debug_write) << ','
                     << unsigned(nes.debug_data) << ',' << unsigned(nes.debug_fetch) << ',' << nes.debug_pc << ',' << unsigned(nes.debug_a) << ','
                     << unsigned(nes.debug_x) << ',' << unsigned(nes.debug_y) << ',' << unsigned(nes.debug_s) << ',' << unsigned(nes.debug_p) << ','
-                    << std::dec << nes.debug_line << ',' << nes.debug_dot << '\n';
+                    << std::dec << nes.debug_line << ',' << nes.debug_dot << ',' << unsigned(nes.debug_irq) << ',' << std::hex << nes.debug_ppu_address << '\n';
                 ++cycles;
             }
             if (nes.ram_write) cart.ram[nes.ram_address] = nes.ram_write_data;
             if (nes.chr_write) cart.chr[nes.chr_address] = nes.chr_write_data;
             nes.clk = 1; nes.eval(); ++dots;
             if (nes.halted) throw std::runtime_error("CPU executed a KIL opcode");
+            if (console_changed) {
+                std::string text;
+                for (unsigned page = 0; page < 4; ++page) {
+                    for (unsigned row = 0; row < 30; ++row) {
+                        for (unsigned col = 0; col < 32; ++col) {
+                            const uint8_t c = console[page * 1024 + row * 32 + col];
+                            text.push_back(c >= 32 && c < 127 ? char(c) : ' ');
+                        }
+                        text.push_back('\n');
+                    }
+                }
+                const bool passed = text.find("Passed") != std::string::npos ||
+                    std::any_of(console_crcs.begin(), console_crcs.end(), [&](const std::string &crc) { return text.find(crc) != std::string::npos; });
+                const bool failed = text.find("Failed") != std::string::npos;
+                if (passed || failed) {
+                    result = failed ? 1 : 0;
+                    std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " ASCII console result\n";
+                    std::istringstream lines(text);
+                    std::string line;
+                    while (std::getline(lines, line)) {
+                        const auto end = line.find_last_not_of(' ');
+                        if (end != std::string::npos) std::cout << line.substr(0, end + 1) << '\n';
+                    }
+                    break;
+                }
+            }
             if (legacy_address >= 0 && self_jumps >= 3 && legacy_code >= 0) {
                 result = legacy_code == 1 ? 0 : 1;
                 std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " legacy code=" << legacy_code << '\n';
@@ -209,6 +261,13 @@ int main(int argc, char **argv) {
             }
             if (test && cart.ram[1] == 0xde && cart.ram[2] == 0xb0 && cart.ram[3] == 0x61) {
                 if (cart.ram[0] == 0x80) test_started = true;
+                if (cart.ram[0] != 0x81 && !reset_dots) reset_armed = true;
+                if (cart.ram[0] == 0x81 && !reset_dots && reset_armed) {
+                    if (!reset_requested) reset_requested = dots;
+                    if (dots - reset_requested >= 536932) {
+                        reset_dots = 9; reset_requested = 0; reset_armed = false;
+                    }
+                }
                 if (test_started && cart.ram[0] < 0x80) {
                     result = cart.ram[0] ? 1 : 0;
                     std::cout << (result ? "FAIL " : "PASS ") << argv[1] << " code=" << unsigned(cart.ram[0]) << '\n';

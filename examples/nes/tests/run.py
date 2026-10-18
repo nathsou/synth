@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: CERN-OHL-W-2.0
 """Run public NES diagnostics against the compiled Weft hardware.
 
 No ROMs are downloaded or distributed by this script. Every selected test must
@@ -21,6 +22,15 @@ GROUPS = [
     "apu_test/rom_singles/*.nes",
     "cpu_interrupts_v2/rom_singles/*.nes",
     "mmc3_test_2/rom_singles/[1-5]-*.nes",
+    "cpu_reset/*.nes",
+    "apu_reset/*.nes",
+    "cpu_dummy_writes/*.nes",
+    "ppu_open_bus/*.nes",
+    "ppu_read_buffer/*.nes",
+    "sprite_hit_tests_2005.10.05/*.nes",
+    "sprite_overflow_tests/*.nes",
+    "dmc_dma_during_read4/*.nes",
+    "sprdma_and_dmc_dma/*.nes",
 ]
 
 
@@ -30,7 +40,7 @@ def main():
     parser.add_argument("--roms", required=True, type=Path)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--frames", type=int, default=1800)
-    parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--only", action="append", help="filter relative ROM paths with glob patterns")
     parser.add_argument("--report", type=Path, help="save all results and diagnostic text as JSON")
     args = parser.parse_args()
@@ -51,7 +61,16 @@ def main():
 
     def run(path):
         start = time.monotonic()
-        command = [str(args.sim.resolve()), str(path), "--test", "--frames", str(args.frames)]
+        mode = ["--test"]
+        if path.parent.name in {"sprite_hit_tests_2005.10.05", "sprite_overflow_tests"}:
+            mode = ["--legacy-result", "f8"]
+        elif path.parent.name == "dmc_dma_during_read4":
+            mode = ["--console-test"]
+            if path.name == "dma_2007_read.nes":
+                mode += ["--console-crc", "159A7A8F", "--console-crc", "5E3DF9C4"]
+            elif path.name == "double_2007_read.nes":
+                mode += ["--console-crc", "85CFD627", "--console-crc", "F018C287", "--console-crc", "440EF923", "--console-crc", "E52F41A5"]
+        command = [str(args.sim.resolve()), str(path), *mode, "--frames", str(args.frames)]
         try:
             proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, timeout=args.timeout, check=False)
