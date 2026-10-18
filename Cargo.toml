@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 synth-core = { path = "crates/synth-core" }
+arch-xc7 = { path = "crates/arch-xc7" }
 arch-ice40 = { path = "crates/arch-ice40" }
 synth-dbgen = { path = "crates/synth-dbgen" }
 synth-elab = { path = "crates/synth-elab" }

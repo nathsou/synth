@@ -14,10 +14,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "arch-xc7"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-elab",
+ "synth-logic",
+ "synth-netlist",
+ "synth-rtl",
+ "synth-verilog",
+]
+
+[[package]]
 name = "synth"
 version = "0.1.0"
 dependencies = [
  "arch-ice40",
+ "arch-xc7",
  "synth-core",
  "synth-elab",
  "synth-netlist",

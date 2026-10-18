@@ -1,0 +1,22 @@
+[package]
+name = "arch-xc7"
+description = "Xilinx Artix-7 native synthesis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-logic.workspace = true
+synth-netlist.workspace = true
+synth-rtl.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+synth-elab.workspace = true
+synth-verilog.workspace = true

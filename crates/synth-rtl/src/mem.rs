@@ -181,6 +181,12 @@ fn merge_addr_ff(m: &mut Module, mi: MemId, ri: usize) -> bool {
         next.push(next_state(m, &d, j));
     }
     let Some(clk) = clk else { return false };
+    // An asynchronous read also changes when another clock writes the
+    // selected word. A read clocked only by the address register cannot
+    // reproduce those updates, even with same-clock bypass logic.
+    if m.memories[mi].writes.iter().any(|w| w.clk != clk) {
+        return false;
+    }
     let mem = &mut m.memories[mi];
     let transparent = mem.writes.iter().map(|w| w.clk == clk).collect();
     let rd = &mut mem.reads[ri];

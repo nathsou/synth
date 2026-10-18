@@ -15,7 +15,7 @@ USAGE:
 COMMANDS:
     check      Parse Verilog files and report errors
     build      Synthesise, place and route Verilog into an iCE40 bitstream
-    synth      Synthesise Verilog to iCE40 primitives (--verilog <out.v>)
+    synth      Synthesise Verilog to iCE40 or Artix-7 primitives (--verilog <out.v>)
     elab       Elaborate Verilog into RTL (--verilog <out.v> to write it back)
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
@@ -40,6 +40,12 @@ BUILD OPTIONS:
               or incompatible checkpoints start fresh. Synthesis still runs.
               Without a path, select .synth/checkpoints/<design-key>.chk.
               Put bare --incremental after input files or before another option.
+
+SYNTH OPTIONS:
+    synth synth <files.v...> [--family <ice40|artix7|xc7>] [--top <module>]
+              [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
+              [--verilog <out.v>] [--rename <module>]
+              Artix-7 synthesis only; native PnR and bitstream are not implemented.
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -98,8 +104,12 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
     }
 }
 
-/// Elaborates and synthesises the Verilog named by `a` for iCE40.
+/// Elaborates and synthesises Verilog for the selected architecture.
 fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
+    let family = a.value("--family").unwrap_or_else(|| "ice40".into());
+    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7") {
+        return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
+    }
     let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
     let t = std::time::Instant::now();
     let (sm, src) = load_verilog(a)?;
@@ -110,7 +120,11 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     }
     let m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
     eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
-    let (nl, log) = arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
+    let (nl, log) = if family == "ice40" {
+        arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?
+    } else {
+        arch_xc7::synth::synthesize(m)?
+    };
     for l in &log {
         eprintln!("info: {l}");
     }
@@ -146,7 +160,8 @@ fn timing_weight(a: &mut Args) -> Result<f64, String> {
 }
 
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
+    let mut a =
+        Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family"], &[])?;
     let nl = synthesize(&mut a)?;
     if let Some(out) = a.value("--verilog") {
         let name = a.value("--rename").unwrap_or_else(|| {

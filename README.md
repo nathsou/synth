@@ -147,7 +147,23 @@ on every design, and the processors and four of the nine solvers end up with
 a higher Fmax, Euler 48 level with nextpnr; Euler 14, 25, 43 and 57 still
 trail by 4 to 7%.
 
-Artix-7 is next.
+### Experimental Artix-7 synthesis
+
+The native synthesis foundation can emit Xilinx 7-series primitives:
+
+```sh
+target/release/synth synth design.v --top top --family artix7 --verilog mapped.v
+```
+
+`--family xc7` is an alias; omitting `--family` keeps iCE40. The Artix-7
+path maps LUT1–LUT6, CARRY4, flip-flops and synchronous block RAMs entirely
+in Rust, with no external tools at runtime.
+
+**This is not full Artix-7 support.** Native packing, placement, routing,
+constraints, timing analysis and bitstream generation are not implemented;
+`build` and `pnr` still target iCE40. DSP, LUTRAM, SRL and wide-mux inference
+also remain to be implemented. Yosys QoR parity has not been achieved.
+See [the Artix-7 status and validation report](docs/ARTIX7.md).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.
