@@ -3,6 +3,7 @@ name: Playground (GitHub Pages)
 on:
   push:
     branches: [main]
+    paths: ['crates/**', 'tools/build_playground.sh', 'Cargo.*', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:

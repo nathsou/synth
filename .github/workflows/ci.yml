@@ -1,28 +1,42 @@
 name: CI
 
+# Pull requests run everything except macOS. A push to main (after the PR
+# already passed) only runs the fast tests. The weekly run and manual runs
+# cover everything, macOS included, and refresh the build caches on main.
 on:
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
   push:
     branches: [main]
-  pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE*']
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUSTFLAGS: -D warnings
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: test-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: test-${{ hashFiles('Cargo.lock') }}-
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -30,8 +44,22 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  test-macos:
+    name: test (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Test
+        run: cargo test --workspace
+
   msrv:
     name: MSRV
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +67,17 @@ jobs:
         run: |
           rustup toolchain install 1.88 --profile minimal
           rustup default 1.88
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: msrv-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: msrv-${{ hashFiles('Cargo.lock') }}-
       - name: Check
         run: cargo check --workspace --all-targets
 
   playground:
     name: playground (WebAssembly and web app)
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +86,11 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
           rustup target add wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: wasm-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: wasm-${{ hashFiles('Cargo.lock') }}-
       - name: Clippy (wasm32)
         run: cargo clippy -p synth-playground --target wasm32-unknown-unknown
       - name: Build the static site
@@ -64,60 +103,38 @@ jobs:
       - name: Web app unit tests
         run: node --test crates/synth-playground/web/tests/web.test.mjs
 
-  bitsim:
-    name: bitstream simulation
+  # Bitstream simulation, frontend differential simulation and the Project
+  # Euler solvers share one build of synth and one install of the oracles.
+  simulation:
+    name: simulation (bitstream, frontend, Project Euler)
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
+    env:
+      SYNTH: ${{ github.workspace }}/target/ci/synth
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: sim-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: sim-${{ hashFiles('Cargo.lock') }}-
       - name: Install reference tools (test oracles only)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends yosys fpga-icestorm iverilog
       - name: Build
-        run: cargo build --release -p synth
+        run: cargo build --profile ci -p synth
       - name: Bitstream-level simulation
         run: tools/ci_bitsim.sh
       - name: Incremental bitstream simulation
         run: tools/ci_incremental.sh
-
-  rtlsim:
-    name: frontend differential simulation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Install iverilog and Yosys cell models (test oracles only)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iverilog yosys
-      - name: Build
-        run: cargo build --release -p synth
       - name: Elaborated netlists vs source RTL
         run: tools/ci_rtlsim.sh
       - name: Synthesised netlists vs RTL
         run: MODE=synth tools/ci_rtlsim.sh
-
-  euler:
-    name: Project Euler solvers
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Install iverilog and Yosys cell models (test oracles only)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iverilog yosys
-      - name: Build
-        run: cargo build --release -p synth
       - name: RTL and synthesised netlists give the answers
         run: tools/ci_euler.sh
