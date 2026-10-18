@@ -786,19 +786,43 @@ impl Lower<'_> {
                 }
             }
         }
-        let mut acc = vec![Lit::FALSE; w];
-        let mut started = false;
-        for (i, row) in rows {
-            if !started {
-                acc[i..].copy_from_slice(&row);
-                started = true;
-                continue;
+        self.sum_rows(&rows, w)
+    }
+}
+
+impl Lower<'_> {
+    /// The `w`-bit sum of rows of bits (each at an offset): full adders
+    /// reduce every column to two bits, a carry chain adds the two rows.
+    fn sum_rows(&mut self, rows: &[(usize, Vec<Lit>)], w: usize) -> Vec<Lit> {
+        let mut cols: Vec<Vec<Lit>> = vec![Vec::new(); w];
+        for (off, row) in rows {
+            for (k, &l) in row.iter().enumerate() {
+                if off + k < w && l != Lit::FALSE {
+                    cols[off + k].push(l);
+                }
             }
-            let hi = acc[i..].to_vec();
-            let (s, _) = self.add(&hi, &row, Lit::FALSE);
-            acc[i..].copy_from_slice(&s);
         }
-        acc
+        while cols.iter().any(|c| c.len() > 2) {
+            let mut next: Vec<Vec<Lit>> = vec![Vec::new(); w];
+            for i in 0..w {
+                let col = std::mem::take(&mut cols[i]);
+                let (triples, rest) = col.as_chunks::<3>();
+                for t in triples {
+                    let g = &mut self.net.aig;
+                    let x = g.xor(t[0], t[1]);
+                    next[i].push(g.xor(x, t[2]));
+                    let c = g.maj(t[0], t[1], t[2]);
+                    if i + 1 < w {
+                        next[i + 1].push(c);
+                    }
+                }
+                next[i].extend_from_slice(rest);
+            }
+            cols = next;
+        }
+        let a: Vec<Lit> = cols.iter().map(|c| c.first().copied().unwrap_or(Lit::FALSE)).collect();
+        let b: Vec<Lit> = cols.iter().map(|c| c.get(1).copied().unwrap_or(Lit::FALSE)).collect();
+        self.add(&a, &b, Lit::FALSE).0
     }
 }
 
