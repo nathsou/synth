@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// A port of examples/go_board_serv/top.v: SERV (bit-serial RV32I, in Verilog)
+// on the Nandland Go Board prints a line over the USB UART once a second.
+// LED1 lights while a character is being sent; LED4 blinks.
+//
+// Build from this directory with SERV's Verilog sources:
+//   S=../../tests/designs/third_party/serv
+//   synth build serv.weft $S/servant/servant.v $S/servant/servant_mux.v \
+//     $S/servant/servant_ram.v $S/servant/servant_timer.v \
+//     $S/servant/servant_gpio.v $S/servile/*.v $S/rtl/*.v \
+//     --device hx1k --package vq100 --pcf go_board.pcf -o serv.bin
+
+extern module servant<memfile: string, memsize: int>(
+    domain { clock: wb_clk, reset: wb_rst },
+    out q: bool,
+);
+
+module top(in clk: clock, out led: uint<4>, out tx: bool) {
+    // Reset for 16 cycles after configuration.
+    let por = power_on_reset<CYCLES: 16>() @clk;
+    default domain sys { clock: clk, reset: por }
+
+    inst soc = servant<memfile: "../go_board_serv/hello.hex", memsize: 4096>();
+    reg beat: uint<25> init 0;
+    beat := beat +% 1;
+
+    tx = soc.q;
+    led = concat(beat[24], 0b00, !soc.q);
+}

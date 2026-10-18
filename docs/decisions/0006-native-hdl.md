@@ -1,6 +1,6 @@
 # 0006: A native HDL that targets the RTL IR
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 

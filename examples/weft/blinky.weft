@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Counts in binary on the Go Board's four LEDs, about twice a second.
+module top(in clk: clock, out led: uint<4>) {
+    reg count: uint<26> = 0;
+    count := count +% 1;
+    led = count[25:22];
+}

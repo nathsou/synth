@@ -1,6 +1,6 @@
 # Weft — language specification
 
-Status: draft 0.1. *Weft* is a working name.
+Status: version 0.1, implemented in `crates/synth-weft`. *Weft* is a working name.
 
 Weft is a small hardware description language for synchronous FPGA designs. It
 compiles directly to synth's RTL IR (`synth-rtl`), without going through Verilog.
@@ -892,6 +892,9 @@ the standard library. It is the only way to bypass tag checking, so a search for
 
 ### 8.7 Example: a PLL clock domain
 
+(The iCE40 prelude does not declare `SB_PLL40_CORE` yet, because the backend
+cannot place PLLs. The example shows the intended use.)
+
 ```weft
 module top(in clk_12m: clock, in btn: bool, out led: bool) {
     inst pll = SB_PLL40_CORE<DIVR: 0, DIVF: 66, DIVQ: 5, FILTER_RANGE: 1>(
@@ -1217,7 +1220,9 @@ assert(DEPTH >= 2 && DEPTH <= 4096, "fifo depth must be in 2..=4096");
 
 Weft sources are recognized by the `.weft` extension. Verilog files on the same
 command line provide the definitions of extern modules (§11.3). The top module is
-chosen with `--top`, or is the only module that no other module instantiates.
+chosen with `--top`, or is the only module that no other module instantiates
+and that can be instantiated with the given `-P` arguments (a generic module
+whose parameters lack defaults is not a candidate).
 
 - Its ports are the design's pins. Port types are `bool`, `uint<N>`, `sint<N>`,
   `clock` and `inout`. Bit i of a port `led: uint<4>` is named `led[i]` in
@@ -1303,10 +1308,19 @@ This list is exhaustive.
 
 - Comparisons that are always true or always false given the operand ranges
   (`x < 256` with `x: uint<8>`).
-- Dead assignments (§7.6).
+- Dead assignments (§7.6), and `r := r;`, which has no effect.
 - `_` arms that cover enum variants.
-- Unused registers, wires, memories, inputs and instance outputs.
-- Combinational memory reads on architectures without LUT RAM.
+- Unused registers, wires, `let` values, memories and module inputs; instances
+  none of whose outputs are used; registers that are never assigned.
+- Constant shifts that move every bit out.
+- Memories that are never written and have no initial contents.
+- Combinational reads of memories of 64 words or more, which cannot use block
+  RAM.
+
+Names starting with `_` are exempt from the unused-name warnings. Warnings are
+not reported for a module that has errors, and never for the standard library.
+When an asynchronous or foreign-domain value reaches several sinks, one error
+is reported for the source, with the other sinks as notes.
 
 Diagnostics follow synth's usual format (source excerpt, labels, notes and
 `help:` suggestions). Every error in the table of §1 has a suggestion that names
@@ -1333,8 +1347,9 @@ flattens the hierarchy into one `synth_rtl::Module`. Cells are built with the
 | `/`, `%` by a constant | `Div`/`Mod` (the constant divisor lets synthesis simplify) |
 | shifts | `Shl`, `Shr`, `Sshr` |
 | constant bit, field and slice selects | `Sig` slicing, no cells |
-| runtime bit or element read | `Shiftx` (in range by construction) or a `Pmux` over elements |
-| `if`, `match` on drivers | per target bit, a priority `Mux` chain in program order; a `match` whose patterns are pairwise disjoint becomes a `Pmux` with one-hot selects |
+| runtime bit read | `Shiftx` (in range by construction) |
+| runtime element read | a `Pmux` over the elements the index can select |
+| `if`, `match` on drivers | per assignment, a `Mux` on the assignment's guard, chained in program order; synthesis turns the chains into trees and one-hot selects where it pays |
 | `undef` | `SigBit::X` |
 | `reg` with `= v` | `Dff` with `clk` from the domain (`posedge` from `edge`), `srst` or `arst` from the domain reset with value `v`, `init` = `v` |
 | `reg` with `init v` | `Dff` without resets, `init` = `v` |
@@ -1425,10 +1440,14 @@ Functions: `count_ones` (§12), `onehot_to_index<N>(x: uint<N>) -> index<N>`,
 
 Each `arch-*` crate ships the extern declarations of its primitives, generated
 from the same primitive library that the Verilog frontend uses, with `clock`
-types on clock pins and `@async` on asynchronous pins. On iCE40: `SB_IO`,
-`SB_GB`, `SB_GB_IO`, the `SB_PLL40_*` family, `SB_WARMBOOT` and the
-oscillators. Block RAMs and flip-flops are not declared: `mem` and `reg` cover
-them.
+types on clock pins and `@async` on asynchronous pins. On iCE40, the prelude
+(`crates/arch-ice40/src/prims.weft`) declares the primitives the backend can
+implement today: `SB_IO` (combinational modes), `SB_GB` and `SB_GB_IO`. PLLs
+and oscillators are added when the backend supports them. Block RAMs and
+flip-flops are not declared: `mem` and `reg` cover them.
+
+Extern modules may have clock outputs (`out GLOBAL_BUFFER_OUTPUT: clock`). They
+are clock values (`inst.port`) that can define domains.
 
 ---
 

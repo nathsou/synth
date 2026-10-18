@@ -1,8 +1,9 @@
 # synth
 
-A unified, self-contained FPGA toolchain written in Rust. It takes Verilog-2005
-or RTLIL (for example from Amaranth) to a programmable bitstream in one tool, with
-no Yosys, nextpnr, Python or vendor tools at runtime.
+A unified, self-contained FPGA toolchain written in Rust. It takes Verilog-2005,
+[Weft](docs/WEFT.md) (its own HDL) or RTLIL (for example from Amaranth) to a
+programmable bitstream in one tool, with no Yosys, nextpnr, Python or vendor
+tools at runtime.
 
 Initial targets, in order:
 
@@ -20,6 +21,32 @@ cargo build --release
 target/release/synth build design.v --top top \
   --device hx8k --package cb132 --pcf pins.pcf -o design.bin
 ```
+
+## Weft
+
+Weft is a small HDL that compiles straight to synth's RTL IR. It is designed so
+that the usual Verilog mistakes are compile errors with a suggested fix:
+arithmetic is exact (wrapping is written `+%`), indices are range-checked,
+registers state their reset or power-on value, combinational signals must be
+assigned on every path, and clock domains are checked, so an unsynchronized
+input or a domain crossing is rejected. A module with one clock needs no domain
+annotations.
+
+```weft
+module top(in clk: clock, in btn: bool, out led: bool) {
+    let pressed = sync(btn);        // `btn` is asynchronous until synchronized
+    reg count: uint<24> = 0;
+    if pressed { count := count +% 1; }
+    led = count[23];
+}
+```
+
+```sh
+target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf -o top.bin
+```
+
+See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
+modules can be used from Weft through `extern module` declarations.
 
 ## Incremental builds
 

@@ -8,7 +8,9 @@
 //! - [`rng`]: a deterministic pseudo-random number generator.
 //! - [`logic`]: four-state bit vectors with Verilog semantics.
 //! - [`diag`]: source maps, spans and diagnostics.
+//! - [`bigint`]: arbitrary-precision integers for compile-time arithmetic.
 
+pub mod bigint;
 pub mod bin;
 pub mod diag;
 pub mod hash;
@@ -18,6 +20,7 @@ pub mod logic;
 pub mod ordered;
 pub mod rng;
 
+pub use bigint::BigInt;
 pub use diag::{Diagnostic, Diagnostics, FileId, Severity, SourceMap, Span};
 pub use hash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher, fx_hash};
 pub use id::{IdRange, Idx, IndexVec};

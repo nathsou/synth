@@ -107,39 +107,66 @@ pub enum Severity {
 }
 
 /// A message about the source, with a primary location and optional notes.
+///
+/// The primary span may carry a short `label` printed under it. `labels`
+/// mark secondary locations (shown with `-` instead of `^`), and `helps`
+/// suggest fixes.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub span: Option<Span>,
+    pub label: Option<String>,
+    pub labels: Vec<(Span, String)>,
     pub notes: Vec<(Option<Span>, String)>,
+    pub helps: Vec<String>,
 }
 
 impl Diagnostic {
-    pub fn error(span: Span, message: impl Into<String>) -> Self {
+    pub fn new(severity: Severity, span: Option<Span>, message: impl Into<String>) -> Self {
         Diagnostic {
-            severity: Severity::Error,
+            severity,
             message: message.into(),
-            span: Some(span),
+            span,
+            label: None,
+            labels: vec![],
             notes: vec![],
+            helps: vec![],
         }
+    }
+
+    pub fn error(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic::new(Severity::Error, Some(span), message)
     }
 
     pub fn warning(span: Span, message: impl Into<String>) -> Self {
-        Diagnostic {
-            severity: Severity::Warning,
-            message: message.into(),
-            span: Some(span),
-            notes: vec![],
-        }
+        Diagnostic::new(Severity::Warning, Some(span), message)
     }
 
     pub fn global_error(message: impl Into<String>) -> Self {
-        Diagnostic { severity: Severity::Error, message: message.into(), span: None, notes: vec![] }
+        Diagnostic::new(Severity::Error, None, message)
     }
 
     pub fn with_note(mut self, span: Option<Span>, note: impl Into<String>) -> Self {
         self.notes.push((span, note.into()));
+        self
+    }
+
+    /// A short text shown under the primary span.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// A secondary location, shown with its own excerpt.
+    pub fn with_secondary(mut self, span: Span, label: impl Into<String>) -> Self {
+        self.labels.push((span, label.into()));
+        self
+    }
+
+    /// A suggested fix, printed as `= help: ...`.
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.helps.push(help.into());
         self
     }
 
@@ -152,37 +179,90 @@ impl Diagnostic {
             Severity::Note => "note",
         };
         let _ = writeln!(out, "{sev}: {}", self.message);
+        let mut labels: Vec<(Span, char, Option<&str>)> = Vec::new();
         if let Some(span) = self.span {
-            excerpt(&mut out, sm, span);
+            labels.push((span, '^', self.label.as_deref()));
+        }
+        for (span, label) in &self.labels {
+            labels.push((*span, '-', Some(label)));
+        }
+        excerpts(&mut out, sm, &labels);
+        for help in &self.helps {
+            let _ = writeln!(out, "  = help: {help}");
         }
         for (span, note) in &self.notes {
             let _ = writeln!(out, "note: {note}");
             if let Some(span) = span {
-                excerpt(&mut out, sm, *span);
+                excerpts(&mut out, sm, &[(*span, '^', None)]);
             }
         }
         out
     }
 }
 
-fn excerpt(out: &mut String, sm: &SourceMap, span: Span) {
-    if span.file.0 as usize >= sm.len() {
+/// Prints source excerpts for labelled spans. Labels on the same line share
+/// one copy of the line; the first label's location heads the excerpt.
+fn excerpts(out: &mut String, sm: &SourceMap, labels: &[(Span, char, Option<&str>)]) {
+    /// A marker under a line: column, length, mark character and label.
+    type Marker<'l> = (usize, usize, char, Option<&'l str>);
+    // (file, line) -> markers, in order of first use.
+    let mut groups: Vec<(FileId, usize, Vec<Marker<'_>>)> = Vec::new();
+    for &(span, mark, label) in labels {
+        if span.file.0 as usize >= sm.len() {
+            continue;
+        }
+        let f = sm.file(span.file);
+        let (line, col) = f.line_col(span.start as usize);
+        let (end_line, end_col) = f.line_col(span.end as usize);
+        let text = f.line_text(line);
+        let len = if end_line == line {
+            (end_col - col).max(1)
+        } else {
+            (text.chars().count() + 1 - col).max(1)
+        };
+        // A secondary label identical to the primary span adds nothing.
+        let dup = groups.iter().any(|(gf, gl, ms)| {
+            *gf == span.file
+                && *gl == line
+                && ms.iter().any(|m| m.0 == col && m.1 == len && m.3 == label)
+        });
+        if dup {
+            continue;
+        }
+        match groups.iter_mut().find(|(gf, gl, _)| *gf == span.file && *gl == line) {
+            Some(g) => g.2.push((col, len, mark, label)),
+            None => groups.push((span.file, line, vec![(col, len, mark, label)])),
+        }
+    }
+    if groups.is_empty() {
         return;
     }
-    let f = sm.file(span.file);
-    let (line, col) = f.line_col(span.start as usize);
-    let (end_line, end_col) = f.line_col(span.end as usize);
-    let text = f.line_text(line);
-    let width = line.to_string().len();
-    let _ = writeln!(out, "{:width$}--> {}:{line}:{col}", "", f.name);
-    let _ = writeln!(out, "{:width$} |", "");
-    let _ = writeln!(out, "{line} | {text}");
-    let len = if end_line == line {
-        (end_col - col).max(1)
-    } else {
-        (text.chars().count() + 1 - col).max(1)
-    };
-    let _ = writeln!(out, "{:width$} | {:pad$}{}", "", "", "^".repeat(len), pad = col - 1);
+    let width = groups.iter().map(|g| g.1.to_string().len()).max().unwrap_or(1);
+    let mut cur_file = None;
+    for (k, (file, line, marks)) in groups.iter().enumerate() {
+        let f = sm.file(*file);
+        let col = marks[0].0;
+        if cur_file != Some(*file) {
+            let arrow = if k == 0 { "-->" } else { ":::" };
+            let _ = writeln!(out, "{:width$}{arrow} {}:{line}:{col}", "", f.name);
+            let _ = writeln!(out, "{:width$} |", "");
+            cur_file = Some(*file);
+        } else if k > 0 && groups[k - 1].1 + 1 != *line {
+            let _ = writeln!(out, "{:width$} |", "");
+        }
+        let _ = writeln!(out, "{line:>width$} | {}", f.line_text(*line));
+        for (col, len, mark, label) in marks {
+            let marks = mark.to_string().repeat(*len);
+            match label {
+                Some(l) => {
+                    let _ = writeln!(out, "{:width$} | {:pad$}{marks} {l}", "", "", pad = col - 1);
+                }
+                None => {
+                    let _ = writeln!(out, "{:width$} | {:pad$}{marks}", "", "", pad = col - 1);
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {

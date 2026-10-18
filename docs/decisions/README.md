@@ -13,4 +13,4 @@ New records copy [`0000-template.md`](0000-template.md) and take the next number
 | [0003](0003-inputs.md) | Inputs: Verilog-2005, RTLIL and SRTL | Accepted (extended by 0006) |
 | [0004](0004-licence.md) | Licence: EUPL-1.2 (code), CERN-OHL-W-2.0 (HDL) | Accepted |
 | [0005](0005-targets.md) | Targets and order: iCE40, then Artix-7; ECP5 deferred | Accepted |
-| [0006](0006-native-hdl.md) | A native HDL (Weft) that targets the RTL IR | Proposed |
+| [0006](0006-native-hdl.md) | A native HDL (Weft) that targets the RTL IR | Accepted |

@@ -22,4 +22,7 @@ pub mod synth;
 pub mod timing;
 
 pub use bitstream::{Config, FreqRange};
+
+/// Extern declarations of the iCE40 primitives for Weft designs.
+pub const WEFT_PRELUDE: &str = include_str!("prims.weft");
 pub use device::{Die, TileKind};
