@@ -4,11 +4,12 @@
 //! Each routing node can carry one net. Nets are routed one after another;
 //! overused nodes get more expensive each iteration (present and history
 //! congestion costs) until every node is used by at most one net. Only nets
-//! touching overused nodes are ripped up and rerouted after the first pass.
+//! touching overused nodes are ripped up and rerouted after the first pass,
+//! and nets whose nodes others take in that pass.
 //!
 //! The cost of entering a node blends congestion and delay according to the
 //! criticality of the connection being routed, so timing-critical
-//! connections prefer fast paths.
+//! connections prefer fast paths, and join their net's tree near its source.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -159,8 +160,13 @@ struct State {
     /// Nodes belonging to the tree of the net being routed.
     in_tree: Vec<u32>,
     tree_gen: u32,
+    /// Delay from the source of the net being routed to its tree nodes.
+    tree_delay: Vec<f32>,
     /// Reverse edge lookup: source node of each edge.
     edge_src: Vec<u32>,
+    /// Nodes all of whose paths stay at their position (like the inputs of
+    /// a logic block): useless for reaching a sink anywhere else.
+    confined: Vec<bool>,
 }
 
 /// Routes `nets` on `graph`. Returns one route per net.
@@ -182,6 +188,8 @@ pub type Retime<'a> = &'a mut dyn FnMut(&[NetRoute]) -> Vec<Vec<f32>>;
 pub struct RouteHooks<'a> {
     /// Nodes no net may use.
     pub blocked: &'a [u32],
+    /// Edges no net may use.
+    pub blocked_edges: &'a [u32],
     /// Called after every iteration with the iteration number, the number of
     /// nets routed in it and the overused nodes.
     pub progress: Option<Progress<'a>>,
@@ -196,6 +204,7 @@ impl std::fmt::Debug for RouteHooks<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RouteHooks")
             .field("blocked", &self.blocked.len())
+            .field("blocked_edges", &self.blocked_edges.len())
             .field("progress", &self.progress.is_some())
             .field("retime", &self.retime.is_some())
             .finish()
@@ -217,6 +226,20 @@ pub fn route_with(
             edge_src[e as usize] = node as u32;
         }
     }
+    // A blocked edge becomes a loop on its source node, which never
+    // improves a search.
+    let looped: Vec<u32>;
+    let graph = if hooks.blocked_edges.is_empty() {
+        graph
+    } else {
+        let mut dst = graph.edge_dst.to_vec();
+        for &e in hooks.blocked_edges {
+            dst[e as usize] = edge_src[e as usize];
+        }
+        looped = dst;
+        Graph { edge_dst: &looped, ..graph }
+    };
+    let confined = confined_nodes(&graph, &edge_src);
     let mut st = State {
         occupancy: vec![0; n],
         history: vec![0.0; n],
@@ -226,7 +249,9 @@ pub fn route_with(
         search_gen: 0,
         in_tree: vec![0; n],
         tree_gen: 0,
+        tree_delay: vec![0.0; n],
         edge_src,
+        confined,
     };
     let mut routes: Vec<NetRoute> = vec![NetRoute::default(); nets.len()];
     let mut pres_fac = opts.present_factor;
@@ -254,13 +279,29 @@ pub fn route_with(
     let mut to_route: Vec<usize> = (0..nets.len()).collect();
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
+    // Exclusive or of the nets using each node: with one user, that net.
+    let mut users = vec![0u32; n];
+    // Last iteration each net was (or is to be) routed in.
+    let mut routed = vec![usize::MAX; nets.len()];
     for iter in 0..opts.max_iterations {
         stats.iterations = iter + 1;
         for &i in &to_route {
+            routed[i] = iter;
+        }
+        // A net taking the node of another is routed again in this
+        // iteration, now that it has company: it moves if it can, before the
+        // first net comes back to the same choice (two nets could otherwise
+        // swap nodes forever while the one that should move never sees the
+        // other on its node).
+        let mut k = 0;
+        while k < to_route.len() {
+            let i = to_route[k];
+            k += 1;
             // Rip up.
             for &e in &routes[i].edges {
                 let d = graph.edge_dst[e as usize] as usize;
                 st.occupancy[d] -= 1;
+                users[d] ^= i as u32;
             }
             routes[i].edges.clear();
             route_net(
@@ -277,7 +318,15 @@ pub fn route_with(
             )?;
             for &e in &routes[i].edges {
                 let d = graph.edge_dst[e as usize] as usize;
+                if st.occupancy[d] == 1 {
+                    let v = users[d] as usize;
+                    if routed[v] != iter {
+                        routed[v] = iter;
+                        to_route.push(v);
+                    }
+                }
                 st.occupancy[d] += 1;
+                users[d] ^= i as u32;
             }
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
@@ -376,6 +425,46 @@ pub struct RouteStats {
     pub wire_nodes: usize,
 }
 
+/// Nodes from which every path stays at the node's position.
+fn confined_nodes(graph: &Graph<'_>, edge_src: &[u32]) -> Vec<bool> {
+    let n = graph.num_nodes();
+    let pos = |k: usize| (graph.node_x[k], graph.node_y[k]);
+    // Nodes reaching another position, found backwards from the edges
+    // leaving their position.
+    let mut confined = vec![true; n];
+    let mut stack = Vec::new();
+    for (e, &d) in graph.edge_dst.iter().enumerate() {
+        let s = edge_src[e] as usize;
+        if pos(s) != pos(d as usize) && confined[s] {
+            confined[s] = false;
+            stack.push(s);
+        }
+    }
+    let mut preds = vec![0u32; n + 1];
+    for &d in graph.edge_dst {
+        preds[d as usize + 1] += 1;
+    }
+    for k in 0..n {
+        preds[k + 1] += preds[k];
+    }
+    let mut fill = preds.clone();
+    let mut pred_edges = vec![0u32; graph.edge_dst.len()];
+    for (e, &d) in graph.edge_dst.iter().enumerate() {
+        pred_edges[fill[d as usize] as usize] = e as u32;
+        fill[d as usize] += 1;
+    }
+    while let Some(k) = stack.pop() {
+        for &e in &pred_edges[preds[k] as usize..preds[k + 1] as usize] {
+            let s = edge_src[e as usize] as usize;
+            if confined[s] {
+                confined[s] = false;
+                stack.push(s);
+            }
+        }
+    }
+    confined
+}
+
 #[allow(clippy::too_many_arguments)]
 fn route_net(
     graph: &Graph<'_>,
@@ -392,6 +481,7 @@ fn route_net(
     st.tree_gen += 1;
     let tg = st.tree_gen;
     st.in_tree[net.source as usize] = tg;
+    st.tree_delay[net.source as usize] = 0.0;
     // Bounding box of the net plus a margin.
     let (mut x0, mut y0, mut x1, mut y1) =
         (graph.node_x[net.source as usize], graph.node_y[net.source as usize], 0, 0);
@@ -434,11 +524,15 @@ fn route_net(
                 d * ((1.0 - crit) * opts.astar_cost_per_tile
                     + crit * opts.astar_delay_per_tile * opts.delay_scale)
             };
+            // A critical sink pays for the delay from the source to where
+            // it joins the tree, so that it does not join at the end of a
+            // long branch.
             for &t in &tree_nodes {
-                st.best[t as usize] = 0.0;
+                let g = crit * st.tree_delay[t as usize] * opts.delay_scale;
+                st.best[t as usize] = g;
                 st.via[t as usize] = u32::MAX;
                 st.stamp[t as usize] = search_gen;
-                heap.push(QueueEntry { f: est(t as usize), g: 0.0, node: t });
+                heap.push(QueueEntry { f: g + est(t as usize), g, node: t });
             }
             let (bx0, by0, bx1, by1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
             let mut found = false;
@@ -461,7 +555,13 @@ fn route_net(
                         continue;
                     }
                     let (nx, ny) = (graph.node_x[du], graph.node_y[du]);
-                    if d != sink && (nx < bx0 || nx > bx1 || ny < by0 || ny > by1) {
+                    if d != sink
+                        && (nx < bx0
+                            || nx > bx1
+                            || ny < by0
+                            || ny > by1
+                            || st.confined[du] && (nx, ny) != (tx, ty))
+                    {
                         continue;
                     }
                     let occ = st.occupancy[du] as f32;
@@ -497,6 +597,8 @@ fn route_net(
         }
         for &e in path.iter().rev() {
             let d = graph.edge_dst[e as usize];
+            st.tree_delay[d as usize] =
+                st.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
             st.in_tree[d as usize] = tg;
             tree_nodes.push(d);
             out.edges.push(e);
@@ -579,5 +681,125 @@ mod tests {
             assert!(seen.insert(d[e as usize]));
         }
         assert!(seen.contains(&5) && seen.contains(&30) && seen.contains(&35));
+    }
+
+    #[test]
+    fn blocked_edges_are_avoided() {
+        let (o, d, dl, x, y, c) = grid(3, 3);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        // Block the straight way from node 0 to node 2 along the first row.
+        let blocked: Vec<u32> = (o[0]..o[1]).filter(|&e| d[e as usize] == 1).collect();
+        let nets = vec![NetRequest { source: 0, sinks: vec![2], criticality: vec![] }];
+        let hooks = RouteHooks { blocked_edges: &blocked, ..RouteHooks::default() };
+        let (routes, _) = route_with(g, &nets, &RouteOptions::default(), hooks).unwrap();
+        assert!(routes[0].edges.iter().all(|e| !blocked.contains(e)));
+        assert_eq!(d[*routes[0].edges.last().unwrap() as usize], 2);
+    }
+
+    /// Builds a graph with all nodes at one position from an edge list.
+    fn edge_graph(n: usize, edges: &[(u32, u32)]) -> GridData {
+        let mut offsets = vec![0u32];
+        let mut dst = Vec::new();
+        for s in 0..n as u32 {
+            dst.extend(edges.iter().filter(|e| e.0 == s).map(|e| e.1));
+            offsets.push(dst.len() as u32);
+        }
+        let delay = vec![100.0; dst.len()];
+        (offsets, dst, delay, vec![0; n], vec![0; n], vec![1.0; n])
+    }
+
+    #[test]
+    fn displaced_net_moves() {
+        // Nets A and B need one of P1 and P3 each; V sits on P1 but could
+        // take R1 from D, which has a long free detour. When A comes to P1,
+        // V must see it there to move; rerouted only after A has left again
+        // it would stay forever.
+        let (s_a, s_b, s_d, s_v, p1, p3, r1, p2, s1, s2, s3) = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        let (t_a, t_b, t_d, t_v) = (11, 12, 13, 14);
+        let edges = [
+            (s_a, p1),
+            (s_a, p3),
+            (s_b, p1),
+            (s_b, p3),
+            (p1, t_a),
+            (p1, t_b),
+            (p3, t_a),
+            (p3, t_b),
+            (s_v, p1),
+            (p1, t_v),
+            (s_v, r1),
+            (r1, p2),
+            (p2, t_v),
+            (s_d, r1),
+            (r1, t_d),
+            (s_d, s1),
+            (s1, s2),
+            (s2, s3),
+            (s3, t_d),
+        ];
+        let (o, d, dl, x, y, c) = edge_graph(15, &edges);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let net = |source, sink| NetRequest { source, sinks: vec![sink], criticality: vec![] };
+        let nets = vec![net(s_a, t_a), net(s_b, t_b), net(s_d, t_d), net(s_v, t_v)];
+        let opts = RouteOptions { max_iterations: 30, ..RouteOptions::default() };
+        let (routes, _) = route(g, &nets, &opts).unwrap();
+        let uses = |i: usize, node: u32| routes[i].edges.iter().any(|&e| d[e as usize] == node);
+        assert!(uses(3, r1) && uses(2, s3));
+    }
+
+    #[test]
+    fn confined_nodes_lead_nowhere_else() {
+        // 0 at (0, 0) feeds wire 1 at (1, 0), which feeds the input 2 of a
+        // block there (and its logical input 3) or goes on to 4 at (2, 0).
+        let (o, d, dl, _, _, c) = edge_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 2), (1, 4)]);
+        let (x, y) = (vec![0, 1, 1, 1, 2], vec![0; 5]);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let src: Vec<u32> =
+            (0..5u32).flat_map(|k| (o[k as usize]..o[k as usize + 1]).map(move |_| k)).collect();
+        assert_eq!(confined_nodes(&g, &src), [false, false, true, true, true]);
+    }
+
+    #[test]
+    fn critical_sink_joins_near_source() {
+        // Source 0, far sink 4 at the end of the slow chain 1, 2, 3; the
+        // critical sink 7 is one slow edge from 3 or three fast ones from
+        // the source (5, 6).
+        let edges = [(0, 1), (0, 5), (1, 2), (2, 3), (3, 4), (3, 7), (5, 6), (6, 7)];
+        let (o, d, _, _, _, c) = edge_graph(8, &edges);
+        let dl: Vec<f32> =
+            edges.iter().map(|e| if e.1 >= 5 && e.0 != 3 { 400.0 } else { 1000.0 }).collect();
+        let (x, y) = (vec![0, 1, 2, 3, 4, 0, 1, 2], vec![0, 0, 0, 0, 0, 1, 1, 1]);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let nets = vec![NetRequest { source: 0, sinks: vec![4, 7], criticality: vec![0.0, 1.0] }];
+        let (routes, _) = route(g, &nets, &RouteOptions::default()).unwrap();
+        assert!(routes[0].edges.iter().any(|&e| d[e as usize] == 6));
     }
 }

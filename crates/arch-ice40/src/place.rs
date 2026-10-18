@@ -87,6 +87,14 @@ pub(crate) fn port_name(nl: &Netlist, c: CellId) -> Option<String> {
         .and_then(|(_, v)| v.as_str().map(String::from))
 }
 
+/// Whether a net is on a global network (driven by a global buffer).
+pub(crate) fn on_global(nl: &Netlist, n: NetId) -> bool {
+    nl.nets[n].driver.is_some_and(|d| {
+        let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
+        nl.cell_kind(d.cell) == GB || pin == "GLOBAL_BUFFER_OUTPUT"
+    })
+}
+
 /// Places a packed design.
 pub fn place(
     arch: &Arch,
@@ -384,12 +392,7 @@ impl<'a> Annealer<'a> {
             fixed: FxHashMap::default(),
         };
 
-        let is_global = |n: NetId| {
-            nl.nets[n].driver.is_some_and(|d| {
-                let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
-                nl.cell_kind(d.cell) == GB || pin == "GLOBAL_BUFFER_OUTPUT"
-            })
-        };
+        let is_global = |n: NetId| on_global(nl, n);
         for c in nl.live_cells() {
             if nl.cell_kind(c) != LC {
                 continue;
