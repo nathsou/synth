@@ -185,6 +185,7 @@ pub fn synthesize_observed(
     let before = net.aig.num_ands();
     let mut merged = 0;
     let mut chain_bits = 0;
+    let mut lut_chains = 0;
     let mut const_ffs = 0;
     // Merging equivalent logic can make carry-chain operands constant;
     // simplifying the chains feeds their sums back into the graph.
@@ -198,14 +199,19 @@ pub fn synthesize_observed(
         merged += st.proved;
         let removed = synth_logic::carry::simplify_carries(&mut net);
         chain_bits += removed;
+        let lowered = synth_logic::carry::lower_lut_sized_carries(&mut net, opts.map.k);
+        lut_chains += lowered;
         let ffs = synth_logic::seq::remove_constant_ffs(&mut net)
             + synth_logic::seq::merge_duplicate_ffs(&mut net);
         const_ffs += ffs;
         net.cleanup();
-        if removed + ffs == 0 {
+        if removed + ffs + lowered == 0 {
             break;
         }
         unfraiged = None;
+    }
+    if lut_chains > 0 {
+        log.push(format!("{lut_chains} carry chains mapped to LUTs (boundary inputs fit a LUT)"));
     }
     // Snapshots for structural choices: the fraiged graph, its balanced
     // form, rounds of rewriting scripts (the last is the mapped graph) and

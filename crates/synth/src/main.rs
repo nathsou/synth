@@ -34,7 +34,10 @@ BUILD OPTIONS:
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
+              [--carry-min-width <bits>]
               [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
+              --carry-min-width: minimum adder width for hard carry chains
+              (default 3); variable comparators use two more bits.
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
@@ -122,7 +125,16 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     let t = std::time::Instant::now();
     let m = load_rtl(a)?;
     eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
-    let (nl, log) = arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
+    let mut synth_opts = arch_ice40::synth::SynthOptions::default();
+    if let Some(value) = a.value("--carry-min-width") {
+        let width = value
+            .parse::<usize>()
+            .ok()
+            .filter(|&w| w > 0 && w.checked_add(2).is_some())
+            .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
+        synth_opts.lower.carry_min_width = Some(width);
+    }
+    let (nl, log) = arch_ice40::synth::synthesize(m, &synth_opts)?;
     for l in &log {
         eprintln!("info: {l}");
     }
@@ -158,7 +170,11 @@ fn timing_weight(a: &mut Args) -> Result<f64, String> {
 }
 
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename"], &[])?;
+    let mut a = Args::parse(
+        argv,
+        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--carry-min-width"],
+        &[],
+    )?;
     let nl = synthesize(&mut a)?;
     if let Some(out) = a.value("--verilog") {
         let name = a.value("--rename").unwrap_or_else(|| {
@@ -192,6 +208,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--asc",
             "--seed",
             "--effort",
+            "--carry-min-width",
             "--timing-weight",
             "--freq",
             "--route-timing-rounds",
@@ -336,6 +353,10 @@ fn checkpoint_path(
                 })
                 .collect();
         key.write(format!("{name} {values:?}\n").as_bytes());
+    }
+    // Explicit carry thresholds must not reuse a different mapping policy.
+    if let Some(width) = a.value("--carry-min-width") {
+        key.write(format!("carry-min-width {width}\n").as_bytes());
     }
     key.write(format!("{opts:?}").as_bytes());
     let dir = ".synth/checkpoints";

@@ -1,6 +1,7 @@
 //! Simplification of carry chains after the graph around them changed:
 //! low bits whose operands became constant are folded back into the graph,
-//! and high bits nobody reads are dropped.
+//! and high bits nobody reads are dropped. Boxes whose boundary inputs fit
+//! in a target LUT can be lowered back into combinational logic.
 
 use synth_core::FxHashMap;
 
@@ -146,6 +147,52 @@ pub fn simplify_carries(net: &mut LogicNet) -> usize {
     removed
 }
 
+/// Lower carry boxes whose entire input support fits in a LUT. Every
+/// sum and carry output then needs at most one LUT, with no dedicated
+/// carry entry/exit cells or placement constraints. `k` is the target LUT
+/// input count, not an arithmetic width threshold.
+pub fn lower_lut_sized_carries(net: &mut LogicNet, k: usize) -> usize {
+    let mut subst = FxHashMap::default();
+    let mut kept = Vec::new();
+    let mut lowered = 0;
+    for ch in std::mem::take(&mut net.carries) {
+        let mut support = Vec::new();
+        for &s in ch.a.iter().chain(&ch.b).chain(std::iter::once(&ch.cin)) {
+            let l = net.aig.outputs[s];
+            if !l.is_const() && !support.contains(&l.node()) {
+                support.push(l.node());
+                if support.len() > k {
+                    break;
+                }
+            }
+        }
+        if support.len() > k {
+            kept.push(ch);
+            continue;
+        }
+        let g = &mut net.aig;
+        let mut c = g.outputs[ch.cin];
+        for i in 0..ch.a.len() {
+            let (a, b) = (g.outputs[ch.a[i]], g.outputs[ch.b[i]]);
+            if let Some(&s) = ch.sum.get(i) {
+                let x = g.xor(a, b);
+                let sum = g.xor(x, c);
+                subst.insert(s, sum);
+            }
+            c = g.maj(a, b, c);
+        }
+        if let Some(s) = ch.cout {
+            subst.insert(s, c);
+        }
+        lowered += 1;
+    }
+    net.carries = kept;
+    if !subst.is_empty() {
+        net.aig = substitute_inputs(&net.aig, &subst);
+    }
+    lowered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +237,120 @@ mod tests {
         assert_eq!(g.outputs[os], Lit::TRUE);
         let and = g.outputs[ot];
         assert_eq!(g.fanins(and.node()), Some((x[0], x[2])));
+    }
+
+    #[test]
+    fn lut_sized_carries_preserve_sums_cout_and_polarities() {
+        use crate::aig::lit_val;
+        // Two independent four-bit operands stay on carry hardware. A
+        // constant, repeated, or complemented operand fits in one LUT's
+        // boundary support. Check every assignment and both carry-ins.
+        for mode in 0..4 {
+            for cin in [false, true] {
+                let mut net = LogicNet::default();
+                let g = &mut net.aig;
+                let x: Vec<_> = (0..8).map(|_| g.input()).collect();
+                let s: Vec<_> = (0..5).map(|_| g.input()).collect();
+                let a = x[..4].iter().map(|&l| g.output(l)).collect();
+                let b = (0..4)
+                    .map(|i| {
+                        g.output(match mode {
+                            0 => x[4 + i],
+                            1 => Lit::FALSE.xor(5 >> i & 1 != 0),
+                            2 => x[i],
+                            _ => !x[i],
+                        })
+                    })
+                    .collect();
+                let ci = g.output(Lit::FALSE.xor(cin));
+                let sources: Vec<_> = s
+                    .iter()
+                    .map(|l| match g.nodes[l.node() as usize] {
+                        Node::Input(s) => s,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                net.carries.push(Carry {
+                    a,
+                    b,
+                    cin: ci,
+                    sum: sources[..4].to_vec(),
+                    cout: Some(sources[4]),
+                });
+                let outputs: Vec<_> = s.iter().map(|&l| g.output(l)).collect();
+                let changed = lower_lut_sized_carries(&mut net, 4);
+                assert_eq!(changed, usize::from(mode != 0));
+                if changed == 0 {
+                    continue;
+                }
+                assert!(net.carries.is_empty());
+                for a in 0..16u64 {
+                    let mut inputs = vec![0; net.aig.inputs.len()];
+                    for (i, v) in inputs[..4].iter_mut().enumerate() {
+                        *v = (a >> i) & 1;
+                    }
+                    let values = net.aig.simulate(&inputs);
+                    let got = outputs.iter().enumerate().fold(0, |v, (i, &o)| {
+                        v | ((lit_val(&values, net.aig.outputs[o]) & 1) << i)
+                    });
+                    let b = match mode {
+                        1 => 5,
+                        2 => a,
+                        _ => a ^ 15,
+                    };
+                    assert_eq!(got, a + b + u64::from(cin));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lut_sized_carry_in_and_carry_only_outputs() {
+        use crate::aig::lit_val;
+        for width in 2..=4 {
+            for want_sum in [false, true] {
+                let mut net = LogicNet::default();
+                let g = &mut net.aig;
+                let x: Vec<_> = (0..=width).map(|_| g.input()).collect();
+                let result: Vec<_> = (0..=width).map(|_| g.input()).collect();
+                let a = x[..width].iter().map(|&l| g.output(l)).collect();
+                let b = (0..width).map(|i| g.output(Lit::FALSE.xor(5 >> i & 1 != 0))).collect();
+                let cin = g.output(x[width]);
+                let sources: Vec<_> = result
+                    .iter()
+                    .map(|l| match g.nodes[l.node() as usize] {
+                        Node::Input(s) => s,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                net.carries.push(Carry {
+                    a,
+                    b,
+                    cin,
+                    sum: if want_sum { sources[..width].to_vec() } else { Vec::new() },
+                    cout: Some(sources[width]),
+                });
+                let visible = if want_sum { &result[..] } else { &result[width..] };
+                let outputs: Vec<_> = visible.iter().map(|&l| g.output(l)).collect();
+                let lowered = lower_lut_sized_carries(&mut net, 4);
+                assert_eq!(lowered, usize::from(width < 4));
+                if lowered == 0 {
+                    continue;
+                }
+                for input in 0..1u64 << (width + 1) {
+                    let mut values = vec![0; net.aig.inputs.len()];
+                    for (i, v) in values[..=width].iter_mut().enumerate() {
+                        *v = input >> i & 1;
+                    }
+                    let values = net.aig.simulate(&values);
+                    let got = outputs.iter().enumerate().fold(0, |v, (i, &o)| {
+                        v | ((lit_val(&values, net.aig.outputs[o]) & 1) << i)
+                    });
+                    let mask = (1 << width) - 1;
+                    let expected = (input & mask) + (5 & mask) + (input >> width);
+                    assert_eq!(got, if want_sum { expected } else { expected >> width });
+                }
+            }
+        }
     }
 }
