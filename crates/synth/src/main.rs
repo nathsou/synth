@@ -27,9 +27,10 @@ BUILD OPTIONS:
     synth build <files.v...> --device <hx1k|hx8k|...> --package <pkg>
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--timing-weight <0..1>] [--freq <MHz>]
+              [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
-              for the other clocks.
+              for the other clocks. Missing a target fails the build (the
+              bitstream is still written) unless --timing-allow-fail.
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -39,7 +40,7 @@ ELAB OPTIONS:
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--freq <MHz>]
+              [--freq <MHz>] [--timing-allow-fail]
 ";
 
 fn main() -> ExitCode {
@@ -164,7 +165,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--freq",
         ],
-        &[],
+        &["--timing-allow-fail"],
     )?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
@@ -190,16 +191,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         clocks,
     };
     let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
-    for l in &res.log {
-        eprintln!("info: {l}");
-    }
-    if let Some(out) = a.value("-o") {
-        write(&out, &res.config.to_bin())?;
-    }
-    if let Some(out) = a.value("--asc") {
-        write(&out, arch_ice40::asc::write_asc(&res.config).as_bytes())?;
-    }
-    Ok(())
+    finish_flow(&res, &mut a)
 }
 
 fn cmd_pnr(argv: &[String]) -> Result<(), String> {
@@ -216,7 +208,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--freq",
         ],
-        &[],
+        &["--timing-allow-fail"],
     )?;
     let input = a.positional(0, "netlist")?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
@@ -245,6 +237,12 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         clocks,
     };
     let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
+    finish_flow(&res, &mut a)
+}
+
+/// Prints the flow's log and writes the bitstream. Missing a clock target
+/// is an error (after writing) unless `--timing-allow-fail` is given.
+fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), String> {
     for l in &res.log {
         eprintln!("info: {l}");
     }
@@ -253,6 +251,9 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
     }
     if let Some(out) = a.value("--asc") {
         write(&out, arch_ice40::asc::write_asc(&res.config).as_bytes())?;
+    }
+    if !res.timing_met && !a.flag("--timing-allow-fail") {
+        return Err("timing targets not met (--timing-allow-fail accepts this)".into());
     }
     Ok(())
 }

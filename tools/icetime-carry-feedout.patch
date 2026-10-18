@@ -1,0 +1,38 @@
+icetime: time paths from a carry chain into the I3 input of a logic cell
+that has no carry logic of its own (a carry "feed-out", built by both
+nextpnr and synth). Stock icetime only gives a carry net its driver when the
+receiving cell has CarryEnable set, so such paths start at 0 ns there.
+With ICETIME_FEEDOUT set in the environment, the carry net (and, at the
+bottom of a tile, the carry-in mux from the tile below) gets its driver.
+
+Apply in an icestorm checkout: patch -p1 < icetime-carry-feedout.patch
+--- a/icetime/icetime.cc	2026-10-18 09:05:56.372778332 +0000
++++ b/icetime/icetime.cc	2026-10-18 09:05:56.375650813 +0000
+@@ -1324,6 +1324,27 @@
+ 
+ 		std::tuple<int, int, std::string> key(x, y, stringf("lutff_%d/cout", z-1));
+ 	}
++	else if (getenv("ICETIME_FEEDOUT"))
++	{
++		// No carry logic here, but in3 may still read the carry: give the
++		// incoming carry net its driver.
++		if (z == 0) {
++			std::tuple<int, int, std::string> mk(x, y, "carry_in_mux");
++			std::tuple<int, int, std::string> ck(x, y-1, "lutff_7/cout");
++			if (1 < y && get_config_bit(x, y, 1, 49) && x_y_name_net.count(mk) && x_y_name_net.count(ck)) {
++				std::string tn = tname();
++				netlist_cell_types[tn] = "ICE_CARRY_IN_MUX";
++				netlist_cell_params[tn]["C_INIT"] = "2'b10";
++				netlist_cell_ports[tn]["carryinitin"] = net_name(x_y_name_net.at(ck));
++				netlist_cell_ports[tn]["carryinitout"] = net_name(x_y_name_net.at(mk));
++				netlist_cell_ports[make_lc40(x, y-1, 7)]["carryout"] = net_name(x_y_name_net.at(ck));
++			}
++		} else {
++			std::tuple<int, int, std::string> ck(x, y, stringf("lutff_%d/cout", z-1));
++			if (x_y_name_net.count(ck))
++				netlist_cell_ports[make_lc40(x, y, z-1)]["carryout"] = net_name(x_y_name_net.at(ck));
++		}
++	}
+ 
+ 	return cell;
+ }

@@ -67,33 +67,31 @@ impl Arcs<'_> {
     }
 }
 
-/// Routed delay from each net's source to each of its nodes. A span wire's
-/// driver is as slow as the distance to the farthest point where this net
-/// leaves the wire (as icetime computes it).
+/// Routed delay from each net's source to each of its nodes. Leaving a span
+/// wire costs the delay of the span mux sized by the distance from where the
+/// net enters the wire to where it leaves (as icetime computes it, per tap).
 fn net_node_delays(arch: &Arch, routing: &Routing, net: NetId) -> FxHashMap<u32, f64> {
     let g = &arch.graph;
     let edges: &[u32] = routing.net_edges.get(&net).map_or(&[], |v| v.as_slice());
     let src_of = |e: u32| (g.offsets.partition_point(|&o| o as usize <= e as usize) - 1) as u32;
-    // Where the net leaves each node.
-    let mut exits: FxHashMap<u32, Vec<(usize, usize)>> = FxHashMap::default();
+    // Span wires of the net: kind and where the net enters them.
+    let mut entry: FxHashMap<u32, (u8, (usize, usize))> = FxHashMap::default();
     for &e in edges {
-        exits.entry(src_of(e)).or_default().push(arch.pip_xy(g.edge_pip[e as usize]));
+        let kind = g.edge_span[e as usize];
+        if kind != 0 {
+            entry.insert(g.edge_dst[e as usize], (kind, arch.pip_xy(g.edge_pip[e as usize])));
+        }
     }
     let edge_delay = |e: u32| -> f64 {
-        let kind = g.edge_span[e as usize];
-        if kind == 0 {
-            return g.edge_delay[e as usize] as f64;
+        let mut d =
+            if g.edge_span[e as usize] == 0 { g.edge_delay[e as usize] as f64 } else { 0.0 };
+        if let Some(&(kind, (x, y))) = entry.get(&src_of(e)) {
+            let (ex, ey) = arch.pip_xy(g.edge_pip[e as usize]);
+            let horizontal = kind == crate::arch::SPAN4_H || kind == crate::arch::SPAN12_H;
+            let far = if horizontal { ex.abs_diff(x) } else { ey.abs_diff(y) };
+            d += arch.span_delay(kind, far) as f64;
         }
-        let (x, y) = arch.pip_xy(g.edge_pip[e as usize]);
-        let horizontal = kind == crate::arch::SPAN4_H || kind == crate::arch::SPAN12_H;
-        let far = exits
-            .get(&g.edge_dst[e as usize])
-            .into_iter()
-            .flatten()
-            .map(|&(ex, ey)| if horizontal { ex.abs_diff(x) } else { ey.abs_diff(y) })
-            .max()
-            .unwrap_or(0);
-        arch.span_delay(kind, far) as f64
+        d
     };
     let mut delay: FxHashMap<u32, f64> = FxHashMap::default();
     if let Some(src) = routing.net_source.get(&net) {
@@ -115,7 +113,7 @@ pub fn analyse(
     routing: &Routing,
     clocks: &ClockConstraints,
 ) -> TimingReport {
-    let graph = TimingGraph::new(arch, nl, clocks);
+    let graph = TimingGraph::with_lut_pins(arch, nl, clocks, &routing.lut_pins);
     let pin_name = |c: CellId, i: usize| nl.str(nl.cells[c].pins[i].name).to_string();
     // Routed delay of every connection.
     let mut delays = vec![0.0; graph.conns.len()];
@@ -147,13 +145,23 @@ pub fn analyse(
             path: path
                 .iter()
                 .map(|&(c, i, t)| {
-                    format!("{}.{} @{:.2}", nl.str(nl.cells[c].name), pin_name(c, i), t / 1000.0)
+                    // The routing node too, to compare with icetime's
+                    // `net_<id>` (chipdb net ids are node ids).
+                    let pin = pin_name(c, i);
+                    let node = sink_node(arch, nl, placement, c, &pin)
+                        .map(|n| format!(" ({} net_{})", arch.node_name(n), n.raw()))
+                        .unwrap_or_default();
+                    format!("{}.{pin} @{:.2}{node}", nl.str(nl.cells[c].name), t / 1000.0)
                 })
                 .collect(),
         });
     }
     report
 }
+
+/// Global clock distribution jitter added to every launch, as icetime does
+/// (`GLOBAL_CLK_DIST_JITTER`).
+const CLOCK_JITTER_PS: f64 = 100.0;
 
 /// Setup time (ps) of a register input pin, if the pin is a timing endpoint.
 fn setup_time(arcs: &Arcs, kind: &str, pin: &str) -> Option<f64> {
@@ -281,9 +289,11 @@ pub struct Analysis {
     /// Worst delay of the paths captured by each clock (ps).
     pub period: Vec<f64>,
     /// Criticality (0..1) of each connection, its slack relative to the
-    /// target of the clock its most critical path ends at.
+    /// target of the clock its most critical path ends at (the clock's
+    /// period if it misses the target).
     pub criticality: Vec<f64>,
-    /// Least slack of each connection (ps; infinite off timed paths).
+    /// Least slack of each connection against the same targets (ps;
+    /// infinite off timed paths).
     pub slack: Vec<f64>,
     /// Critical path into each clock: cell, pin and arrival (ps).
     pub paths: Vec<Option<Vec<(CellId, usize, f64)>>>,
@@ -291,6 +301,18 @@ pub struct Analysis {
 
 impl TimingGraph {
     pub fn new(arch: &Arch, nl: &Netlist, constraints: &ClockConstraints) -> Self {
+        Self::with_lut_pins(arch, nl, constraints, &FxHashMap::default())
+    }
+
+    /// Like [`TimingGraph::new`], with the physical LUT input each logical
+    /// input of a routed logic cell arrives on (see `Routing::lut_pins`):
+    /// the LUT delay depends on the physical input.
+    pub fn with_lut_pins(
+        arch: &Arch,
+        nl: &Netlist,
+        constraints: &ClockConstraints,
+        lut_pins: &FxHashMap<CellId, [u8; 4]>,
+    ) -> Self {
         let arcs = Arcs { arch, cache: Default::default() };
         let mut base = vec![u32::MAX; nl.cells.len()];
         let mut node_pin = Vec::new();
@@ -358,9 +380,16 @@ impl TimingGraph {
                             if let Some(o) = o {
                                 starts.push((node(c, o), lc_arc("clk", "lcout") as f64, k));
                             }
-                            for p in ["I0", "I1", "I2", "I3", "CEN", "SR"] {
+                            let perm = lut_pins.get(&c).copied().unwrap_or([0, 1, 2, 3]);
+                            for (j, p) in
+                                ["I0", "I1", "I2", "I3", "CEN", "SR"].into_iter().enumerate()
+                            {
+                                let phys = match j {
+                                    0..4 => ["I0", "I1", "I2", "I3"][perm[j] as usize],
+                                    _ => p,
+                                };
                                 if let Some(i) = pin_of(c, p)
-                                    && let Some(s) = setup_time(&arcs, LC, p)
+                                    && let Some(s) = setup_time(&arcs, LC, phys)
                                 {
                                     ends.push((node(c, i), s, k));
                                 }
@@ -370,8 +399,10 @@ impl TimingGraph {
                             }
                         }
                     } else {
-                        for (p, a) in [("I0", "in0"), ("I1", "in1"), ("I2", "in2"), ("I3", "in3")] {
-                            arc(pin_of(c, p), o, lc_arc(a, "lcout"));
+                        const INS: [&str; 4] = ["in0", "in1", "in2", "in3"];
+                        let perm = lut_pins.get(&c).copied().unwrap_or([0, 1, 2, 3]);
+                        for (k, p) in ["I0", "I1", "I2", "I3"].into_iter().enumerate() {
+                            arc(pin_of(c, p), o, lc_arc(INS[perm[k] as usize], "lcout"));
                         }
                         if i3_is_cin {
                             arc(cin, o, lc_arc("in3", "lcout"));
@@ -495,7 +526,7 @@ impl TimingGraph {
         };
         let mut arr = vec![f64::NEG_INFINITY; n];
         for &(s, d, _) in &self.starts {
-            arr[s as usize] = d;
+            arr[s as usize] = d + CLOCK_JITTER_PS;
         }
         for &v in &self.order {
             let v = v as usize;
@@ -520,8 +551,14 @@ impl TimingGraph {
             }
         }
         let overall = out.period.iter().copied().fold(1.0, f64::max);
-        let target: Vec<f64> =
-            self.clocks.iter().map(|c| c.target_ps.unwrap_or(overall).max(1.0)).collect();
+        // A missed target judges paths by the clock's achieved period
+        // instead: against the target every path would be equally critical.
+        let target: Vec<f64> = self
+            .clocks
+            .iter()
+            .zip(&out.period)
+            .map(|(c, &p)| c.target_ps.map_or(overall, |t| t.max(p)).max(1.0))
+            .collect();
         // Required times, and the target each node's paths are judged by.
         let mut req = vec![f64::INFINITY; n];
         let mut scale = vec![overall; n];
@@ -625,7 +662,8 @@ mod tests {
         let a = g.analyse(&delays);
         let setup = setup_time(&arcs, LC, "I1").unwrap();
         // The path into ff1 is the longest (into ff0 there is no logic).
-        let want = lc("clk", "lcout") + 300.0 + lc("in0", "lcout") + 500.0 + setup;
+        let want =
+            CLOCK_JITTER_PS + lc("clk", "lcout") + 300.0 + lc("in0", "lcout") + 500.0 + setup;
         assert!((a.period[0] - want).abs() < 1e-6, "{} vs {want}", a.period[0]);
         let into_ff1 = g.conns.iter().position(|c| nl.str(nl.cells[c.sink].name) == "ff1").unwrap();
         assert!(a.slack[into_ff1].abs() < 1e-6);
@@ -635,5 +673,10 @@ mod tests {
         let a = TimingGraph::new(&arch, &nl, &loose).analyse(&delays);
         assert!((a.slack[into_ff1] - 1000.0).abs() < 1e-6);
         assert!(a.criticality[into_ff1] < 1.0);
+        // A target that cannot be met judges paths as no target does.
+        let tight = ClockConstraints { default_mhz: Some(1e6 / (want / 2.0)), nets: Vec::new() };
+        let a_tight = TimingGraph::new(&arch, &nl, &tight).analyse(&delays);
+        let a_none = g.analyse(&delays);
+        assert_eq!(a_tight.criticality, a_none.criticality);
     }
 }

@@ -7,17 +7,26 @@
 # bitstream as icetime computes it (the same timing model for both), and run
 # time of `synth build` and of Yosys + nextpnr-ice40.
 #
-# Both flows get the same device, package, pin constraints and sources.
-# Place and route runs once per seed in SEEDS (default "1 2 3"); the table
-# gives Fmax as min/median/max over the seeds and median times. A failed
-# step shows as FAIL rather than as numbers. Peak memory (MB) is the
-# largest of the runs.
+# Both flows get the same device, package, pin constraints, sources and
+# clock target: FREQ MHz (default 200, above what any design reaches, so
+# both optimise for speed), passed as --freq with --timing-allow-fail to
+# each. Place and route runs once per seed in SEEDS (default "1 2 3"); the
+# table gives Fmax as min/median/max over the seeds and median times. A
+# failed step (no bitstream) shows as FAIL rather than as numbers; "met k"
+# counts the bitstreams whose icetime Fmax meets FREQ. Peak memory (MB) is
+# the largest of the runs. The output starts with the tool versions and
+# ends with a hash of each design's sources, checked against the frozen
+# benchmark in tools/qor-sources.txt (a changed design is marked).
 #
-# Needs yosys, nextpnr-ice40 and icetime on PATH; ICETIME_CHIPDB names
-# icetime's chip database directory if it doesn't find its own.
+# Needs yosys, nextpnr-ice40 and icetime on PATH (ICETIME selects another
+# icetime binary); ICETIME_CHIPDB names icetime's chip database directory if
+# it doesn't find its own. Stock icetime misses paths that leave a carry
+# chain into the I3 input of a logic cell without carry logic (both flows
+# build such cells): tools/icetime-carry-feedout.patch adds them, enabled
+# by ICETIME_FEEDOUT=1.
 # DESIGNS="a b" selects designs; FLOW=synth stops after synthesis, FLOW=pnr
-# skips the synthesis table;
-# QOR_LOG=dir keeps every tool's output there.
+# skips the synthesis table, FLOW=sources only hashes the sources;
+# QOR_LOG=dir keeps every tool's output there, icetime's reports included.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 synth=${SYNTH:-$root/target/release/synth}
@@ -59,13 +68,16 @@ summarise() {
     }'
 }
 
-# Fmax of a bitstream by icetime.
+# Fmax of a bitstream by icetime; its report goes next to the bitstream.
 fmax() {
   local dev=$1 pkg=$2 asc=$3 db=()
   [ -n "${ICETIME_CHIPDB:-}" ] && db=(-C "$ICETIME_CHIPDB/chipdb-${dev#hx}.txt")
-  icetime -d "$dev" -P "$pkg" "${db[@]}" -t "$asc" 2>/dev/null |
-    sed -n 's/.*Total path delay: .* (\(.*\) MHz).*/\1/p' | tail -1
+  "${ICETIME:-icetime}" -d "$dev" -P "$pkg" "${db[@]}" -t "$asc" >"$asc.icetime" 2>&1 || true
+  sed -n 's/.*Total path delay: .* (\(.*\) MHz).*/\1/p' "$asc.icetime" | tail -1
 }
+freq=${FREQ:-200}
+# How many of the numbers on stdin reach FREQ.
+met() { awk -v f="$freq" '$1 >= f { n++ } END { print n + 0 }'; }
 
 # "min/median/max" of numbers on stdin ("-" if none).
 spread() {
@@ -105,6 +117,32 @@ done <"$eu/designs.txt"
 
 selected() { [ -z "${DESIGNS:-}" ] || [[ " $DESIGNS " == *" $1 "* ]]; }
 
+# Prints a hash of each design's sources (its files, headers in its include
+# directories, memory images and pin constraints), marking those that differ
+# from the frozen benchmark.
+sources() {
+  echo
+  echo "Sources (* differs from tools/qor-sources.txt):"
+  for n in "${names[@]}"; do
+    selected "$n" || continue
+    load "$n"
+    local h want
+    h=$(cd "$dir" && {
+      cat "${files[@]}"
+      for i in "${incs[@]}"; do cat "${i#-I}"/*.vh 2>/dev/null || true; done
+      cat ./*.hex 2>/dev/null || true
+      [ ! -f "$pcf" ] || cat "$pcf"
+    } | sha256sum | cut -c1-12)
+    want=$(awk -v n="$n" '$1 == n { print $2 }' "$root/tools/qor-sources.txt" 2>/dev/null || true)
+    printf "%-14s %s%s\n" "$n" "$h" "$([ "$h" = "$want" ] || echo ' *')"
+  done
+}
+
+echo "synth $(git -C "$root" describe --always --dirty 2>/dev/null || echo '?'); $(yosys -V 2>&1 | head -1);" \
+  "$(nextpnr-ice40 --version 2>&1 | head -1); icetime $(command -v "${ICETIME:-icetime}")" \
+  "${ICETIME_FEEDOUT:+(carry feed-outs timed)}; FREQ $freq MHz"
+echo
+
 # Parses a design's spec into the variables used below.
 load() {
   eval "set -- ${spec[$1]}"
@@ -120,6 +158,7 @@ load() {
   yread="read_verilog -defer ${incs[*]} $ydefs ${files[*]}; $ycmds hierarchy -top $top;"
 }
 
+[ "${FLOW:-}" = sources ] && { sources; exit 0; }
 if [ "${FLOW:-}" != pnr ]; then
 printf "Synthesis: iCE40 cells, time (s) and peak memory (MB)\n"
 printf "%-14s %6s %6s %5s %4s %6s %5s   %6s %6s %5s %4s %6s %5s\n" "" LUT4 CARRY FF RAM time mem LUT4 CARRY FF RAM time mem
@@ -148,10 +187,11 @@ done
 
 fi
 
-[ "${FLOW:-}" = synth ] && exit 0
+[ "${FLOW:-}" = synth ] && { sources; exit 0; }
 seeds=(${SEEDS:-1 2 3})
-printf "\nPlace and route (%d seeds): logic cells, Fmax min/median/max (MHz, icetime),\n" "${#seeds[@]}"
-printf "median time (s) and peak memory (MB); FAIL counts failed runs\n"
+printf "\nPlace and route (%d seeds, target %s MHz): logic cells, Fmax min/median/max\n" "${#seeds[@]}" "$freq"
+printf "(MHz, icetime), median time (s) and peak memory (MB); FAIL counts runs without\n"
+printf "a bitstream, met the bitstreams meeting the target\n"
 printf "%-14s %6s %17s %6s %5s   %6s %17s %6s %6s %5s\n" "" cells Fmax time mem cells Fmax yosys nextpnr mem
 printf "%-14s %-38s   %s\n" "design" "synth" "yosys + nextpnr"
 for n in "${names[@]}"; do
@@ -173,7 +213,8 @@ for n in "${names[@]}"; do
     b=$logs/$n.s$seed
     rm -f "$b.asc" "$b.nasc"
     (cd "$dir" && measure "$b.build.m" "$synth" build "${args[@]}" --top "$top" --device "$dev" \
-      --package "$pkg" "${pcfargs[@]}" --seed "$seed" -o "$b.bin" --asc "$b.asc" >"$b.build.log" 2>&1)
+      --package "$pkg" "${pcfargs[@]}" --seed "$seed" --freq "$freq" --timing-allow-fail \
+      -o "$b.bin" --asc "$b.asc" >"$b.build.log" 2>&1)
     ot+=("$(field "$b.build.m" 2)")
     omem=$(( $(field "$b.build.m" 3) > omem ? $(field "$b.build.m" 3) : omem ))
     if [ "$(field "$b.build.m" 1)" = 0 ] && [ -f "$b.asc" ]; then
@@ -184,7 +225,7 @@ for n in "${names[@]}"; do
     fi
     if [ "$(field "$logs/$n.yflow.m" 1)" = 0 ]; then
       (cd "$dir" && measure "$b.nextpnr.m" nextpnr-ice40 "--$dev" --package "$pkg" "${npcf[@]}" --seed "$seed" \
-        --json "$logs/$n.json" --asc "$b.nasc" >"$b.nextpnr.log" 2>&1)
+        --freq "$freq" --timing-allow-fail --json "$logs/$n.json" --asc "$b.nasc" >"$b.nextpnr.log" 2>&1)
       nt+=("$(field "$b.nextpnr.m" 2)")
       nmem=$(( $(field "$b.nextpnr.m" 3) > nmem ? $(field "$b.nextpnr.m" 3) : nmem ))
       if [ "$(field "$b.nextpnr.m" 1)" = 0 ] && [ -f "$b.nasc" ]; then
@@ -201,7 +242,13 @@ for n in "${names[@]}"; do
   nfmax=$(printf "%s\n" "${nfm[@]}" | { grep . || true; } | spread)
   [ "$ofail" -gt 0 ] && ofmax="$ofmax FAIL$ofail"
   [ "$nfail" -gt 0 ] && nfmax="$nfmax FAIL$nfail"
+  omet=$(printf "%s\n" "${ofm[@]}" | { grep . || true; } | met)
+  nmet=$(printf "%s\n" "${nfm[@]}" | { grep . || true; } | met)
+  [ "$omet" -gt 0 ] && ofmax="$ofmax met$omet"
+  [ "$nmet" -gt 0 ] && nfmax="$nfmax met$nmet"
   printf "%-14s %6s %17s %6s %5s   %6s %17s %6s %6s %5s\n" "$n" "${ocells:--}" "$ofmax" \
     "$(printf "%s\n" "${ot[@]}" | median)" "$omem" "${ncells:--}" "$nfmax" \
     "$(field "$logs/$n.yflow.m" 2)" "$(printf "%s\n" "${nt[@]}" | median)" "$nmem"
 done
+
+sources

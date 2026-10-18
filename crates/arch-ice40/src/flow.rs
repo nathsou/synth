@@ -26,6 +26,8 @@ pub struct FlowOptions {
 pub struct FlowResult {
     pub config: Config,
     pub log: Vec<String>,
+    /// Whether every clock with a target meets it.
+    pub timing_met: bool,
 }
 
 /// Packs, places and routes a netlist of iCE40 primitives. On failure the
@@ -37,7 +39,7 @@ pub fn implement(
 ) -> Result<FlowResult, String> {
     let mut log = Vec::new();
     match run(nl, pins, opts, &mut log) {
-        Ok(config) => Ok(FlowResult { config, log }),
+        Ok((config, timing_met)) => Ok(FlowResult { config, log, timing_met }),
         Err(e) => {
             let mut msg: String = log.iter().map(|l| format!("info: {l}\n")).collect();
             msg.push_str(&e);
@@ -51,7 +53,7 @@ fn run(
     pins: &PinConstraints,
     opts: &FlowOptions,
     log: &mut Vec<String>,
-) -> Result<Config, String> {
+) -> Result<(Config, bool), String> {
     let t0 = Instant::now();
     let arch = Arch::new(opts.part, &opts.package)?;
     log.push(format!(
@@ -127,6 +129,7 @@ fn run(
 
     let t = Instant::now();
     let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &opts.clocks);
+    let met = timing.clocks.iter().all(|c| c.target_mhz.is_none_or(|t| c.fmax_mhz >= t));
     for c in &timing.clocks {
         let target = match c.target_mhz {
             Some(t) if c.fmax_mhz >= t => format!(" (target {t:.1} MHz met)"),
@@ -145,5 +148,5 @@ fn run(
 
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
-    Ok(config)
+    Ok((config, met))
 }
