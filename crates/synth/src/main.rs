@@ -28,13 +28,18 @@ BUILD OPTIONS:
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
-              [--route-timing-rounds <n>]
+              [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
               --route-timing-rounds: reroute critical connections that many
               times once routing is legal, keeping the best timed routing
               (slower; helps congested designs slightly).
+              --incremental: reuse compatible placement/routes and update
+              the checkpoint after a run that meets timing. Missing, corrupt
+              or incompatible checkpoints start fresh. Synthesis still runs.
+              Without a path, select .synth/checkpoints/<design-key>.chk.
+              Put bare --incremental after input files or before another option.
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -45,6 +50,7 @@ PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--freq <MHz>] [--timing-allow-fail] [--route-timing-rounds <n>]
+              [--incremental [<checkpoint>]]
 ";
 
 fn main() -> ExitCode {
@@ -152,7 +158,7 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_build(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(
+    let mut a = Args::parse_optional(
         argv,
         &[
             "-I",
@@ -169,8 +175,10 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--freq",
             "--route-timing-rounds",
+            "--incremental",
         ],
         &["--timing-allow-fail"],
+        &["--incremental"],
     )?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
@@ -200,12 +208,12 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             .transpose()?
             .unwrap_or(0),
     };
-    let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
+    let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)
 }
 
 fn cmd_pnr(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(
+    let mut a = Args::parse_optional(
         argv,
         &[
             "--device",
@@ -218,8 +226,10 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--freq",
             "--route-timing-rounds",
+            "--incremental",
         ],
         &["--timing-allow-fail"],
+        &["--incremental"],
     )?;
     let input = a.positional(0, "netlist")?;
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
@@ -252,12 +262,91 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             .transpose()?
             .unwrap_or(0),
     };
-    let res = arch_ice40::flow::implement(nl, &pcf.pins, &opts)?;
+    let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)
 }
 
-/// Prints the flow's log and writes the bitstream. Missing a clock target
-/// is an error (after writing) unless `--timing-allow-fail` is given.
+/// Selects an optional implementation checkpoint and runs PnR.
+fn implement(
+    nl: synth_netlist::Netlist,
+    pins: &arch_ice40::place::PinConstraints,
+    opts: &arch_ice40::flow::FlowOptions,
+    a: &mut Args,
+) -> Result<arch_ice40::flow::FlowResult, String> {
+    let Some(path) = checkpoint_path(a, opts)? else {
+        return arch_ice40::flow::implement(nl, pins, opts);
+    };
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => match arch_ice40::checkpoint::Checkpoint::decode(&bytes) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("info: ignoring checkpoint {path}: {e}; using fresh PnR");
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{path}: {e}")),
+    };
+    arch_ice40::flow::implement_incremental(nl, pins, opts, previous.as_ref())
+}
+
+fn checkpoint_path(
+    a: &mut Args,
+    opts: &arch_ice40::flow::FlowOptions,
+) -> Result<Option<String>, String> {
+    use std::hash::Hasher;
+    let Some(path) = a.value("--incremental") else { return Ok(None) };
+    if !path.is_empty() {
+        return Ok(Some(path));
+    }
+    let mut key = synth_core::FxHasher::default();
+    let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    // Identity, not content: edits must find the previous implementation.
+    // Includes/defines/parameters are ordered because their order can matter.
+    for i in 0.. {
+        let Ok(p) = a.positional(i, "input") else { break };
+        key.write(format!("input {:?}\n", canonical(&p)).as_bytes());
+    }
+    for name in ["--top", "-I", "-D", "-P", "--pcf"] {
+        let values: Vec<_> =
+            a.values(name)
+                .into_iter()
+                .map(|v| {
+                    if matches!(name, "-I" | "--pcf") { format!("{:?}", canonical(&v)) } else { v }
+                })
+                .collect();
+        key.write(format!("{name} {values:?}\n").as_bytes());
+    }
+    key.write(format!("{opts:?}").as_bytes());
+    let dir = ".synth/checkpoints";
+    std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+    let path = format!("{dir}/{}-{}-{:016x}.chk", opts.part, opts.package, key.finish());
+    a.set_value("--incremental", path.clone());
+    eprintln!("info: incremental checkpoint: {path}");
+    Ok(Some(path))
+}
+
+// Write beside the destination and rename only after all bytes are complete.
+// A failed build/write leaves the previous checkpoint available for reuse.
+fn write_checkpoint(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let temporary = format!("{path}.{}.tmp", std::process::id());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|e| format!("{temporary}: {e}"))?;
+    let result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = result.and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("{path}: {e}"))
+}
+
+/// Writes outputs. A missed target is an error unless explicitly allowed,
+/// and never replaces the previous checkpoint.
 fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), String> {
     for l in &res.log {
         eprintln!("info: {l}");
@@ -267,6 +356,12 @@ fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), S
     }
     if let Some(out) = a.value("--asc") {
         write(&out, arch_ice40::asc::write_asc(&res.config).as_bytes())?;
+    }
+    if res.timing_met
+        && let Some(checkpoint) = &res.checkpoint
+        && let Some(path) = a.value("--incremental")
+    {
+        write_checkpoint(&path, &checkpoint.encode())?;
     }
     if !res.timing_met && !a.flag("--timing-allow-fail") {
         return Err("timing targets not met (--timing-allow-fail accepts this)".into());

@@ -15,6 +15,17 @@ impl Args {
     /// `with_value` lists options that take a value; `flags` lists boolean
     /// options. Anything else starting with `-` is an error.
     pub fn parse(argv: &[String], with_value: &[&str], flags: &[&str]) -> Result<Args, String> {
+        Self::parse_optional(argv, with_value, flags, &[])
+    }
+
+    /// Like `parse`, but named options may omit their value before another
+    /// option or at the end. An omitted value is represented by an empty string.
+    pub fn parse_optional(
+        argv: &[String],
+        with_value: &[&str],
+        flags: &[&str],
+        optional: &[&str],
+    ) -> Result<Args, String> {
         let mut a = Args::default();
         let mut i = 0;
         while i < argv.len() {
@@ -22,6 +33,13 @@ impl Args {
             if let Some((k, v)) = arg.split_once('=').filter(|(k, _)| with_value.contains(k)) {
                 a.values.entry(k.to_string()).or_default().push(v.to_string());
             } else if with_value.contains(&arg.as_str()) {
+                if optional.contains(&arg.as_str())
+                    && argv.get(i + 1).is_none_or(|v| v.starts_with('-'))
+                {
+                    a.values.entry(arg.clone()).or_default().push(String::new());
+                    i += 1;
+                    continue;
+                }
                 let v = argv.get(i + 1).ok_or_else(|| format!("option {arg} needs a value"))?;
                 a.values.entry(arg.clone()).or_default().push(v.clone());
                 i += 1;
@@ -41,6 +59,10 @@ impl Args {
     pub fn value(&mut self, name: &str) -> Option<String> {
         self.consumed.push(name.to_string());
         self.values.get(name).and_then(|v| v.last().cloned())
+    }
+
+    pub fn set_value(&mut self, name: &str, value: String) {
+        self.values.insert(name.to_string(), vec![value]);
     }
 
     /// All values of a repeatable option.

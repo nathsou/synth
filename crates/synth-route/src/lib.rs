@@ -235,7 +235,20 @@ pub fn route_with(
     graph: Graph<'_>,
     nets: &[NetRequest],
     opts: &RouteOptions,
+    hooks: RouteHooks<'_>,
+) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
+    route_with_initial(graph, nets, opts, hooks, &[])
+}
+
+/// Starts from candidate trees, indexed like `nets`. Invalid, incomplete,
+/// blocked or overlapping trees are discarded. Accepted trees occupy wires
+/// immediately, but may be ripped up by congestion or timing optimization.
+pub fn route_with_initial(
+    graph: Graph<'_>,
+    nets: &[NetRequest],
+    opts: &RouteOptions,
     mut hooks: RouteHooks<'_>,
+    initial: &[NetRoute],
 ) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
     let mut crit: Vec<Vec<f32>> = nets.iter().map(|n| n.criticality.clone()).collect();
     let n = graph.num_nodes();
@@ -295,11 +308,44 @@ pub fn route_with(
     let mut margin = vec![opts.bbox_margin; nets.len()];
     let mut timing_rounds = 0;
     let mut legal: Option<(Vec<NetRoute>, RouteStats, f64)> = None;
-    let mut to_route: Vec<usize> = (0..nets.len()).collect();
-    // Route nets with many sinks first: they are hardest to fit later.
-    to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
     // Exclusive or of the nets using each node: with one user, that net.
     let mut users = vec![0u32; n];
+    let mut seen = if initial.is_empty() { Vec::new() } else { vec![usize::MAX; n] };
+    let mut to_route = Vec::new();
+    for (i, net) in nets.iter().enumerate() {
+        let accepted = initial.get(i).is_some_and(|r| {
+            seen[net.source as usize] = i;
+            for &e in &r.edges {
+                let e = e as usize;
+                if e >= graph.edge_dst.len() {
+                    return false;
+                }
+                let (s, d) = (st.edge_src[e] as usize, graph.edge_dst[e] as usize);
+                if seen[s] != i
+                    || seen[d] == i
+                    || st.occupancy[d] != 0
+                    || (reserved[d] != u32::MAX && reserved[d] != i as u32)
+                {
+                    return false;
+                }
+                seen[d] = i;
+            }
+            net.sinks.iter().all(|&s| seen[s as usize] == i)
+        });
+        if accepted {
+            routes[i] = initial[i].clone();
+            stats.reused_nets += 1;
+            for &e in &routes[i].edges {
+                let d = graph.edge_dst[e as usize] as usize;
+                st.occupancy[d] += 1;
+                users[d] ^= i as u32;
+            }
+        } else {
+            to_route.push(i);
+        }
+    }
+    // Route nets with many sinks first: they are hardest to fit later.
+    to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
     // Last iteration each net was (or is to be) routed in.
     let mut routed = vec![usize::MAX; nets.len()];
     for iter in 0..opts.max_iterations {
@@ -449,6 +495,8 @@ pub fn route_with(
 /// Statistics of a routing run.
 #[derive(Debug, Clone, Default)]
 pub struct RouteStats {
+    /// Candidate trees accepted before routing (they may later be rerouted).
+    pub reused_nets: usize,
     pub iterations: usize,
     pub overused_history: Vec<usize>,
     pub wire_nodes: usize,
@@ -733,6 +781,75 @@ mod tests {
     }
 
     #[test]
+    fn incremental_trees_are_checked_and_repaired() {
+        let (o, d, dl, x, y, c) = grid(4, 4);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let nets = vec![NetRequest { source: 0, sinks: vec![3, 15], criticality: vec![] }];
+        let opts = RouteOptions::default();
+        let (old, _) = route(g, &nets, &opts).unwrap();
+        let mut routed = Vec::new();
+        let mut progress = |_: usize, count, _: &[usize]| routed.push(count);
+        let hooks = RouteHooks { progress: Some(&mut progress), ..Default::default() };
+        let (same, stats) = route_with_initial(g, &nets, &opts, hooks, &old).unwrap();
+        assert_eq!(stats.reused_nets, 1);
+        assert_eq!(same[0].edges, old[0].edges);
+        assert_eq!(routed, vec![0]);
+
+        let bad = [
+            vec![u32::MAX],
+            old[0].edges[..1].to_vec(),
+            old[0].edges.iter().copied().chain([old[0].edges[0]]).collect(),
+        ];
+        for edges in bad {
+            let (repaired, stats) =
+                route_with_initial(g, &nets, &opts, RouteHooks::default(), &[NetRoute { edges }])
+                    .unwrap();
+            assert_eq!(stats.reused_nets, 0);
+            assert_eq!(repaired[0].edges, old[0].edges);
+        }
+        let blocked = [old[0].edges[0]];
+        let hooks = RouteHooks { blocked_edges: &blocked, ..Default::default() };
+        let (repaired, stats) = route_with_initial(g, &nets, &opts, hooks, &old).unwrap();
+        assert_eq!(stats.reused_nets, 0);
+        assert!(!repaired[0].edges.contains(&blocked[0]));
+    }
+
+    #[test]
+    fn incremental_routes_respect_new_endpoint_reservations() {
+        let (o, d, dl, x, y, c) = grid(5, 5);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let mut nets = vec![NetRequest { source: 0, sinks: vec![4], criticality: vec![] }];
+        let opts = RouteOptions::default();
+        let (old, _) = route(g, &nets, &opts).unwrap();
+        let source = d[old[0].edges[0] as usize];
+        nets.push(NetRequest { source, sinks: vec![6], criticality: vec![] });
+        let (repaired, stats) =
+            route_with_initial(g, &nets, &opts, RouteHooks::default(), &old).unwrap();
+        assert_eq!(stats.reused_nets, 0);
+        assert!(!repaired[0].edges.iter().any(|&e| d[e as usize] == source));
+        let mut occupied = std::collections::HashSet::new();
+        for r in repaired {
+            for e in r.edges {
+                assert!(occupied.insert(d[e as usize]));
+            }
+        }
+    }
+
+    #[test]
     fn best_timed_legal_routing_is_kept() {
         let (o, d, dl, x, y, c) = grid(4, 4);
         let g = Graph {
@@ -814,6 +931,16 @@ mod tests {
         let (routes, _) = route(g, &nets, &opts).unwrap();
         let uses = |i: usize, node: u32| routes[i].edges.iter().any(|&e| d[e as usize] == node);
         assert!(uses(3, r1) && uses(2, s3));
+        // D and V were already routed before A and B were added. Import
+        // their occupancy, then let the new nets displace both old trees.
+        let (old, _) = route(g, &nets[2..], &opts).unwrap();
+        let mut initial = vec![NetRoute::default(); 2];
+        initial.extend(old);
+        let (repaired, stats) =
+            route_with_initial(g, &nets, &opts, RouteHooks::default(), &initial).unwrap();
+        assert_eq!(stats.reused_nets, 2);
+        assert!(repaired[3].edges.iter().any(|&e| d[e as usize] == r1));
+        assert!(repaired[2].edges.iter().any(|&e| d[e as usize] == s3));
     }
 
     #[test]

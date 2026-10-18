@@ -6,6 +6,7 @@ use synth_netlist::Netlist;
 
 use crate::arch::{Arch, Part};
 use crate::bitstream::Config;
+use crate::checkpoint::Checkpoint;
 use crate::place::{PinConstraints, PlaceOptions};
 
 /// Options for [`implement`].
@@ -31,6 +32,8 @@ pub struct FlowResult {
     pub log: Vec<String>,
     /// Whether every clock with a target meets it.
     pub timing_met: bool,
+    /// Present when the caller requested an incremental checkpoint.
+    pub checkpoint: Option<Checkpoint>,
 }
 
 /// Packs, places and routes a netlist of iCE40 primitives. On failure the
@@ -40,9 +43,32 @@ pub fn implement(
     pins: &PinConstraints,
     opts: &FlowOptions,
 ) -> Result<FlowResult, String> {
+    implement_with_checkpoint(nl, pins, opts, None, false)
+}
+
+/// Implements the current netlist, using a previous checkpoint as a hint,
+/// and returns a new checkpoint. Synthesis and packing are never skipped.
+pub fn implement_incremental(
+    nl: Netlist,
+    pins: &PinConstraints,
+    opts: &FlowOptions,
+    previous: Option<&Checkpoint>,
+) -> Result<FlowResult, String> {
+    implement_with_checkpoint(nl, pins, opts, previous, true)
+}
+
+fn implement_with_checkpoint(
+    nl: Netlist,
+    pins: &PinConstraints,
+    opts: &FlowOptions,
+    previous: Option<&Checkpoint>,
+    save: bool,
+) -> Result<FlowResult, String> {
     let mut log = Vec::new();
-    match run(nl, pins, opts, &mut log) {
-        Ok((config, timing_met)) => Ok(FlowResult { config, log, timing_met }),
+    match run(nl, pins, opts, &mut log, previous, save) {
+        Ok((config, timing_met, checkpoint)) => {
+            Ok(FlowResult { config, log, timing_met, checkpoint })
+        }
         Err(e) => {
             let mut msg: String = log.iter().map(|l| format!("info: {l}\n")).collect();
             msg.push_str(&e);
@@ -56,9 +82,22 @@ fn run(
     pins: &PinConstraints,
     opts: &FlowOptions,
     log: &mut Vec<String>,
-) -> Result<(Config, bool), String> {
+    previous: Option<&Checkpoint>,
+    save: bool,
+) -> Result<(Config, bool, Option<Checkpoint>), String> {
     let t0 = Instant::now();
     let arch = Arch::new(opts.part, &opts.package)?;
+    let previous = previous.filter(|c| {
+        if c.compatible(&arch, opts) {
+            true
+        } else {
+            log.push(
+                "incremental checkpoint incompatible with device/options; using fresh PnR".into(),
+            );
+            false
+        }
+    });
+    let fresh_input = previous.map(|_| nl.clone());
     log.push(format!(
         "device {} {} loaded in {:.2}s",
         opts.part,
@@ -91,7 +130,50 @@ fn run(
         (0.0, 28, 2.0 * opts.place_effort),
     ];
     let mut result = None;
+    let mut incremental = false;
+    if let Some(previous) = previous {
+        let t = Instant::now();
+        let mut placement = fixed.clone();
+        let popts = PlaceOptions {
+            seed: opts.seed,
+            effort: opts.place_effort,
+            timing_weight: opts.timing_weight,
+            max_locals: 32,
+            clocks: opts.clocks.clone(),
+        };
+        let attempt = crate::place::place_incremental(
+            &arch,
+            &nl,
+            &packed,
+            &mut placement,
+            &popts,
+            &previous.placement(&nl),
+            log,
+        )
+        .and_then(|()| {
+            crate::route::route_incremental(
+                &arch,
+                &nl,
+                &placement,
+                &opts.clocks,
+                opts.route_timing_rounds,
+                log,
+                Some(previous),
+            )
+        });
+        match attempt {
+            Ok(routing) => {
+                log.push(format!("incremental PnR in {:.2}s", t.elapsed().as_secs_f64()));
+                result = Some((placement, routing));
+                incremental = true;
+            }
+            Err(e) => log.push(format!("incremental repair failed: {e}; using fresh PnR")),
+        }
+    }
     for (attempt, &(w, max_locals, effort)) in attempts.iter().enumerate() {
+        if result.is_some() {
+            break;
+        }
         let t = Instant::now();
         let popts = PlaceOptions {
             seed: opts.seed.wrapping_add(attempt as u64),
@@ -132,6 +214,12 @@ fn run(
         }
     }
     let (placement, routing) = result.expect("the last attempt returns or errors");
+    // Capture logical pin endpoints before applying the physical permutation.
+    let checkpoint = if save {
+        Some(Checkpoint::capture(&arch, &nl, &placement, &routing, opts)?)
+    } else {
+        None
+    };
     if !routing.lut_pins.is_empty() {
         log.push(format!("{} LUTs with permuted inputs", routing.lut_pins.len()));
     }
@@ -156,7 +244,12 @@ fn run(
     }
     log.push(format!("timing analysed in {:.2}s", t.elapsed().as_secs_f64()));
 
+    if incremental && !met {
+        log.push("incremental result misses timing targets; using fresh PnR".into());
+        return run(fresh_input.unwrap(), pins, opts, log, None, save);
+    }
+
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
-    Ok((config, met))
+    Ok((config, met, checkpoint))
 }

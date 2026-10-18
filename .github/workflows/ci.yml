@@ -59,6 +59,8 @@ jobs:
         run: cargo build --release -p synth
       - name: Bitstream-level simulation
         run: tools/ci_bitsim.sh
+      - name: Incremental bitstream simulation
+        run: tools/ci_incremental.sh
 
   rtlsim:
     name: frontend differential simulation

@@ -76,6 +76,15 @@ enum Unit {
     Ram(CellId),
 }
 
+impl Unit {
+    fn cells(&self) -> &[CellId] {
+        match self {
+            Self::Lc(c) | Self::Ram(c) => std::slice::from_ref(c),
+            Self::Chain(cells) => cells,
+        }
+    }
+}
+
 /// Pin constraints: top-level port name → package pin.
 pub type PinConstraints = OrderedMap<String, String>;
 
@@ -711,6 +720,141 @@ impl<'a> Annealer<'a> {
         Ok(())
     }
 
+    /// Atomically occupy a legal site for a complete placement unit. Reused
+    /// chains must retain their order, column and slot-zero anchor.
+    fn seed_unit(&mut self, unit: &Unit, bels: &[BelId]) -> bool {
+        if bels.len() != unit.cells().len()
+            || bels.is_empty()
+            || bels.iter().any(|b| b.index() >= self.arch.bels.len())
+        {
+            return false;
+        }
+        if let Unit::Ram(c) = unit {
+            let Some(slot) = self.ram_bels.iter().position(|b| *b == bels[0]) else { return false };
+            if self.ram_occ[slot].is_some() {
+                return false;
+            }
+            let b = self.arch.bel(bels[0]);
+            self.ram_occ[slot] = Some(*c);
+            self.cell_ram_slot.insert(*c, slot);
+            self.pos.insert(*c, (b.x as i16, b.y as i16, b.z));
+            return true;
+        }
+        let first = self.arch.bel(bels[0]);
+        let mut slots = Vec::new();
+        let mut tiles = Vec::new();
+        for (i, &bel) in bels.iter().enumerate() {
+            let b = self.arch.bel(bel);
+            if b.kind != BelKind::Lc
+                || (matches!(unit, Unit::Chain(_))
+                    && (b.x != first.x
+                        || b.y as usize != first.y as usize + i / 8
+                        || b.z as usize != i % 8))
+            {
+                return false;
+            }
+            let slot = self.slot(b.x as usize, b.y as usize, b.z as usize);
+            if self.lc_occ[slot].is_some() || slots.contains(&slot) {
+                return false;
+            }
+            slots.push(slot);
+            tiles.push((b.x as usize, b.y as usize));
+        }
+        for (&slot, &c) in slots.iter().zip(unit.cells()) {
+            self.lc_occ[slot] = Some(c);
+        }
+        if !tiles.iter().all(|&(x, y)| self.tile_ok(x, y)) {
+            for slot in slots {
+                self.lc_occ[slot] = None;
+            }
+            return false;
+        }
+        for (&c, &bel) in unit.cells().iter().zip(bels) {
+            let b = self.arch.bel(bel);
+            self.pos.insert(c, (b.x as i16, b.y as i16, b.z));
+        }
+        true
+    }
+
+    fn repair_placement(&mut self, previous: &Placement) -> Result<usize, String> {
+        let units = self.units.clone();
+        let mut reused = 0;
+        for unit in &units {
+            let bels: Option<Vec<_>> =
+                unit.cells().iter().map(|c| previous.cell_bel.get(c).copied()).collect();
+            if let Some(bels) = bels
+                && self.seed_unit(unit, &bels)
+            {
+                reused += unit.cells().len();
+            }
+        }
+        for unit in &units {
+            if unit.cells().iter().all(|c| self.pos.contains_key(c)) {
+                continue;
+            }
+            // Prefer sites near already placed neighbors; retain unchanged
+            // units during this cheap repair attempt. The flow retries fresh
+            // placement if the remaining sites cannot accommodate the edit.
+            let mut neighbors = Vec::new();
+            for c in unit.cells() {
+                for &n in self.cell_nets.get(c).into_iter().flatten() {
+                    for other in &self.nets[n as usize] {
+                        if self.pos.contains_key(other) || self.fixed.contains_key(other) {
+                            neighbors.push(self.cell_xy(*other));
+                        }
+                    }
+                }
+            }
+            let center = if neighbors.is_empty() {
+                (self.width as i16 / 2, self.height as i16 / 2)
+            } else {
+                (
+                    (neighbors.iter().map(|p| p.0 as i64).sum::<i64>() / neighbors.len() as i64)
+                        as i16,
+                    (neighbors.iter().map(|p| p.1 as i64).sum::<i64>() / neighbors.len() as i64)
+                        as i16,
+                )
+            };
+            let kind = if matches!(unit, Unit::Ram(_)) { BelKind::Ram } else { BelKind::Lc };
+            let mut candidates: Vec<_> = self.arch.bels_of(kind).collect();
+            candidates.sort_by_key(|&id| {
+                let b = self.arch.bel(id);
+                ((b.x as i16 - center.0).abs() + (b.y as i16 - center.1).abs(), id)
+            });
+            let mut placed = false;
+            for bel in candidates {
+                let b = self.arch.bel(bel);
+                let bels = if matches!(unit, Unit::Chain(_)) {
+                    if b.z != 0 {
+                        continue;
+                    }
+                    (0..unit.cells().len())
+                        .map(|i| {
+                            let y = b.y as usize + i / 8;
+                            if y > self.height {
+                                None
+                            } else {
+                                self.arch.bel_at(b.x, y as u8, (i % 8) as u8, kind)
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    Some(vec![bel])
+                };
+                if let Some(bels) = bels
+                    && self.seed_unit(unit, &bels)
+                {
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                return Err("incremental placement has no legal site for an edited unit".into());
+            }
+        }
+        Ok(reused)
+    }
+
     fn total_cost(&self) -> f64 {
         self.net_cost.iter().sum()
     }
@@ -1159,5 +1303,24 @@ pub fn place_with_fixed(
     sa.initial_placement()?;
     sa.anneal(log);
     sa.finish(placement);
+    Ok(())
+}
+
+/// Retains legal complete units and places edited units in remaining sites.
+/// Does not anneal retained cells; failure asks the caller for a fresh run.
+pub(crate) fn place_incremental(
+    arch: &Arch,
+    nl: &Netlist,
+    packed: &Packed,
+    placement: &mut Placement,
+    opts: &PlaceOptions,
+    previous: &Placement,
+    log: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut sa = Annealer::new(arch, nl, packed, opts)?;
+    sa.set_fixed(placement);
+    let reused = sa.repair_placement(previous)?;
+    sa.finish(placement);
+    log.push(format!("incremental placement: reused {reused}/{} logic/RAM cells", sa.pos.len()));
     Ok(())
 }
