@@ -1,0 +1,12 @@
+[package]
+name = "synth-core"
+description = "Foundational data structures shared by every synth crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

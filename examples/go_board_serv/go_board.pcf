@@ -1,0 +1,7 @@
+# Nandland Go Board (iCE40 HX1K VQ100)
+set_io clk 15
+set_io led[0] 56
+set_io led[1] 57
+set_io led[2] 59
+set_io led[3] 60
+set_io tx 74

@@ -1,0 +1,4 @@
+/target
+.synth/
+*.swp
+.DS_Store

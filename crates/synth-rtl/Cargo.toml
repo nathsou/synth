@@ -1,0 +1,15 @@
+[package]
+name = "synth-rtl"
+description = "Word-level RTL intermediate representation and its passes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+
+[lints]
+workspace = true

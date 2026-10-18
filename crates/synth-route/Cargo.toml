@@ -1,0 +1,15 @@
+[package]
+name = "synth-route"
+description = "Negotiated-congestion (PathFinder) router over a device routing graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          rustup default 1.88
+      - name: Check
+        run: cargo check --workspace --all-targets
+
+  bitsim:
+    name: bitstream simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install reference tools (test oracles only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends yosys fpga-icestorm iverilog
+      - name: Build
+        run: cargo build --release -p synth
+      - name: Bitstream-level simulation
+        run: tools/ci_bitsim.sh
+      - name: Incremental bitstream simulation
+        run: tools/ci_incremental.sh
+
+  rtlsim:
+    name: frontend differential simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install iverilog and Yosys cell models (test oracles only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog yosys
+      - name: Build
+        run: cargo build --release -p synth
+      - name: Elaborated netlists vs source RTL
+        run: tools/ci_rtlsim.sh
+      - name: Synthesised netlists vs RTL
+        run: MODE=synth tools/ci_rtlsim.sh
+
+  euler:
+    name: Project Euler solvers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install iverilog and Yosys cell models (test oracles only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog yosys
+      - name: Build
+        run: cargo build --release -p synth
+      - name: RTL and synthesised netlists give the answers
+        run: tools/ci_euler.sh

@@ -1,0 +1,17 @@
+# Frozen benchmark sources: tools/qor.sh FLOW=sources hashes (design, hash).
+picosoc 57713857debf
+serv 2f4a7be04bb2
+darkriscv 3ac3454e6872
+hazard3_core 59c6d8d37f06
+cu_hazard3 a1a83f1d8da4
+go_serv a56230704411
+euler10 022287b1045f
+euler14 2d6c360bfdb0
+euler25 df7bd4ba0447
+euler31 e52acaf95261
+euler43 250ae5ec5e83
+euler48 4c94af1137b5
+euler57 fd2d793b73a6
+euler58 75ce94d51084
+euler92 5f5a74ec097b
+euler97 2bc9982212bb
