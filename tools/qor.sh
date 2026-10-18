@@ -89,7 +89,7 @@ design() {
 design picosoc "$d/picosoc" top hx8k cb132 alchitry_cu.pcf "" "" -- soc.v picorv32.v
 design serv "$s/sw" servant hx8k cb132 - "" 'chparam -set memfile "hello_uart.hex" servant;' -- \
   "${sfiles[@]}" -P 'memfile="hello_uart.hex"'
-design darkriscv "$k" darksocv hx8k cb132 - "" "" -- "$k"/*.v -I "$k" -D __ICARUS__
+design darkriscv "$k" darksocv hx8k cb132 none "" "" -- "$k"/*.v -I "$k" -D __ICARUS__
 design hazard3_core "$h" hazard3_cpu_1port hx8k cb132 none "" "" -- "${hfiles[@]}" -I "$h"
 design cu_hazard3 "$e/alchitry_cu_hazard3" top hx8k cb132 alchitry_cu.pcf "" "" -- \
   top.v "${hfiles[@]}" -I "$h"
@@ -197,8 +197,8 @@ for n in "${names[@]}"; do
       nfail=$((nfail + 1))
     fi
   done
-  ofmax=$(printf "%s\n" "${ofm[@]}" | grep . | spread)
-  nfmax=$(printf "%s\n" "${nfm[@]}" | grep . | spread)
+  ofmax=$(printf "%s\n" "${ofm[@]}" | { grep . || true; } | spread)
+  nfmax=$(printf "%s\n" "${nfm[@]}" | { grep . || true; } | spread)
   [ "$ofail" -gt 0 ] && ofmax="$ofmax FAIL$ofail"
   [ "$nfail" -gt 0 ] && nfmax="$nfmax FAIL$nfail"
   printf "%-14s %6s %17s %6s %5s   %6s %17s %6s %6s %5s\n" "$n" "${ocells:--}" "$ofmax" \
