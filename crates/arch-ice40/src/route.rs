@@ -264,6 +264,18 @@ pub fn route(
     timing_rounds: usize,
     log: &mut Vec<String>,
 ) -> Result<Routing, String> {
+    route_incremental(arch, nl, placement, clocks, timing_rounds, log, None)
+}
+
+pub(crate) fn route_incremental(
+    arch: &Arch,
+    nl: &Netlist,
+    placement: &Placement,
+    clocks: &crate::timing::ClockConstraints,
+    timing_rounds: usize,
+    log: &mut Vec<String>,
+    checkpoint: Option<&crate::checkpoint::Checkpoint>,
+) -> Result<Routing, String> {
     let g = &arch.graph;
     let costs: Vec<f32> = g.node_class.iter().map(|&c| node_cost(c)).collect();
     let graph = Graph {
@@ -437,8 +449,20 @@ pub fn route(
         progress: Some(&mut progress),
         retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
     };
+    let previous = checkpoint.map(|c| c.routes()).unwrap_or_default();
+    let initial: Vec<_> = requests
+        .iter()
+        .filter(|_| checkpoint.is_some())
+        .map(|r| {
+            let mut sinks = r.sinks.clone();
+            sinks.sort_unstable();
+            synth_route::NetRoute {
+                edges: previous.get(&(r.source, sinks)).cloned().unwrap_or_default(),
+            }
+        })
+        .collect();
     let (routes, stats): (_, RouteStats) =
-        synth_route::route_with(graph, &requests, &opts, hooks).map_err(|e| match e {
+        synth_route::route_with_initial(graph, &requests, &opts, hooks, &initial).map_err(|e| match e {
             synth_route::RouteError::Unroutable { net, sink } => format!(
                 "net {} cannot reach {}",
                 nl.str(nl.nets[ids[net]].name),
@@ -470,6 +494,13 @@ pub fn route(
                 )
             }
         })?;
+    if checkpoint.is_some() {
+        log.push(format!(
+            "incremental routing: reused {}/{} net trees before repair",
+            stats.reused_nets,
+            requests.len()
+        ));
+    }
     log.push(format!(
         "routing: {} nets, {} wires used, {} iterations",
         requests.len(),

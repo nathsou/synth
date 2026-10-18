@@ -21,6 +21,50 @@ target/release/synth build design.v --top top \
   --device hx8k --package cb132 --pcf pins.pcf -o design.bin
 ```
 
+## Incremental builds
+
+Add `--incremental` to reuse the previous placement and routing after edits:
+
+```sh
+target/release/synth build design.v --top top \
+  --device hx8k --package cb132 --pcf pins.pcf -o design.bin --incremental
+```
+
+The checkpoint is selected automatically under `.synth/checkpoints/` in the
+working directory. Its key includes source **paths** (not contents), top module,
+defines, parameters, include paths, PCF path, target and implementation settings.
+Changing the output filename does not change the selected checkpoint. Different
+designs/settings get separate checkpoints. Put bare `--incremental` after the
+input files or before another option; `--incremental path.chk` (or
+`--incremental=path.chk`) selects an explicit checkpoint. `synth pnr` supports
+the same option.
+
+The first run creates a checkpoint; subsequent runs still elaborate, synthesize
+and pack the current design. Matching packed cells are placed at their previous
+locations where legal, with carry chains handled as complete units. Edited units
+are placed near their neighbors. Route trees with identical physical endpoints
+are validated and reused; the router repairs affected nets and may displace
+retained routes to resolve congestion. LUT pin permutations are recovered from
+the final routes, and current LUT/RAM contents are always written to the bitstream.
+
+Full timing analysis runs every time. A failed repair or missed clock target
+triggers fresh PnR; corrupt/incompatible checkpoints also start fresh. Successful
+runs atomically replace the checkpoint. Runs that miss timing do not replace it,
+even with `--timing-allow-fail`. Specify a clock target to enforce timing; without
+one, incremental builds do not promise the same Fmax as a fresh optimization.
+
+This is incremental **PnR**, not incremental synthesis or partial FPGA
+reconfiguration. Matching uses cell names, primitive parameters and pin schemas;
+large synthesis changes or renaming can reduce reuse. Placement repair retains
+legal existing units rather than annealing them, falling back to a full run when
+necessary. Omit `--incremental` for a fresh optimization. Identical input and
+checkpoint produce reproducible results, but results can depend on edit history.
+
+`tools/ci_incremental.sh` verifies decoded bitstreams against edited RTL for RAM
+contents, added/removed logic, carry-chain and pin changes (requires the CI reference
+tools). `cargo test --workspace` also checks checkpoint corruption, allocation-ID
+changes, routing invalidation, automatic selection and repeated saves.
+
 ## Status
 
 **iCE40 works end to end.** Verilog-2005 elaboration, logic synthesis (AIG
