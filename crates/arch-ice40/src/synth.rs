@@ -21,6 +21,9 @@ use crate::cells::port_dir;
 #[derive(Clone, Debug)]
 pub struct SynthOptions {
     pub lower: LowerOptions,
+    /// Compare the normal carry policy with a higher threshold, keeping a
+    /// candidate only if it is shallower without using more packed cells.
+    pub explore_carry: bool,
     pub map: MapOptions,
     /// Rounds of restructuring and remapping the mapped LUTs.
     pub remap_rounds: usize,
@@ -32,6 +35,7 @@ impl Default for SynthOptions {
     fn default() -> Self {
         SynthOptions {
             lower: LowerOptions::default(),
+            explore_carry: true,
             map: MapOptions { lut_delay: LEVEL, ..MapOptions::default() },
             remap_rounds: 6,
             bram_min_bits: 256,
@@ -40,7 +44,50 @@ impl Default for SynthOptions {
 }
 
 /// Synthesises `m` into a netlist of iCE40 primitives.
-pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<String>), String> {
+pub fn synthesize(m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<String>), String> {
+    let (m, mut log) = prepare(m, opts)?;
+    let (base, base_log, depth, short_carries) = synthesize_fixed(&m, opts)?;
+    if !short_carries || !opts.explore_carry || opts.lower.carry_min_width != Some(3) {
+        log.extend(base_log);
+        return Ok((base, log));
+    }
+    let t = Instant::now();
+    let mut alternate_opts = opts.clone();
+    alternate_opts.lower.carry_min_width = Some(8);
+    let (candidate, candidate_log, candidate_depth, _) = match synthesize_fixed(&m, &alternate_opts)
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log.extend(base_log);
+            log.push(format!("carry exploration skipped: {error}"));
+            return Ok((base, log));
+        }
+    };
+    // A slightly smaller netlist with the same predicted delay is not
+    // enough evidence: packing changes can lengthen critical routes. A
+    // shallower candidate must also dominate the baseline's packed area.
+    let accepted = candidate_depth < depth
+        && packed_logic_cells(&candidate)
+            .zip(packed_logic_cells(&base))
+            .is_some_and(|(candidate_cells, base_cells)| candidate_cells <= base_cells);
+    log.extend(if accepted { candidate_log } else { base_log });
+    log.push(format!(
+        "carry exploration in {:.2}s: threshold 3 depth {:.2}, threshold 8 depth {:.2}; kept threshold {}",
+        t.elapsed().as_secs_f64(), depth as f64 / LEVEL as f64,
+        candidate_depth as f64 / LEVEL as f64, if accepted { 8 } else { 3 }
+    ));
+    Ok((if accepted { candidate } else { base }, log))
+}
+
+fn packed_logic_cells(nl: &Netlist) -> Option<usize> {
+    let mut packed = nl.clone();
+    crate::pack::pack(&mut packed).ok()?;
+    Some(packed.live_cells().filter(|&c| packed.cell_kind(c) == "ICESTORM_LC").count())
+}
+
+// RTL simplification and memory mapping do not depend on the carry policy.
+// Share that work and the prepared module between candidates.
+fn prepare(mut m: Module, opts: &SynthOptions) -> Result<(Module, Vec<String>), String> {
     let mut log = Vec::new();
     let t = Instant::now();
     opt::clean(&mut m)?;
@@ -100,7 +147,19 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let _ = n;
     opt::clean(&mut m)?;
 
-    let mut net = synth_logic::lower::lower(&m, &opts.lower)?;
+    log.push(format!("RTL prepared in {:.2}s", t.elapsed().as_secs_f64()));
+    Ok((m, log))
+}
+
+fn synthesize_fixed(
+    m: &Module,
+    opts: &SynthOptions,
+) -> Result<(Netlist, Vec<String>, u32, bool), String> {
+    let mut log = Vec::new();
+    let t = Instant::now();
+    let mut net = synth_logic::lower::lower(m, &opts.lower)?;
+    let short_carries =
+        net.carries.iter().any(|c| c.a.len() < if c.sum.is_empty() { 10 } else { 8 });
     synth_logic::ff::legalize(
         &mut net,
         &FfRules { init_one: false, srst_with_arst: false, srst_over_en: false },
@@ -268,6 +327,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         best.mapping.luts.len(),
         best.mapping.depth as f64 / LEVEL as f64
     ));
+    let depth = best.mapping.depth;
     let mapping = best.mapping;
     // The mapping refers to the nodes of the graph with choices.
     net.aig = best.graph;
@@ -297,7 +357,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         log.push(format!("deepest sinks: {deep:?}"));
     }
     let nl = emit(&net, &mapping)?;
-    Ok((nl, log))
+    Ok((nl, log, depth, short_carries))
 }
 
 /// A mapping, the graph it maps and the LUTs of its netlist.

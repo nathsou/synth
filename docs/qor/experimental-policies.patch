@@ -1,0 +1,133 @@
+diff --git a/crates/synth-logic/src/lower.rs b/crates/synth-logic/src/lower.rs
+--- a/crates/synth-logic/src/lower.rs
++++ b/crates/synth-logic/src/lower.rs
+@@ -623,7 +623,28 @@
+             s.extend(hs);
+             return (s, c);
+         }
+-        if self.opts.carry_min_width.is_some_and(|m| w >= m) {
++        let mut minimum = std::env::var("QOR_ADD_MIN").ok().map(|v| v.parse().unwrap()).or(self.opts.carry_min_width);
++        let konst = |xs: &[Lit]| xs.iter().all(|x| x.is_const());
++        if let Ok(policy) = std::env::var("QOR_ADDER_POLICY") {
++            let constant = konst(a) || konst(b);
++            let unit = |xs: &[Lit]| {
++                if !konst(xs) || !cin.is_const() || w == 0 || w >= 63 { return false; }
++                let value = xs.iter().enumerate().fold(0u64, |n, (i, &x)| n | (u64::from(x == Lit::TRUE) << i));
++                let mask = (1u64 << w) - 1;
++                let value = (value + u64::from(cin == Lit::TRUE)) & mask;
++                value == 1 || value == mask
++            };
++            minimum = Some(match policy.as_str() {
++                "const8" => if constant { 8 } else { 3 },
++                "var8" => if constant { 3 } else { 8 },
++                "keepinc8" => if unit(a) || unit(b) { 3 } else { 8 },
++                _ => panic!("unknown arithmetic policy"),
++            });
++        }
++        if std::env::var_os("QOR_TRACE_ADDS").is_some() {
++            eprintln!("adder-trace width={} const_a={} const_b={} cin_const={} carry={}", w, konst(a), konst(b), cin.is_const(), minimum.is_some_and(|m| w >= m));
++        }
++        if minimum.is_some_and(|m| w >= m) {
+             return self.carry_chain(a, b, cin, true);
+         }
+         let g = &mut self.net.aig;
+@@ -639,7 +660,8 @@
+ 
+     fn carry_out(&mut self, a: &[Lit], b: &[Lit], cin: Lit) -> Lit {
+         let konst = |v: &[Lit]| v.iter().all(|l| l.is_const());
+-        if self.opts.carry_min_width.is_some_and(|m| a.len() >= m + 2) && !konst(a) && !konst(b) {
++        let minimum = std::env::var("QOR_CMP_MIN").ok().map(|v| v.parse().unwrap()).or(self.opts.carry_min_width.map(|m| m + 2));
++        if minimum.is_some_and(|m| a.len() >= m) && !konst(a) && !konst(b) {
+             return self.carry_chain(a, b, cin, false).1;
+         }
+         let g = &mut self.net.aig;
+diff --git a/crates/arch-ice40/src/place.rs b/crates/arch-ice40/src/place.rs
+--- a/crates/arch-ice40/src/place.rs
++++ b/crates/arch-ice40/src/place.rs
+@@ -512,10 +512,7 @@
+ 
+     /// Recomputes connection criticalities from the current placement and
+     /// renormalises the cost terms.
+-    fn update_timing(&mut self) {
+-        if self.opts.timing_weight <= 0.0 || self.conns.is_empty() {
+-            return;
+-        }
++    fn estimated_period(&self) -> f64 {
+         let nl = self.nl;
+         // Placed connections by distance; carry chains are free, globals a
+         // fixed delay.
+@@ -535,11 +532,38 @@
+                 k => self.conn_delay(k as usize),
+             })
+             .collect();
++        self.timing.analyse(&delay).period.into_iter().fold(0.0, f64::max)
++    }
++
++    fn update_timing(&mut self) {
++        if self.opts.timing_weight <= 0.0 || self.conns.is_empty() {
++            return;
++        }
++        let nl = self.nl;
++        // Placed connections by distance; carry chains are free, globals a
++        // fixed delay.
++        let delay: Vec<f64> = (0..self.timing.conns.len())
++            .map(|t| match self.conn_of_timing[t] {
++                u32::MAX => {
++                    let c = self.timing.conns[t];
++                    let n = nl.cells[c.sink].pins[c.pin].net;
++                    if n.is_some_and(|n| {
++                        nl.nets[n].driver.is_some_and(|d| nl.cell_kind(d.cell) == GB)
++                    }) {
++                        1500.0
++                    } else {
++                        0.0
++                    }
++                }
++                k => self.conn_delay(k as usize),
++            })
++            .collect();
+         let crit = self.timing.analyse(&delay).criticality;
++        let exponent = std::env::var("QOR_CRIT_EXP").ok().map(|v| v.parse().unwrap()).unwrap_or(8);
+         for (t, &k) in self.conn_of_timing.iter().enumerate() {
+             if k != u32::MAX {
+                 let k = k as usize;
+-                self.conn_weight[k] = crit[t].powi(8);
++                self.conn_weight[k] = crit[t].powi(exponent);
+                 self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
+             }
+         }
+@@ -1290,6 +1314,34 @@
+         for _ in 0..moves_per_temp * 2 {
+             self.try_move(1e-9, 3.0, &mut scratch);
+         }
++        if let Ok(rounds) = std::env::var("QOR_POLISH") {
++            let rounds: usize = rounds.parse().unwrap();
++            let before = self.estimated_period();
++            let mut best = before;
++            let mut positions = self.pos.clone();
++            let mut lcs = self.lc_occ.clone();
++            let mut rams = self.ram_occ.clone();
++            let mut ram_slots = self.cell_ram_slot.clone();
++            for _ in 0..rounds {
++                self.update_timing();
++                for _ in 0..moves_per_temp {
++                    self.try_move(1e-9, 3.0, &mut scratch);
++                }
++                let period = self.estimated_period();
++                if period < best {
++                    best = period;
++                    positions = self.pos.clone();
++                    lcs = self.lc_occ.clone();
++                    rams = self.ram_occ.clone();
++                    ram_slots = self.cell_ram_slot.clone();
++                }
++            }
++            self.pos = positions;
++            self.lc_occ = lcs;
++            self.ram_occ = rams;
++            self.cell_ram_slot = ram_slots;
++            log.push(format!("placement polish: estimated worst period {:.0} -> {:.0} ps", before, best));
++        }
+         // Re-sum to avoid accumulated rounding.
+         for i in 0..self.nets.len() {
+             self.net_cost[i] = self.compute_net_cost(i);

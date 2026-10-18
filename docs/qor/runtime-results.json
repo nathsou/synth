@@ -1,0 +1,262 @@
+[
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 6.738744306000626,
+    "cells": 1592,
+    "mhz": 68.48,
+    "asc_sha256": "ac586a15a6cd309c517a76ac3ca4ee8fe9398354d481fce895bd3700b13d027a",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "picosoc",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 6.940913207000449,
+    "cells": 1592,
+    "mhz": 68.48,
+    "asc_sha256": "ac586a15a6cd309c517a76ac3ca4ee8fe9398354d481fce895bd3700b13d027a",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "serv",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 1.6698737579999943,
+    "cells": 548,
+    "mhz": 85.31,
+    "asc_sha256": "6b8e77db06f91ba63a41cecf8e6e53dee00e80fb5b1f8914bb623462c0059a5f",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "serv",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 1.9709942129993578,
+    "cells": 548,
+    "mhz": 85.31,
+    "asc_sha256": "6b8e77db06f91ba63a41cecf8e6e53dee00e80fb5b1f8914bb623462c0059a5f",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "cu_hazard3",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 12.86291422999966,
+    "cells": 2237,
+    "mhz": 41.36,
+    "asc_sha256": "182d4b8825a4f226cabae043ba1ecc7dbc58f87931b5f8064c69138c2b12cf89",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "cu_hazard3",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 15.366669978999198,
+    "cells": 2237,
+    "mhz": 41.36,
+    "asc_sha256": "182d4b8825a4f226cabae043ba1ecc7dbc58f87931b5f8064c69138c2b12cf89",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "go_serv",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 1.4191656809998676,
+    "cells": 581,
+    "mhz": 93.97,
+    "asc_sha256": "d45788f12548094745a609d9740d40d8a1a5e5a3f57678412c560d658619c6e2",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "go_serv",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 1.568940307000048,
+    "cells": 581,
+    "mhz": 93.97,
+    "asc_sha256": "d45788f12548094745a609d9740d40d8a1a5e5a3f57678412c560d658619c6e2",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler14",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 33.3549001399997,
+    "cells": 6161,
+    "mhz": 57.7,
+    "asc_sha256": "a13cb8b12a7eaaa1875f6194de1db595ad0ad26cfa1b3f8b47c205938ea33eb1",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler14",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 34.02765399799955,
+    "cells": 6161,
+    "mhz": 57.7,
+    "asc_sha256": "a13cb8b12a7eaaa1875f6194de1db595ad0ad26cfa1b3f8b47c205938ea33eb1",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler25",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 2.4721545339998556,
+    "cells": 1390,
+    "mhz": 52.4,
+    "asc_sha256": "ac43ec4eed39f263bd7abf39cae81c32091f48c14df7a0c5ba6cf5b8de054a79",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler25",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 5.232854565999332,
+    "cells": 1376,
+    "mhz": 72.37,
+    "asc_sha256": "369d3cf0220c656f5827187d25e7566484afa7868cd485e9021b97c66a1983bf",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 1.870119917000011,
+    "cells": 1011,
+    "mhz": 125.04,
+    "asc_sha256": "3a3536c9da35b70a62f64a3bf29aa31b066fe299052a281b1a998fafe0641aba",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler31",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 2.0718290369995884,
+    "cells": 1011,
+    "mhz": 125.04,
+    "asc_sha256": "3a3536c9da35b70a62f64a3bf29aa31b066fe299052a281b1a998fafe0641aba",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler43",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 38.80553788099951,
+    "cells": 6235,
+    "mhz": 43.85,
+    "asc_sha256": "7aa42ab1c972005b78449163de43c4ad91bfcc92d910363d3e91e49175f72100",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler43",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 45.369602834000034,
+    "cells": 5871,
+    "mhz": 52.94,
+    "asc_sha256": "25477e9af21bd1fd106cf70354a0075df413f82d2d4e0cc18c77177ea2caed83",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 39.99887123999997,
+    "cells": 6704,
+    "mhz": 60.28,
+    "asc_sha256": "d5b04d46b64fb7af277f1ec281a6db18ec58b15101536f685b5102757b6a9af8",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler48",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 46.09198091300004,
+    "cells": 6704,
+    "mhz": 60.28,
+    "asc_sha256": "d5b04d46b64fb7af277f1ec281a6db18ec58b15101536f685b5102757b6a9af8",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler57",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 6.635384535999947,
+    "cells": 2719,
+    "mhz": 56.37,
+    "asc_sha256": "9959d8780c0428dd991ac50b30719ec9a09e10a197874e9d5dc61cf953b906f6",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler57",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 8.39313707600013,
+    "cells": 2719,
+    "mhz": 56.37,
+    "asc_sha256": "9959d8780c0428dd991ac50b30719ec9a09e10a197874e9d5dc61cf953b906f6",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler58",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 55.857433042000594,
+    "cells": 7423,
+    "mhz": 63.0,
+    "asc_sha256": "21c7aa7b74089a4c33353047e30eb5ef10b05e95d69fc15b8d460ebb4c81f1a8",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler58",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 63.88577814400014,
+    "cells": 7423,
+    "mhz": 63.0,
+    "asc_sha256": "21c7aa7b74089a4c33353047e30eb5ef10b05e95d69fc15b8d460ebb4c81f1a8",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler92",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 10.649437719999696,
+    "cells": 3928,
+    "mhz": 79.69,
+    "asc_sha256": "c55f93889aa5a80dfd4b6025d8e08e887b9bf3bcb6860a7b59384d8051d2b8ae",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler92",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 12.460432400000172,
+    "cells": 3836,
+    "mhz": 86.82,
+    "asc_sha256": "19072010d1282af42fc49ca66eae2f62f462fd4706ac50a095734daa9f42a94d",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler97",
+    "seed": 1,
+    "variant": "baseline",
+    "seconds": 3.9271472699992955,
+    "cells": 1509,
+    "mhz": 76.03,
+    "asc_sha256": "b54849c6d4b65e45760c53f0952713fb9f2b103a635dd168bb3b3d287cc43ea5",
+    "matches_prior_bitstream": true
+  },
+  {
+    "design": "euler97",
+    "seed": 1,
+    "variant": "candidate",
+    "seconds": 4.4280822969994915,
+    "cells": 1490,
+    "mhz": 78.55,
+    "asc_sha256": "9a5ea42a2aa14168c1d7dfad2c3a9d85fe86c681e77cee9758c61a91180e1c69",
+    "matches_prior_bitstream": true
+  }
+]

@@ -50,13 +50,20 @@ modules can be used from Weft through `extern module` declarations.
 
 ## Carry mapping
 
-`--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum
-adder width that uses a hard carry chain (default: 3). Variable comparators use
-a threshold two bits higher. For example, `--carry-min-width 8` leaves short
-arithmetic in LUT logic, which can reduce carry feed-in cells and improve timing
-on designs with many small adders. Compare routed timing and packed cell counts
-for your design; a higher threshold is not always better. Automatic incremental
-checkpoints distinguish explicit carry thresholds.
+Synthesis compares minimum hard-carry adder widths of 3 and 8 when short
+carry chains are present. It keeps the higher threshold only when the mapped
+critical path is shallower and the packed logic-cell count does not grow.
+This avoids changing placement for small area savings with no predicted timing
+gain. Only the selected netlist is placed and routed. The comparison adds
+synthesis work; mapped depth is an estimate, so routed timing can still vary.
+
+`--carry-min-width <bits>` on `synth build` or `synth synth` forces a fixed
+policy and disables that comparison. Use `--carry-min-width 3` for the previous
+default or `--carry-min-width 8` to leave more short arithmetic in LUTs.
+Variable comparators use a threshold two bits higher. Automatic incremental
+checkpoints distinguish automatic exploration and each explicit threshold.
+
+See [the QoR study](docs/QOR_EXPERIMENTS.md) for measurements and tradeoffs.
 
 ## Incremental builds
 

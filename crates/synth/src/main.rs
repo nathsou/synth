@@ -34,9 +34,10 @@ BUILD OPTIONS:
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
               [--carry-min-width <bits>]
               [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
-              --carry-min-width: minimum adder width for hard carry chains
-              (default 3); variable comparators use two more bits. Higher
-              thresholds can improve packing/timing for short arithmetic.
+              --carry-min-width: force a minimum adder width for hard carry
+              chains; variable comparators use two more bits. By default,
+              compare thresholds 3 and 8 and keep a shallower candidate only
+              when it uses no more packed logic cells.
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
               for the other clocks. Missing a target fails the build (the
               bitstream is still written) unless --timing-allow-fail.
@@ -119,6 +120,7 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
             .filter(|&w| w > 0 && w.checked_add(2).is_some())
             .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
         synth_opts.lower.carry_min_width = Some(width);
+        synth_opts.explore_carry = false;
     }
     let (nl, log) = arch_ice40::synth::synthesize(m, &synth_opts)?;
     for l in &log {
@@ -332,10 +334,12 @@ fn checkpoint_path(
                 .collect();
         key.write(format!("{name} {values:?}\n").as_bytes());
     }
-    // Preserve existing default keys, but do not reuse them for another
-    // synthesis policy. Explicit checkpoint paths still use normal repair.
+    // Keep fixed policies and automatic exploration in separate checkpoint
+    // namespaces, including checkpoints from the old fixed-width default.
     if let Some(width) = a.value("--carry-min-width") {
         key.write(format!("carry-min-width {width}\n").as_bytes());
+    } else {
+        key.write(b"carry-policy auto-v1\n");
     }
     key.write(format!("{opts:?}").as_bytes());
     let dir = ".synth/checkpoints";

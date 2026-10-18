@@ -1,0 +1,27 @@
+{
+  "synth_commit": "a1f312d9ff67e8147789877dbe06554a4cd85334",
+  "icestorm_commit": "ee340bb2cec60e0d01948076537a9bb3d08aea26",
+  "rust": "1.88.0",
+  "yosys": "0.52 fee39a3",
+  "nextpnr": "0.7-1+b2",
+  "iverilog": "12.0",
+  "reference_notes": [
+    "icetime patched with repository carry-feedout patch and ICETIME_FEEDOUT=1",
+    "nextpnr binary relocated by replacing only its compiled chipdb directory string",
+    "Yosys RTLIL bridge removes $scopeinfo/$print metadata and splits internal vectors for the current synth reader",
+    "matched 200 MHz target; independent full PnR runs, no checkpoints",
+    "screening jobs run concurrently; screening wall times are not a controlled runtime comparison"
+  ],
+  "binaries": {
+    "synth-baseline": "c2718be40739143e7b702e6ebcad1b8e97343635caaeb9e5cf9c76e0d67b8c27",
+    "synth-experiment2": "e3cd0efab7213aeddc7cbd85305071fe0c0fbc5f3741bbd2e735e27aa2858ea2",
+    "synth-experiment1": "9bb7fded39b2a5c008902c008c7090655676af24805d5567e11a088c2962c67b",
+    "synth-experiment": "9bb7fded39b2a5c008902c008c7090655676af24805d5567e11a088c2962c67b",
+    "synth-experiment3": "e3ca660751f514070e3a80fd2927e1f27a136cbb2d1451061898c4c79d499037",
+    "production-cli": "f9b65b1dafacf883c71ef4120d956918ecb6457c08e0a0b378eae16205a47bdd"
+  },
+  "pr_base": "47a49156711437ea23d341d54f18e43352d26238",
+  "final_synth_sha256": "09032111ef7a5cc180c957e72b544ee75f0d05a9e3ff57dc5d2f00a3200c548e",
+  "followup_conditions": 233,
+  "followup_new_runs": 215
+}
