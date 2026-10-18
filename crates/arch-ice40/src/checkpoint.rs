@@ -13,7 +13,7 @@ use crate::place::Placement;
 use crate::route::{Routing, sink_node};
 
 const MAGIC: &[u8; 8] = b"SYNTHinc";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 struct Cell {
@@ -37,6 +37,8 @@ pub struct Checkpoint {
     graph: u64,
     cells: Vec<Cell>,
     nets: Vec<Net>,
+    /// Period (ps) each clock reached, by clock name.
+    periods: Vec<(String, u64)>,
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
@@ -123,8 +125,24 @@ impl Checkpoint {
         placement
     }
 
-    pub(crate) fn routes(&self) -> FxHashMap<(u32, Vec<u32>), Vec<u32>> {
-        self.nets.iter().map(|n| ((n.source, n.sinks.clone()), n.edges.clone())).collect()
+    /// Saved route trees by source node (the router keeps the branches to
+    /// sinks a net still has).
+    /// Records the period each clock reached in the checkpointed run.
+    pub(crate) fn set_periods(&mut self, timing: &crate::timing::TimingReport) {
+        self.periods = timing
+            .clocks
+            .iter()
+            .map(|c| (c.clock.clone(), (c.period_ns * 1000.0).round() as u64))
+            .collect();
+    }
+
+    /// The period (ps) clock `name` reached in the checkpointed run.
+    pub(crate) fn period(&self, name: &str) -> Option<f64> {
+        self.periods.iter().find(|p| p.0 == name).map(|p| p.1 as f64)
+    }
+
+    pub(crate) fn routes(&self) -> FxHashMap<u32, Vec<u32>> {
+        self.nets.iter().map(|n| (n.source, n.edges.clone())).collect()
     }
 
     pub(crate) fn capture(
@@ -160,7 +178,13 @@ impl Checkpoint {
             nets.push(Net { source, sinks, edges: edges.clone() });
         }
         nets.sort_by(|a, b| (a.source, &a.sinks).cmp(&(b.source, &b.sinks)));
-        Ok(Self { context: context(opts), graph: graph_key(arch), cells, nets })
+        Ok(Self {
+            context: context(opts),
+            graph: graph_key(arch),
+            cells,
+            nets,
+            periods: Vec::new(),
+        })
     }
 
     /// Encode deterministically. The checksum detects accidental corruption;
@@ -180,6 +204,10 @@ impl Checkpoint {
             w.uvar(n.source as u64);
             w.seq(&n.sinks, |w, &v| w.uvar(v as u64));
             w.seq(&n.edges, |w, &v| w.uvar(v as u64));
+        });
+        w.seq(&self.periods, |w, (name, ps)| {
+            w.str(name);
+            w.uvar(*ps);
         });
         let mut data = w.into_bytes();
         data.extend_from_slice(&checksum(&data).to_le_bytes());
@@ -214,6 +242,7 @@ impl Checkpoint {
                         edges: r.seq(|r| r.u32())?,
                     })
                 })?,
+                periods: r.seq(|r| Ok((r.string()?, r.uvar()?)))?,
             })
         };
         let result = decode(&mut r).map_err(|e| e.to_string())?;

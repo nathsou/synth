@@ -36,6 +36,10 @@ pub struct FlowResult {
     pub checkpoint: Option<Checkpoint>,
 }
 
+/// An incremental result whose clock periods grow by more than this factor
+/// over the checkpointed run's is replaced by fresh place and route.
+const MAX_SLOWDOWN: f64 = 1.05;
+
 /// Packs, places and routes a netlist of iCE40 primitives. On failure the
 /// error message starts with the log so far (one `info:` line per entry).
 pub fn implement(
@@ -215,7 +219,7 @@ fn run(
     }
     let (placement, routing) = result.expect("the last attempt returns or errors");
     // Capture logical pin endpoints before applying the physical permutation.
-    let checkpoint = if save {
+    let mut checkpoint = if save {
         Some(Checkpoint::capture(&arch, &nl, &placement, &routing, opts)?)
     } else {
         None
@@ -247,6 +251,24 @@ fn run(
     if incremental && !met {
         log.push("incremental result misses timing targets; using fresh PnR".into());
         return run(fresh_input.unwrap(), pins, opts, log, None, save);
+    }
+    // Quality: no clock may get much slower than in the checkpointed run.
+    if let Some(previous) = previous.filter(|_| incremental) {
+        let slower = timing.clocks.iter().find(|c| {
+            previous.period(&c.clock).is_some_and(|p| c.period_ns * 1000.0 > p * MAX_SLOWDOWN)
+        });
+        if let Some(c) = slower {
+            log.push(format!(
+                "incremental result slows clock {} to {:.2} ns (checkpoint {:.2} ns); using fresh PnR",
+                c.clock,
+                c.period_ns,
+                previous.period(&c.clock).unwrap_or(0.0) / 1000.0
+            ));
+            return run(fresh_input.unwrap(), pins, opts, log, None, save);
+        }
+    }
+    if let Some(c) = checkpoint.as_mut() {
+        c.set_periods(&timing);
     }
 
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;

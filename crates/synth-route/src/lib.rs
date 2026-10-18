@@ -14,6 +14,8 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use synth_core::{FxHashMap, FxHashSet};
+
 /// A routing graph: nodes with positions and base costs, directed edges
 /// with intrinsic delays.
 #[derive(Debug, Clone, Copy)]
@@ -312,35 +314,28 @@ pub fn route_with_initial(
     let mut users = vec![0u32; n];
     let mut seen = if initial.is_empty() { Vec::new() } else { vec![usize::MAX; n] };
     let mut to_route = Vec::new();
+    // Partial trees of nets that gained sinks: their first route grows them.
+    let mut seeds: Vec<Vec<u32>> = vec![Vec::new(); nets.len()];
     for (i, net) in nets.iter().enumerate() {
-        let accepted = initial.get(i).is_some_and(|r| {
-            seen[net.source as usize] = i;
-            for &e in &r.edges {
-                let e = e as usize;
-                if e >= graph.edge_dst.len() {
-                    return false;
-                }
-                let (s, d) = (st.edge_src[e] as usize, graph.edge_dst[e] as usize);
-                if seen[s] != i
-                    || seen[d] == i
-                    || st.occupancy[d] != 0
-                    || (reserved[d] != u32::MAX && reserved[d] != i as u32)
-                {
-                    return false;
-                }
-                seen[d] = i;
-            }
-            net.sinks.iter().all(|&s| seen[s as usize] == i)
-        });
-        if accepted {
-            routes[i] = initial[i].clone();
+        let kept = initial
+            .get(i)
+            .and_then(|r| prune_tree(graph, &st, &reserved, net, i, &r.edges, &mut seen));
+        let Some((edges, complete)) = kept else {
+            to_route.push(i);
+            continue;
+        };
+        for &e in &edges {
+            let d = graph.edge_dst[e as usize] as usize;
+            st.occupancy[d] += 1;
+            users[d] ^= i as u32;
+        }
+        if complete {
             stats.reused_nets += 1;
-            for &e in &routes[i].edges {
-                let d = graph.edge_dst[e as usize] as usize;
-                st.occupancy[d] += 1;
-                users[d] ^= i as u32;
-            }
+            routes[i] = NetRoute { edges };
         } else {
+            stats.partly_reused_nets += 1;
+            routes[i] = NetRoute { edges: edges.clone() };
+            seeds[i] = edges;
             to_route.push(i);
         }
     }
@@ -379,6 +374,7 @@ pub fn route_with_initial(
                 opts,
                 margin[i],
                 pres_fac,
+                &std::mem::take(&mut seeds[i]),
                 &mut routes[i],
             )?;
             for &e in &routes[i].edges {
@@ -492,11 +488,64 @@ pub fn route_with_initial(
     Err(RouteError::Congested { overused_nodes, nodes, nets })
 }
 
+/// The part of candidate tree `edges` for net `i` that leads to its current
+/// sinks, and whether it reaches them all; `None` if the tree is invalid,
+/// blocked, overlaps wires already taken, or keeps nothing.
+fn prune_tree(
+    graph: Graph<'_>,
+    st: &State,
+    reserved: &[u32],
+    net: &NetRequest,
+    i: usize,
+    edges: &[u32],
+    seen: &mut [usize],
+) -> Option<(Vec<u32>, bool)> {
+    seen[net.source as usize] = i;
+    // The edge into each node of the tree.
+    let mut parent: FxHashMap<u32, u32> = FxHashMap::default();
+    for &e in edges {
+        let e = e as usize;
+        if e >= graph.edge_dst.len() {
+            return None;
+        }
+        let (s, d) = (st.edge_src[e] as usize, graph.edge_dst[e] as usize);
+        if seen[s] != i
+            || seen[d] == i
+            || st.occupancy[d] != 0
+            || (reserved[d] != u32::MAX && reserved[d] != i as u32)
+        {
+            return None;
+        }
+        seen[d] = i;
+        parent.insert(d as u32, e as u32);
+    }
+    // Keep the paths from the source to the sinks the tree reaches.
+    let mut keep: FxHashSet<u32> = FxHashSet::default();
+    let mut complete = true;
+    for &s in &net.sinks {
+        if seen[s as usize] != i {
+            complete = false;
+            continue;
+        }
+        let mut cur = s;
+        while let Some(&e) = parent.get(&cur) {
+            if !keep.insert(e) {
+                break;
+            }
+            cur = st.edge_src[e as usize];
+        }
+    }
+    let kept: Vec<u32> = edges.iter().copied().filter(|e| keep.contains(e)).collect();
+    (!kept.is_empty()).then_some((kept, complete))
+}
+
 /// Statistics of a routing run.
 #[derive(Debug, Clone, Default)]
 pub struct RouteStats {
     /// Candidate trees accepted before routing (they may later be rerouted).
     pub reused_nets: usize,
+    /// Candidate trees kept in part (pruned to current sinks, then grown).
+    pub partly_reused_nets: usize,
     pub iterations: usize,
     pub overused_history: Vec<usize>,
     pub wire_nodes: usize,
@@ -553,12 +602,23 @@ fn route_net(
     opts: &RouteOptions,
     margin: i16,
     pres_fac: f32,
+    seed: &[u32],
     out: &mut NetRoute,
 ) -> Result<(), RouteError> {
     st.tree_gen += 1;
     let tg = st.tree_gen;
     st.in_tree[net.source as usize] = tg;
     st.tree_delay[net.source as usize] = 0.0;
+    let mut tree_nodes: Vec<u32> = vec![net.source];
+    // Start from a kept partial tree (in tree order).
+    for &e in seed {
+        let d = graph.edge_dst[e as usize];
+        st.tree_delay[d as usize] =
+            st.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
+        st.in_tree[d as usize] = tg;
+        tree_nodes.push(d);
+        out.edges.push(e);
+    }
     // Bounding box of the net plus a margin.
     let (mut x0, mut y0, mut x1, mut y1) =
         (graph.node_x[net.source as usize], graph.node_y[net.source as usize], 0, 0);
@@ -580,7 +640,6 @@ fn route_net(
         let s = net.sinks[k] as usize;
         std::cmp::Reverse((graph.node_x[s] - sx).abs() + (graph.node_y[s] - sy).abs())
     });
-    let mut tree_nodes: Vec<u32> = vec![net.source];
     let mut heap = BinaryHeap::new();
     for k in order {
         let sink = net.sinks[k];
@@ -819,6 +878,47 @@ mod tests {
         let (repaired, stats) = route_with_initial(g, &nets, &opts, hooks, &old).unwrap();
         assert_eq!(stats.reused_nets, 0);
         assert!(!repaired[0].edges.contains(&blocked[0]));
+    }
+
+    #[test]
+    fn partial_trees_keep_branches_to_remaining_sinks() {
+        let (o, d, dl, x, y, c) = grid(5, 5);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let opts = RouteOptions::default();
+        let (old, _) =
+            route(g, &[NetRequest { source: 0, sinks: vec![4, 20], criticality: vec![] }], &opts)
+                .unwrap();
+        // Sink 20 is gone, sink 24 is new: the branch to 4 stays as it was.
+        let to_4: Vec<u32> = {
+            let mut path = Vec::new();
+            let mut cur = 4;
+            while cur != 0 {
+                let e = *old[0].edges.iter().find(|&&e| d[e as usize] == cur).unwrap();
+                path.push(e);
+                cur = (0..o.len() - 1).find(|&s| (o[s]..o[s + 1]).contains(&e)).unwrap() as u32;
+            }
+            path
+        };
+        let nets = vec![NetRequest { source: 0, sinks: vec![4, 24], criticality: vec![] }];
+        let (new, stats) =
+            route_with_initial(g, &nets, &opts, RouteHooks::default(), &old).unwrap();
+        assert_eq!((stats.reused_nets, stats.partly_reused_nets), (0, 1));
+        assert!(to_4.iter().all(|e| new[0].edges.contains(e)));
+        assert!(!new[0].edges.iter().any(|&e| d[e as usize] == 20));
+        assert!(new[0].edges.iter().any(|&e| d[e as usize] == 24));
+        // With only sink 4 left, the pruned tree is complete.
+        let nets = vec![NetRequest { source: 0, sinks: vec![4], criticality: vec![] }];
+        let (new, stats) =
+            route_with_initial(g, &nets, &opts, RouteHooks::default(), &old).unwrap();
+        assert_eq!((stats.reused_nets, stats.partly_reused_nets), (1, 0));
+        assert_eq!(new[0].edges.len(), to_4.len());
     }
 
     #[test]

@@ -42,22 +42,24 @@ the same option.
 The first run creates a checkpoint; subsequent runs still elaborate, synthesize
 and pack the current design. Matching packed cells are placed at their previous
 locations where legal, with carry chains handled as complete units. Edited units
-are placed near their neighbors. Route trees with identical physical endpoints
-are validated and reused; the router repairs affected nets and may displace
-retained routes to resolve congestion. LUT pin permutations are recovered from
-the final routes, and current LUT/RAM contents are always written to the bitstream.
+are placed near their neighbors, then refined by a short annealing (the whole
+placement when more than 5% of the cells are new). If fewer than 60% of the cells
+can keep their place, fresh PnR runs straight away. Saved route trees are
+validated, pruned to the sinks each net still has and reused; new routes avoid
+the kept ones, and the router may still displace them to resolve congestion. LUT
+pin permutations are recovered from the final routes, and current LUT/RAM
+contents are always written to the bitstream.
 
-Full timing analysis runs every time. A failed repair or missed clock target
-triggers fresh PnR; corrupt/incompatible checkpoints also start fresh. Successful
-runs atomically replace the checkpoint. Runs that miss timing do not replace it,
-even with `--timing-allow-fail`. Specify a clock target to enforce timing; without
-one, incremental builds do not promise the same Fmax as a fresh optimization.
+Full timing analysis runs every time. A failed repair, a missed clock target, or
+a clock more than 5% slower than in the checkpointed run triggers fresh PnR;
+corrupt/incompatible checkpoints also start fresh. Successful runs atomically
+replace the checkpoint. Runs that miss timing do not replace it, even with
+`--timing-allow-fail`.
 
 This is incremental **PnR**, not incremental synthesis or partial FPGA
 reconfiguration. Matching uses cell names, primitive parameters and pin schemas;
-large synthesis changes or renaming can reduce reuse. Placement repair retains
-legal existing units rather than annealing them, falling back to a full run when
-necessary. Omit `--incremental` for a fresh optimization. Identical input and
+large synthesis changes or renaming can reduce reuse. Omit `--incremental` for a
+fresh optimization. Identical input and
 checkpoint produce reproducible results, but results can depend on edit history.
 
 `tools/ci_incremental.sh` verifies decoded bitstreams against edited RTL for RAM
