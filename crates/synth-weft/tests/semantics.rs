@@ -433,3 +433,21 @@ module top(in clk: clock, in x: uint<5> @clk, out q: uint<8>, out n: uint<3>) {
     }
     assert_eq!(s.peek("q"), Some(12));
 }
+
+#[test]
+fn constants_declared_int() {
+    let m = ok(r#"
+const LEN: int = 3;
+const TABLE: [uint<8>; LEN] = [7, 8, 9];
+
+module top(in i: uint<2>, out y: uint<8>, out n: uint<4>) {
+    const TWICE: int = LEN * 2;
+    y = if i < LEN { TABLE[i] } else { 0 };
+    n = TWICE;
+}
+"#);
+    let mut s = Sim::new(m);
+    s.poke("i", 2);
+    assert_eq!(s.peek("y"), Some(9));
+    assert_eq!(s.peek("n"), Some(6));
+}

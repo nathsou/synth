@@ -435,3 +435,11 @@ fn unnamed_generic_argument_with_several_parameters() {
     );
     has(&out, &["`m` has 2 generic parameters: name this argument", "write `A: ...`"]);
 }
+
+#[test]
+fn compile_time_types_are_not_hardware_types() {
+    let out = errors("fn f(x: int) -> uint<8> { x }\nmodule top(out y: uint<8>) { y = f(1); }\n");
+    has(&out, &["`int` is a compile-time type, not a hardware type", "`fn f<N: int>(…)`"]);
+    let out = errors("const N: int = \"eight\";\nmodule top(out y: uint<8>) { y = N; }\n");
+    has(&out, &["constant `N` is declared an integer", "declared here"]);
+}

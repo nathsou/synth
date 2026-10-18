@@ -697,11 +697,21 @@ impl<'a> Parser<'a> {
 
     fn const_decl(&mut self) -> R<ConstDecl> {
         let name = self.ident("a constant name")?;
-        let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+        let mut kind = None;
+        let mut ty = None;
+        if self.eat(":") {
+            match self.peek() {
+                Tok::Ident(k) if k == "int" || k == "string" => {
+                    let k = if k == "int" { GenericKind::Int } else { GenericKind::Str };
+                    kind = Some((k, self.bump().span));
+                }
+                _ => ty = Some(self.ty()?),
+            }
+        }
         self.expect("=")?;
         let value = self.expr()?;
         self.expect(";")?;
-        Ok(ConstDecl { name, ty, value })
+        Ok(ConstDecl { name, ty, kind, value })
     }
 
     fn assert_rest(&mut self) -> R<Assert> {
@@ -778,6 +788,18 @@ impl<'a> Parser<'a> {
                     Diagnostic::error(sp, format!("`{k}` is not a type"))
                         .with_label("expected a type")
                         .with_help("types are `bool`, `uint<N>`, `sint<N>`, `index<N>`, arrays, structs and enums; registers are declared with `reg name: type`"),
+                );
+                return Err(());
+            }
+            Tok::Ident(k) if k == "int" || k == "string" || k == "type" => {
+                let sp = self.span();
+                self.error(
+                    Diagnostic::error(sp, format!("`{k}` is a compile-time type, not a hardware type"))
+                        .with_label("not a hardware type")
+                        .with_help(format!(
+                            "`{k}` is only for generic parameters and constants: `fn f<N: {k}>(…)`, `const X: {k} = …;`"
+                        ))
+                        .with_help("for an integer signal, use `uint<N>`, `sint<N>` or `index<N>`"),
                 );
                 return Err(());
             }

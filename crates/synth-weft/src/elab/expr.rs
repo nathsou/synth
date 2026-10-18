@@ -129,7 +129,25 @@ impl<'a> ModCx<'a> {
                 }
                 Ok(Value::Hw(h))
             }
-            None => self.eval_const(d, &c.value),
+            None => {
+                let v = self.eval_const(d, &c.value)?;
+                match (c.kind, &v) {
+                    (None, _)
+                    | (Some((GenericKind::Int, _)), Value::Int(..))
+                    | (Some((GenericKind::Str, _)), Value::Str(_)) => Ok(v),
+                    (Some((k, sp)), _) => {
+                        let what = if k == GenericKind::Int { "an integer" } else { "a string" };
+                        d.err(
+                            Diagnostic::error(
+                                c.value.span,
+                                format!("constant `{}` is declared {what}", c.name.name),
+                            )
+                            .with_label("a value of another kind")
+                            .with_secondary(sp, "declared here"),
+                        )
+                    }
+                }
+            }
         }
     }
 

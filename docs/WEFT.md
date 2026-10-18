@@ -646,7 +646,7 @@ A trailing comma is allowed after the last port.
 
 | Declaration | Meaning |
 |---|---|
-| `const NAME[: T] = expr;` | A compile-time constant |
+| `const NAME[: T] = expr;` | A compile-time constant; T is a hardware type, `int` or `string` |
 | `let name[: T] [@d] = expr;` | A named combinational value |
 | `wire name: T [@d];` | A combinational signal, driven by assignments (§7.6) |
 | `reg name: T [@d] = expr;` | A register with a reset value (§9) |
@@ -1494,7 +1494,7 @@ struct      = "struct" ident "{" field { "," field } [ "," ] "}" ;
 field       = ident ":" type ;
 enum        = "enum" ident [ ":" type ] "{" variant { "," variant } [ "," ] "}" ;
 variant     = ident [ "=" expr ] ;
-const_decl  = "const" ident [ ":" type ] "=" expr ";" ;
+const_decl  = "const" ident [ ":" ( type | "int" | "string" ) ] "=" expr ";" ;
 
 generics    = "<" generic { "," generic } [ "," ] ">" ;
 generic     = ident ":" ( "int" | "bool" | "string" | "type" ) [ "=" expr ] ;

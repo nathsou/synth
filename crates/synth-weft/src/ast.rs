@@ -135,6 +135,8 @@ pub struct EnumDef {
 pub struct ConstDecl {
     pub name: Ident,
     pub ty: Option<TypeExpr>,
+    /// A compile-time type annotation (`int`, `string`), instead of `ty`.
+    pub kind: Option<(GenericKind, Span)>,
     pub value: Expr,
 }
 

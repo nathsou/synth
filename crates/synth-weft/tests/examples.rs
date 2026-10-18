@@ -157,3 +157,64 @@ fn sources_are_formatted() {
         );
     }
 }
+
+/// What rv_program.weft prints: a few results, the Fibonacci numbers up to
+/// 610, and their sum.
+fn riscv_expected() -> String {
+    let mut out = String::new();
+    for w in [0xffffff9cu32, 0xffffffe7, 0xffffff8b, 0x0000f00d, 0xf00d000d, 0xfffff00d, 0x000000f0, 0x00000e20] {
+        out += &format!("{w:08x}\r\n");
+    }
+    let (mut a, mut b) = (0u32, 1u32);
+    for _ in 0..16 {
+        out += &format!("{a:08x}\r\n");
+        (a, b) = (b, a + b);
+    }
+    out + "0000063c\r\n"
+}
+
+/// Runs a RISC-V example until it has printed the program's output (or for
+/// `max` cycles), and gives the cycles taken with the text.
+fn run_riscv(core: &str, max: usize) -> (usize, String) {
+    let m = compile_files(
+        &[core, "examples/weft/rv32i.weft", "examples/weft/rv_program.weft", "examples/weft/uart.weft"],
+        &[],
+        None,
+        &[("CLKS_PER_BIT", "4"), ("DELAY", "0")],
+    );
+    let want = riscv_expected();
+    let mut s = Sim::new(m);
+    let mut line = Vec::new();
+    for cycle in 0..max {
+        line.push(s.peek("tx").unwrap());
+        s.step();
+        if cycle % 2048 == 0 || cycle == max - 1 {
+            let text = String::from_utf8_lossy(&uart_decode(&line, 4)).into_owned();
+            if text.len() >= want.len() {
+                return (cycle, text[..want.len()].to_string());
+            }
+            if cycle == max - 1 {
+                return (cycle, text);
+            }
+        }
+    }
+    unreachable!()
+}
+
+#[test]
+fn riscv_single_cycle_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_single.weft", 60_000);
+    assert_eq!(text, riscv_expected());
+}
+
+#[test]
+fn riscv_multi_cycle_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_multi.weft", 150_000);
+    assert_eq!(text, riscv_expected());
+}
+
+#[test]
+fn riscv_pipelined_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_pipe.weft", 80_000);
+    assert_eq!(text, riscv_expected());
+}
