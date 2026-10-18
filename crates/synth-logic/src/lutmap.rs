@@ -13,6 +13,8 @@
 //! the latest output in a delay-optimal mapping unless [`Timing`] says
 //! otherwise.
 
+use synth_core::FxHashMap;
+
 use crate::aig::{Aig, Node};
 
 /// Mapping parameters.
@@ -70,6 +72,18 @@ pub struct Timing {
     /// time of the latest output in a delay-optimal mapping, plus
     /// `depth_relax` LUT delays).
     pub output_required: Vec<Option<u32>>,
+    /// Paths through boxes outside the graph (carry chains): from an output
+    /// of the graph to an input, with a delay.
+    pub arcs: Vec<BoxArc>,
+}
+
+/// A path through a box outside the graph: input `to` (an index into the
+/// graph's inputs) changes `delay` after output `from` does.
+#[derive(Copy, Clone, Debug)]
+pub struct BoxArc {
+    pub from: usize,
+    pub to: usize,
+    pub delay: u32,
 }
 
 /// A LUT of the mapping: computes AIG node `node` (positive polarity) from
@@ -201,6 +215,10 @@ struct Mapper<'a> {
     best: Vec<Option<Cut>>,
     arrival: Vec<u32>,
     required: Vec<u32>,
+    /// Box arcs by node: into graph inputs (from output nodes), and out of
+    /// output nodes (to input nodes).
+    arcs_into: Vec<Vec<(u32, u32)>>,
+    arcs_from: Vec<Vec<(u32, u32)>>,
     area_flow: Vec<f32>,
     est_refs: Vec<f32>,
     /// References of each node in the current mapping (as a LUT leaf or
@@ -239,6 +257,8 @@ fn map_impl(
     assert!((2..=6).contains(&opts.k));
     let n = g.nodes.len();
     let fanouts = g.fanout_counts();
+    let (arcs_into, arcs_from) = box_arcs(g, timing);
+    let order = if timing.arcs.is_empty() { order } else { box_order(g, choices, &arcs_into) };
     let mut m = Mapper {
         g,
         opts,
@@ -249,6 +269,8 @@ fn map_impl(
         best: vec![None; n],
         arrival: vec![0; n],
         required: vec![u32::MAX; n],
+        arcs_into,
+        arcs_from,
         area_flow: vec![0.0; n],
         est_refs: fanouts.iter().map(|&r| r.max(1) as f32).collect(),
         map_refs: vec![0; n],
@@ -272,9 +294,14 @@ impl Mapper<'_> {
             + c.leaves().iter().map(|&l| self.arrival[l as usize]).max().unwrap_or(0)
     }
 
-    fn input_arrival(&self, n: usize) -> u32 {
+    /// Arrival time at a graph input, given the arrival times `arr` of the
+    /// outputs that reach it through boxes.
+    fn input_arrival(&self, n: usize, arr: &[u32]) -> u32 {
         match self.g.nodes[n] {
-            Node::Input(k) => self.timing.input_arrival.get(k as usize).copied().unwrap_or(0),
+            Node::Input(k) => {
+                let a = self.timing.input_arrival.get(k as usize).copied().unwrap_or(0);
+                self.arcs_into[n].iter().map(|&(o, d)| arr[o as usize] + d).fold(a, u32::max)
+            }
             _ => 0,
         }
     }
@@ -288,7 +315,7 @@ impl Mapper<'_> {
         for oi in 0..self.order.len() {
             let i = self.order[oi] as usize;
             let Node::And(a, b) = self.g.nodes[i] else {
-                self.arrival[i] = self.input_arrival(i);
+                self.arrival[i] = self.input_arrival(i, &self.arrival);
                 self.area_flow[i] = 0.0;
                 self.cuts[i] = vec![Cut::trivial(i as u32)];
                 continue;
@@ -409,6 +436,11 @@ impl Mapper<'_> {
         }
         for &i in self.order.iter().rev() {
             let i = i as usize;
+            // Through boxes: the inputs this node reaches come later.
+            for &(to, d) in &self.arcs_from[i] {
+                let r = self.required[to as usize].saturating_sub(d);
+                self.required[i] = self.required[i].min(r);
+            }
             if self.map_refs[i] > 0
                 && let Some(c) = self.best[i]
             {
@@ -511,9 +543,12 @@ impl Mapper<'_> {
             }
         }
         let mut luts = Vec::new();
-        let mut level: Vec<u32> = (0..n).map(|i| self.input_arrival(i)).collect();
+        let mut level: Vec<u32> = vec![0; n];
         for &i in &self.order {
             let i = i as usize;
+            if matches!(g.nodes[i], Node::Input(_)) {
+                level[i] = self.input_arrival(i, &level);
+            }
             if !used[i] {
                 continue;
             }
@@ -532,6 +567,112 @@ impl Mapper<'_> {
 /// The graph of a mapping: every LUT re-expressed as a small structure
 /// over its leaves (with the inputs and outputs of `g`), a starting point
 /// for restructuring and remapping.
+/// Box arcs indexed by node: into input nodes (from output nodes) and out
+/// of output nodes (to input nodes).
+type NodeArcs = Vec<Vec<(u32, u32)>>;
+
+fn box_arcs(g: &Aig, timing: &Timing) -> (NodeArcs, NodeArcs) {
+    let n = g.nodes.len();
+    let (mut into, mut from) = (vec![Vec::new(); n], vec![Vec::new(); n]);
+    for a in &timing.arcs {
+        let o = g.outputs[a.from];
+        if o.is_const() {
+            continue;
+        }
+        let i = g.inputs[a.to];
+        into[i as usize].push((o.node(), a.delay));
+        from[o.node() as usize].push((i, a.delay));
+    }
+    (into, from)
+}
+
+/// A topological order of the nodes (choice members before their
+/// representatives) in which the outputs reaching an input through boxes
+/// come before it.
+fn box_order(g: &Aig, choices: &[Vec<(u32, bool)>], arcs_into: &[Vec<(u32, u32)>]) -> Vec<u32> {
+    let n = g.nodes.len();
+    let mut done = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    let mut stack: Vec<(u32, bool)> = Vec::new();
+    for root in 0..n as u32 {
+        stack.push((root, false));
+        while let Some((x, expanded)) = stack.pop() {
+            if done[x as usize] {
+                continue;
+            }
+            if expanded {
+                done[x as usize] = true;
+                order.push(x);
+                continue;
+            }
+            stack.push((x, true));
+            let mut preds: Vec<u32> =
+                choices.get(x as usize).into_iter().flatten().map(|&(m, _)| m).collect();
+            if let Node::And(a, b) = g.nodes[x as usize] {
+                preds.extend([a.node(), b.node()]);
+            }
+            preds.extend(arcs_into[x as usize].iter().map(|&(o, _)| o));
+            stack.extend(preds.into_iter().filter(|&p| !done[p as usize]).map(|p| (p, false)));
+        }
+    }
+    order
+}
+
+/// Static timing of a mapping with box arcs resolved: each input's arrival
+/// and each output's required time (for outputs reaching inputs through
+/// boxes, from what those inputs feed), for passes that take a mapping as
+/// it is.
+pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) -> Timing {
+    if timing.arcs.is_empty() {
+        return timing.clone();
+    }
+    let n = g.nodes.len();
+    let (arcs_into, arcs_from) = box_arcs(g, timing);
+    let order = box_order(g, &[], &arcs_into);
+    let lut_of: FxHashMap<u32, &Lut> = m.luts.iter().map(|l| (l.node, l)).collect();
+    let mut arr = vec![0u32; n];
+    for &i in &order {
+        let i = i as usize;
+        arr[i] = match g.nodes[i] {
+            Node::Input(k) => {
+                let a = timing.input_arrival.get(k as usize).copied().unwrap_or(0);
+                arcs_into[i].iter().map(|&(o, d)| arr[o as usize] + d).fold(a, u32::max)
+            }
+            _ => match lut_of.get(&(i as u32)) {
+                Some(l) => lut_delay + l.leaves.iter().map(|&x| arr[x as usize]).max().unwrap_or(0),
+                None => 0,
+            },
+        };
+    }
+    let target = g.outputs.iter().map(|o| arr[o.node() as usize]).max().unwrap_or(0);
+    let mut req = vec![u32::MAX; n];
+    for (k, o) in g.outputs.iter().enumerate() {
+        let r = timing.output_required.get(k).copied().flatten().unwrap_or(target);
+        req[o.node() as usize] = req[o.node() as usize].min(r);
+    }
+    for &i in order.iter().rev() {
+        let i = i as usize;
+        for &(to, d) in &arcs_from[i] {
+            req[i] = req[i].min(req[to as usize].saturating_sub(d));
+        }
+        if let Some(l) = lut_of.get(&(i as u32)) {
+            let r = req[i].saturating_sub(lut_delay);
+            for &x in &l.leaves {
+                req[x as usize] = req[x as usize].min(r);
+            }
+        }
+    }
+    Timing {
+        input_arrival: g.inputs.iter().map(|&i| arr[i as usize]).collect(),
+        output_required: g
+            .outputs
+            .iter()
+            .map(|o| Some(req[o.node() as usize]).filter(|&r| r != u32::MAX))
+            .collect(),
+        arcs: Vec::new(),
+    }
+}
+
 pub fn lut_graph(g: &Aig, m: &Mapping) -> Aig {
     let mut out = Aig::new();
     let mut map = vec![crate::aig::Lit::FALSE; g.nodes.len()];
@@ -626,6 +767,27 @@ mod tests {
     }
 
     #[test]
+    fn arrival_through_boxes() {
+        // y = x0 & x1 feeds a box whose output (input 2) is read by z.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..3).map(|_| g.input()).collect();
+        let y = g.and(x[0], x[1]);
+        g.output(y);
+        let z = g.and(x[2], x[0]);
+        g.output(z);
+        let timing =
+            Timing { arcs: vec![BoxArc { from: 0, to: 2, delay: 50 }], ..Default::default() };
+        let opts = MapOptions { lut_delay: 100, ..MapOptions::default() };
+        let c = crate::choice::ChoiceAig::plain(g.clone());
+        let m = map_choices_timed(&c, &opts, &timing);
+        check(&g, &m, 4);
+        assert_eq!(m.depth, 250);
+        let r = resolved_timing(&g, &m, &timing, 100);
+        assert_eq!(r.input_arrival[2], 150);
+        assert_eq!(r.output_required[0], Some(100));
+    }
+
+    #[test]
     fn late_input_goes_last() {
         // A 16-input AND whose last input arrives two LUT delays late: it
         // belongs in the final LUT.
@@ -634,7 +796,7 @@ mod tests {
         let t = g.and_all(&x[..15]);
         let y = g.and(x[15], t);
         g.output(y);
-        let mut timing = Timing { input_arrival: vec![0; 16], output_required: Vec::new() };
+        let mut timing = Timing { input_arrival: vec![0; 16], ..Default::default() };
         timing.input_arrival[15] = 2;
         let c = crate::choice::ChoiceAig::plain(g.clone());
         let m = map_choices_timed(&c, &MapOptions::default(), &timing);

@@ -32,7 +32,7 @@ impl Default for SynthOptions {
     fn default() -> Self {
         SynthOptions {
             lower: LowerOptions::default(),
-            map: MapOptions::default(),
+            map: MapOptions { lut_delay: LEVEL, ..MapOptions::default() },
             remap_rounds: 6,
             bram_min_bits: 256,
         }
@@ -230,9 +230,9 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         best = plain;
     }
     log.push(format!(
-        "first mapping: {} LUTs, depth {}",
+        "first mapping: {} LUTs, delay {:.2} LUT levels",
         best.mapping.luts.len(),
-        best.mapping.depth
+        best.mapping.depth as f64 / LEVEL as f64
     ));
     // Remapping: the mapped LUTs as a graph, restructured, with the previous
     // structure as choices; kept while the netlist shrinks without getting
@@ -247,9 +247,9 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
             break;
         }
         log.push(format!(
-            "remapping round {round}: {} LUTs, depth {}",
+            "remapping round {round}: {} LUTs, delay {:.2} LUT levels",
             c.mapping.luts.len(),
-            c.mapping.depth
+            c.mapping.depth as f64 / LEVEL as f64
         ));
         // Rounds saving less than 0.1% are not worth their time.
         let last = (best.luts - c.luts) * 1024 < best.luts;
@@ -260,10 +260,10 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     }
     best = polish(&net, best, &opts.map)?;
     log.push(format!(
-        "mapped in {:.2}s: {} LUTs, depth {}",
+        "mapped in {:.2}s: {} LUTs, delay {:.2} LUT levels",
         t.elapsed().as_secs_f64(),
         best.mapping.luts.len(),
-        best.mapping.depth
+        best.mapping.depth as f64 / LEVEL as f64
     ));
     let mapping = best.mapping;
     // The mapping refers to the nodes of the graph with choices.
@@ -304,11 +304,57 @@ struct Candidate {
     luts: usize,
 }
 
+/// Delays of the paths through carry chains, in units of a hundredth of a
+/// LUT level (a LUT and a typical net, about 1.15 ns): a net into the
+/// chain, the carry logic, 11 per bit of carry propagation and the carry
+/// into the sum LUT (IceStorm timing of the logic cell).
+const CHAIN_NET: u32 = 60;
+const CHAIN_ENTRY: u32 = 20;
+const CHAIN_BIT: u32 = 11;
+const CHAIN_SUM: u32 = 27;
+const LEVEL: u32 = 100;
+
+/// Mapping constraints for the carry chains of `net`: every operand bit
+/// reaches the sums at and above it, and the carry out.
+fn chain_timing(net: &LogicNet) -> lutmap::Timing {
+    let mut t = lutmap::Timing::default();
+    for c in &net.carries {
+        let w = c.a.len();
+        let mut arc = |from: usize, to: u32, delay: u32| {
+            t.arcs.push(lutmap::BoxArc { from, to: to as usize, delay })
+        };
+        for j in 0..w {
+            for &op in [c.a[j], c.b[j]].iter() {
+                for (i, &s) in c.sum.iter().enumerate().skip(j) {
+                    let d = if i == j {
+                        LEVEL
+                    } else {
+                        CHAIN_NET + CHAIN_ENTRY + (i - 1 - j) as u32 * CHAIN_BIT + CHAIN_SUM
+                    };
+                    arc(op, s, d);
+                }
+                if let Some(co) = c.cout {
+                    arc(op, co, CHAIN_NET + CHAIN_ENTRY + (w - 1 - j) as u32 * CHAIN_BIT);
+                }
+            }
+        }
+        for (i, &s) in c.sum.iter().enumerate() {
+            arc(c.cin, s, CHAIN_NET + i as u32 * CHAIN_BIT + CHAIN_SUM);
+        }
+        if let Some(co) = c.cout {
+            arc(c.cin, co, CHAIN_NET + w as u32 * CHAIN_BIT);
+        }
+    }
+    t
+}
+
 /// The best mapping of `c` for `net` with either delay tie-break.
 fn map_best(net: &LogicNet, c: ChoiceAig, opts: &MapOptions) -> Result<Candidate, String> {
+    let timing = chain_timing(net);
     let mut best: Option<(lutmap::Mapping, usize)> = None;
     for delay_tiebreak in [Tiebreak::Size, Tiebreak::AreaFlow] {
-        let m = lutmap::map_choices(&c, &MapOptions { delay_tiebreak, ..opts.clone() });
+        let m =
+            lutmap::map_choices_timed(&c, &MapOptions { delay_tiebreak, ..opts.clone() }, &timing);
         let luts = netlist_luts(net, &c.aig, &m)?;
         if best.as_ref().is_none_or(|(b, l)| (m.depth, luts) < (b.depth, *l)) {
             best = Some((m, luts));
@@ -323,7 +369,8 @@ fn polish(net: &LogicNet, c: Candidate, opts: &MapOptions) -> Result<Candidate, 
     let (mut graph, mut mapping) = (c.graph.clone(), c.mapping.clone());
     let o =
         synth_logic::mfs::MfsOptions { k: opts.k, lut_delay: opts.lut_delay, ..Default::default() };
-    synth_logic::mfs::optimize(&mut graph, &mut mapping, &o, &Default::default());
+    let timing = lutmap::resolved_timing(&graph, &mapping, &chain_timing(net), opts.lut_delay);
+    synth_logic::mfs::optimize(&mut graph, &mut mapping, &o, &timing);
     let luts = netlist_luts(net, &graph, &mapping)?;
     if luts < c.luts && mapping.depth <= c.mapping.depth {
         Ok(Candidate { graph, mapping, luts })
