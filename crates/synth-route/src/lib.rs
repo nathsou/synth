@@ -9,7 +9,7 @@
 //!
 //! The cost of entering a node blends congestion and delay according to the
 //! criticality of the connection being routed, so timing-critical
-//! connections prefer fast paths.
+//! connections prefer fast paths, and join their net's tree near its source.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -160,6 +160,8 @@ struct State {
     /// Nodes belonging to the tree of the net being routed.
     in_tree: Vec<u32>,
     tree_gen: u32,
+    /// Delay from the source of the net being routed to its tree nodes.
+    tree_delay: Vec<f32>,
     /// Reverse edge lookup: source node of each edge.
     edge_src: Vec<u32>,
     /// Nodes all of whose paths stay at their position (like the inputs of
@@ -247,6 +249,7 @@ pub fn route_with(
         search_gen: 0,
         in_tree: vec![0; n],
         tree_gen: 0,
+        tree_delay: vec![0.0; n],
         edge_src,
         confined,
     };
@@ -478,6 +481,7 @@ fn route_net(
     st.tree_gen += 1;
     let tg = st.tree_gen;
     st.in_tree[net.source as usize] = tg;
+    st.tree_delay[net.source as usize] = 0.0;
     // Bounding box of the net plus a margin.
     let (mut x0, mut y0, mut x1, mut y1) =
         (graph.node_x[net.source as usize], graph.node_y[net.source as usize], 0, 0);
@@ -520,11 +524,15 @@ fn route_net(
                 d * ((1.0 - crit) * opts.astar_cost_per_tile
                     + crit * opts.astar_delay_per_tile * opts.delay_scale)
             };
+            // A critical sink pays for the delay from the source to where
+            // it joins the tree, so that it does not join at the end of a
+            // long branch.
             for &t in &tree_nodes {
-                st.best[t as usize] = 0.0;
+                let g = crit * st.tree_delay[t as usize] * opts.delay_scale;
+                st.best[t as usize] = g;
                 st.via[t as usize] = u32::MAX;
                 st.stamp[t as usize] = search_gen;
-                heap.push(QueueEntry { f: est(t as usize), g: 0.0, node: t });
+                heap.push(QueueEntry { f: g + est(t as usize), g, node: t });
             }
             let (bx0, by0, bx1, by1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
             let mut found = false;
@@ -589,6 +597,8 @@ fn route_net(
         }
         for &e in path.iter().rev() {
             let d = graph.edge_dst[e as usize];
+            st.tree_delay[d as usize] =
+                st.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
             st.in_tree[d as usize] = tg;
             tree_nodes.push(d);
             out.edges.push(e);
@@ -768,5 +778,28 @@ mod tests {
         let src: Vec<u32> =
             (0..5u32).flat_map(|k| (o[k as usize]..o[k as usize + 1]).map(move |_| k)).collect();
         assert_eq!(confined_nodes(&g, &src), [false, false, true, true, true]);
+    }
+
+    #[test]
+    fn critical_sink_joins_near_source() {
+        // Source 0, far sink 4 at the end of the slow chain 1, 2, 3; the
+        // critical sink 7 is one slow edge from 3 or three fast ones from
+        // the source (5, 6).
+        let edges = [(0, 1), (0, 5), (1, 2), (2, 3), (3, 4), (3, 7), (5, 6), (6, 7)];
+        let (o, d, _, _, _, c) = edge_graph(8, &edges);
+        let dl: Vec<f32> =
+            edges.iter().map(|e| if e.1 >= 5 && e.0 != 3 { 400.0 } else { 1000.0 }).collect();
+        let (x, y) = (vec![0, 1, 2, 3, 4, 0, 1, 2], vec![0, 0, 0, 0, 0, 1, 1, 1]);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let nets = vec![NetRequest { source: 0, sinks: vec![4, 7], criticality: vec![0.0, 1.0] }];
+        let (routes, _) = route(g, &nets, &RouteOptions::default()).unwrap();
+        assert!(routes[0].edges.iter().any(|&e| d[e as usize] == 6));
     }
 }
