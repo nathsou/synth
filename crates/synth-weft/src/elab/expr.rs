@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use synth_core::{BigInt, Diagnostic, Logic, LogicVec, Span};
 use synth_rtl::{BinaryOp, MemRead, Sig, SigBit, UnaryOp};
 
+use super::index::code;
 use super::*;
 use crate::ast::{Arg, BinOp, Expr, ExprKind, UnOp};
 
@@ -195,10 +196,29 @@ impl<'a> ModCx<'a> {
             }
             Named(n) => {
                 if let Some(Value::Type(ty)) = self.generics.get(&n.name) {
-                    return Ok(ty.clone());
+                    let ty = ty.clone();
+                    if d.indexing {
+                        let hover = code(&format!("type {} = {}", n.name, d.types.name(&ty)));
+                        d.note(
+                            n.span,
+                            self.generic_decls.get(&n.name).copied(),
+                            RefKind::Generic,
+                            hover,
+                        );
+                    }
+                    return Ok(ty);
                 }
                 if let Some(ty) = d.type_names.get(&n.name) {
-                    return Ok(ty.clone());
+                    let ty = ty.clone();
+                    if d.indexing {
+                        d.note(n.span, d.type_decl(&ty), RefKind::Type, d.type_hover(&ty));
+                        if let Ty::Enum(e) = &ty {
+                            let vs =
+                                d.types.enums[*e].variants.iter().map(|(n, _)| n.clone()).collect();
+                            d.note_members(n.span, vs);
+                        }
+                    }
+                    return Ok(ty);
                 }
                 let mut dg = Diagnostic::error(n.span, format!("unknown type `{}`", n.name))
                     .with_label("not a type");
@@ -649,8 +669,17 @@ impl<'a> ModCx<'a> {
     fn variant(&mut self, d: &mut Design<'a>, ei: usize, v: &ast::Ident) -> R<Value> {
         let info = &d.types.enums[ei];
         match info.variants.iter().find(|(n, _)| *n == v.name) {
-            Some((_, code)) => {
-                let sig = Sig::from_const(&code.to_logic_vec(info.width as usize));
+            Some((_, val)) => {
+                let sig = Sig::from_const(&val.to_logic_vec(info.width as usize));
+                if d.indexing {
+                    let hover = code(&format!("{}.{} = {val}", info.name, v.name));
+                    let decl = d.enum_defs[ei]
+                        .variants
+                        .iter()
+                        .find(|(n, _)| n.name == v.name)
+                        .map(|(n, _)| n.span);
+                    d.note(v.span, decl, RefKind::Variant, hover);
+                }
                 Ok(Value::Hw(Hw { sig, ty: Ty::Enum(ei), tags: Tags::none() }))
             }
             None => {
@@ -696,6 +725,7 @@ impl<'a> ModCx<'a> {
             }
             return d.err(dg);
         };
+        self.note_sym(d, id, &sym);
         Ok(match sym {
             Sym::Value(v) => v,
             Sym::Var(h) => {
@@ -807,6 +837,13 @@ impl<'a> ModCx<'a> {
                     return d.err(dg);
                 };
                 self.signals[si].read = true;
+                if d.indexing {
+                    let module = self.insts[i].module.clone();
+                    let decl = d.port_of(&module, &name.name).map(|p| p.name.span);
+                    let hover = self.describe_signal(d, si)
+                        + &format!("\n\nport of instance `{}` of `{module}`", self.insts[i].name);
+                    d.note(name.span, decl, RefKind::Port, hover);
+                }
                 let s = &self.signals[si];
                 let tags = match &s.tag {
                     Some(FixedTag { atom: Some(a), what }) => Tags::one(
@@ -831,7 +868,23 @@ impl<'a> ModCx<'a> {
                     );
                 };
                 let (off, w, ty) = match self.field_layout(d, si, &name.name) {
-                    Some(x) => x,
+                    Some(x) => {
+                        if d.indexing {
+                            let decl = d.struct_defs[si]
+                                .fields
+                                .iter()
+                                .find(|(n, _)| n.name == name.name)
+                                .map(|(n, _)| n.span);
+                            let hover = code(&format!("{}: {}", name.name, d.types.name(&x.2)))
+                                + &format!(
+                                    "\n\nfield of `{}`, {}",
+                                    d.types.structs[si].name,
+                                    super::index::bits(x.1)
+                                );
+                            d.note(name.span, decl, RefKind::Field, hover);
+                        }
+                        x
+                    }
                     None => {
                         let info = &d.types.structs[si];
                         let mut dg = Diagnostic::error(
@@ -2115,11 +2168,11 @@ impl<'a> ModCx<'a> {
             };
         }
         let (tn, en) = self.narrowing(d, c);
-        self.scopes.push(Scope { syms: HashMap::new(), narrow: tn });
+        self.scopes.push(Scope { narrow: tn, ..Default::default() });
         self.reg_read = rr;
         let tv = self.eval_block(d, t, exp);
         self.scopes.pop();
-        self.scopes.push(Scope { syms: HashMap::new(), narrow: en });
+        self.scopes.push(Scope { narrow: en, ..Default::default() });
         self.reg_read = rr;
         let ev = self.eval(d, els, exp);
         self.scopes.pop();
@@ -2533,6 +2586,9 @@ impl<'a> ModCx<'a> {
             ),
             _ => {
                 if let Some(f) = d.fns.get(name).copied() {
+                    if d.indexing {
+                        d.note(callee.span, Some(f.name.span), RefKind::Function, d.fn_hover(f));
+                    }
                     if dom.is_some() {
                         return d.err(
                             Diagnostic::error(span, "functions have no domain")

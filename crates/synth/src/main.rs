@@ -20,6 +20,8 @@ COMMANDS:
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    lsp        Run the Weft language server on stdin/stdout
+    playground Serve the playground web app (--port <n>, default 8080)
     help       Print this message
     version    Print version information
 
@@ -75,6 +77,19 @@ fn main() -> ExitCode {
         Some("pnr") => cmd_pnr(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
+        Some("playground") => cmd_playground(&argv[1..]),
+        Some("lsp") => {
+            let prelude =
+                vec![("ice40 primitives".to_string(), arch_ice40::WEFT_PRELUDE.to_string())];
+            return match synth_lsp::serve(prelude) {
+                Ok(0) => ExitCode::SUCCESS,
+                Ok(_) => ExitCode::FAILURE,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
     match result {
@@ -152,6 +167,14 @@ fn cmd_synth(argv: &[String]) -> Result<(), String> {
         write(&out, synth_netlist::verilog::write(&nl, &name).as_bytes())?;
     }
     Ok(())
+}
+
+fn cmd_playground(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let port = a.value("--port").unwrap_or_else(|| "8080".into());
+    let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    a.finish()?;
+    synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
 
 fn cmd_build(argv: &[String]) -> Result<(), String> {
@@ -431,7 +454,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         }
         Some(src)
     };
-    let opts = synth_weft::Options { top: a.value("--top"), params };
+    let opts = synth_weft::Options { top: a.value("--top"), params, ..Default::default() };
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {

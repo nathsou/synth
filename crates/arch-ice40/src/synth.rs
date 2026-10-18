@@ -1,7 +1,7 @@
 //! Synthesis for iCE40: maps word-level RTL to iCE40 primitives
 //! (`SB_LUT4`, `SB_CARRY`, `SB_DFF*`, `SB_RAM40_4K`) for the packer.
 
-use std::time::Instant;
+use synth_core::time::Instant;
 
 use synth_core::{FxHashMap, FxHashSet, Logic, LogicVec};
 use synth_logic::aig::{Lit, Node};
@@ -39,11 +39,32 @@ impl Default for SynthOptions {
     }
 }
 
+/// An intermediate result of [`synthesize_observed`].
+#[derive(Debug)]
+pub enum SynthStage<'a> {
+    /// The word-level RTL at a named point of the flow.
+    Rtl(&'static str, &'a Module),
+    /// The gate-level logic network (AIG, flip-flops, carry chains).
+    Logic(&'static str, &'a LogicNet),
+    /// The netlist of iCE40 primitives, before packing.
+    Mapped(&'a Netlist),
+}
+
 /// Synthesises `m` into a netlist of iCE40 primitives.
-pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<String>), String> {
+pub fn synthesize(m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<String>), String> {
+    synthesize_observed(m, opts, &mut |_| {})
+}
+
+/// [`synthesize`], reporting intermediate results to `observe`.
+pub fn synthesize_observed(
+    mut m: Module,
+    opts: &SynthOptions,
+    observe: &mut dyn FnMut(SynthStage),
+) -> Result<(Netlist, Vec<String>), String> {
     let mut log = Vec::new();
     let t = Instant::now();
     opt::clean(&mut m)?;
+    observe(SynthStage::Rtl("elaborated", &m));
     if mem::constant_index_to_registers(&mut m)? > 0 {
         opt::clean(&mut m)?;
     }
@@ -67,6 +88,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     log.push(format!(
         "{merged} duplicate cells merged, {shared} arithmetic operations shared, {trees} mux chains as trees, {fsm} state comparisons simplified"
     ));
+    observe(SynthStage::Rtl("optimised", &m));
     let n = dff::extract_controls(&mut m);
     log.push(format!("{n} flip-flop bits with enable/reset"));
     if mem::remove_feedback_writes(&mut m) > 0 {
@@ -99,6 +121,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     let n = dff::extract_controls(&mut m);
     let _ = n;
     opt::clean(&mut m)?;
+    observe(SynthStage::Rtl("memories mapped", &m));
 
     let mut net = synth_logic::lower::lower(&m, &opts.lower)?;
     synth_logic::ff::legalize(
@@ -107,6 +130,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     );
     let resets = synth_logic::seq::extract_sync_resets(&mut net);
     net.cleanup();
+    observe(SynthStage::Logic("lowered", &net));
     log.push(format!(
         "lowered in {:.2}s: {} AND nodes, {} flip-flops ({} synchronous resets extracted), {} carry chains",
         t.elapsed().as_secs_f64(),
@@ -199,6 +223,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     }
     net.aig = main;
     net.cleanup();
+    observe(SynthStage::Logic("optimised", &net));
     log.push(format!(
         "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits and {} flip-flops removed",
         t.elapsed().as_secs_f64(),
@@ -297,6 +322,7 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         log.push(format!("deepest sinks: {deep:?}"));
     }
     let nl = emit(&net, &mapping)?;
+    observe(SynthStage::Mapped(&nl));
     Ok((nl, log))
 }
 

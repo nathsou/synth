@@ -9,6 +9,7 @@
 
 mod expr;
 mod finish;
+mod index;
 mod inline;
 mod pattern;
 mod stmt;
@@ -22,6 +23,7 @@ use crate::ast::{self, GenArgValue, GenericKind, ItemKind, PortKind, StmtKind, T
 use crate::types::*;
 
 pub(crate) type R<T> = Result<T, ()>;
+pub use index::{RefKind, Reference};
 
 /// Elaboration options.
 #[derive(Clone, Debug, Default)]
@@ -30,6 +32,8 @@ pub struct Options {
     pub top: Option<String>,
     /// Generic arguments of the top module: integers or `"strings"`.
     pub params: Vec<(String, String)>,
+    /// Check every module, without requiring a top (for editors).
+    pub check_all: bool,
 }
 
 /// A clock value.
@@ -179,6 +183,8 @@ pub(crate) enum Lazy<'a> {
 #[derive(Default)]
 pub(crate) struct Scope {
     pub syms: HashMap<String, Sym>,
+    /// Where the names of this scope are declared (for the editor index).
+    pub decls: HashMap<String, Span>,
     pub narrow: HashMap<String, IntTy>,
 }
 
@@ -238,6 +244,8 @@ pub(crate) struct ModCx<'a> {
     /// Bits assigned unconditionally by instance connections.
     pub conn_defs: stmt::DefSet,
     pub let_used: HashSet<String>,
+    /// Where generic parameters are declared (for the editor index).
+    pub generic_decls: HashMap<String, Span>,
     /// Set when the body had errors (completeness is then not checked).
     pub walk_failed: bool,
 }
@@ -255,6 +263,9 @@ pub(crate) struct Design<'a> {
     pub asserts: Vec<&'a ast::Assert>,
     pub types: TypeDefs,
     pub type_names: HashMap<String, Ty>,
+    /// Definitions by `Ty::Enum` and `Ty::Struct` index.
+    pub enum_defs: Vec<&'a ast::EnumDef>,
+    pub struct_defs: Vec<&'a ast::StructDef>,
     pub out: Module,
     pub verilog: Option<&'a synth_verilog::ast::SourceText>,
     pub next_clock: ClockId,
@@ -265,6 +276,10 @@ pub(crate) struct Design<'a> {
     pub depth: usize,
     pub fn_depth: usize,
     pub wire_info: HashMap<WireId, (String, Span)>,
+    /// Whether to record references (editors only).
+    pub indexing: bool,
+    pub refs: Vec<Reference>,
+    noted: HashSet<Span>,
 }
 
 impl<'a> Design<'a> {
@@ -356,7 +371,7 @@ pub(crate) fn elaborate(
     prims: &[FileId],
     verilog: Option<&synth_verilog::ast::SourceText>,
     opts: &Options,
-) -> (Option<Module>, Diagnostics) {
+) -> (Option<Module>, Diagnostics, Vec<Reference>) {
     let mut d = Design {
         sm,
         quiet_files: quiet.iter().copied().collect(),
@@ -379,15 +394,27 @@ pub(crate) fn elaborate(
         depth: 0,
         fn_depth: 0,
         wire_info: HashMap::new(),
+        indexing: opts.check_all,
+        enum_defs: Vec::new(),
+        struct_defs: Vec::new(),
+        refs: Vec::new(),
+        noted: HashSet::new(),
     };
     let top = collect(&mut d, files, opts);
-    let Some(top) = top else { return (None, d.diags) };
+    if top.is_none() && !opts.check_all {
+        return (None, d.diags, Vec::new());
+    }
     if !d.diags.has_errors() {
         check_global_asserts(&mut d);
     }
-    let def = d.modules[&top];
-    d.out.name = top.clone();
-    let ok = elaborate_top(&mut d, def, opts).is_ok();
+    let ok = match &top {
+        Some(top) => {
+            let def = d.modules[top];
+            d.out.name = top.clone();
+            elaborate_top(&mut d, def, opts).is_ok()
+        }
+        None => false,
+    };
     // Check the modules the top does not use.
     let mut unused: Vec<&ast::Module> = d
         .modules
@@ -406,6 +433,9 @@ pub(crate) fn elaborate(
         let _ = check_standalone(&mut d, m);
     }
     d.out = main;
+    if d.indexing {
+        index_items(&mut d, files);
+    }
     if ok && !d.diags.has_errors() {
         crate::check::combinational_cycles(&mut d);
         crate::check::reset_loops(&mut d);
@@ -415,7 +445,73 @@ pub(crate) fn elaborate(
     diags.items.sort_by_key(|x| {
         (x.span.map(|s| (s.file, s.start)).unwrap_or_default(), std::cmp::Reverse(x.severity))
     });
-    (if failed { None } else { Some(d.out) }, diags)
+    let refs = std::mem::take(&mut d.refs);
+    (if failed || top.is_none() { None } else { Some(d.out) }, diags, refs)
+}
+
+/// Records the names of top-level items at their definitions.
+fn index_items<'a>(d: &mut Design<'a>, files: &[(FileId, &'a ast::File)]) {
+    for (_, f) in files {
+        for it in &f.items {
+            match &it.kind {
+                ItemKind::Module(m) => {
+                    d.note(m.name.span, Some(m.name.span), RefKind::Module, d.module_hover(m))
+                }
+                ItemKind::Function(func) => d.note(
+                    func.name.span,
+                    Some(func.name.span),
+                    RefKind::Function,
+                    d.fn_hover(func),
+                ),
+                ItemKind::Struct(s) => {
+                    if let Some(t) = d.type_names.get(&s.name.name).cloned() {
+                        d.note(s.name.span, Some(s.name.span), RefKind::Type, d.type_hover(&t));
+                        if let Ty::Struct(si) = t {
+                            for (n, _) in &s.fields {
+                                let Some((_, ft)) =
+                                    d.types.structs[si].fields.iter().find(|(f, _)| *f == n.name)
+                                else {
+                                    continue;
+                                };
+                                let hover =
+                                    index::code(&format!("{}: {}", n.name, d.types.name(ft)))
+                                        + &format!(
+                                            "\n\nfield of `{}`, {}",
+                                            s.name.name,
+                                            index::bits(d.types.width(ft))
+                                        );
+                                d.note(n.span, Some(n.span), RefKind::Field, hover);
+                            }
+                        }
+                    }
+                }
+                ItemKind::Enum(e) => {
+                    if let Some(t) = d.type_names.get(&e.name.name).cloned() {
+                        d.note(e.name.span, Some(e.name.span), RefKind::Type, d.type_hover(&t));
+                        if let Ty::Enum(ei) = t {
+                            for (n, _) in &e.variants {
+                                let Some((_, c)) =
+                                    d.types.enums[ei].variants.iter().find(|(v, _)| *v == n.name)
+                                else {
+                                    continue;
+                                };
+                                let hover =
+                                    index::code(&format!("{}.{} = {c}", e.name.name, n.name));
+                                d.note(n.span, Some(n.span), RefKind::Variant, hover);
+                            }
+                        }
+                    }
+                }
+                ItemKind::Const(c) => {
+                    if let Some(Some(v)) = d.const_cache.get(&c.name.name).cloned() {
+                        let hover = ModCx::global().describe_value(d, &c.name.name, &v);
+                        d.note(c.name.span, Some(c.name.span), RefKind::Const, hover);
+                    }
+                }
+                ItemKind::Assert(_) => {}
+            }
+        }
+    }
 }
 
 /// Records items, checks names, resolves type definitions and picks the top.
@@ -469,11 +565,13 @@ fn collect<'a>(
                 ItemKind::Struct(s) => {
                     d.type_names.insert(s.name.name.clone(), Ty::Struct(structs.len()));
                     structs.push(s);
+                    d.struct_defs.push(s);
                     d.types.structs.push(StructInfo { name: s.name.name.clone(), fields: vec![] });
                 }
                 ItemKind::Enum(e) => {
                     d.type_names.insert(e.name.name.clone(), Ty::Enum(enums.len()));
                     enums.push(e);
+                    d.enum_defs.push(e);
                     d.types.enums.push(EnumInfo {
                         name: e.name.name.clone(),
                         variants: vec![],
@@ -548,6 +646,7 @@ fn collect<'a>(
             cands.sort_by_key(|m| (m.name.span.file, m.name.span.start));
             match cands.len() {
                 1 => cands[0].name.name.clone(),
+                _ if opts.check_all => return None,
                 0 => {
                     d.emit(
                         Diagnostic::global_error(
@@ -1010,6 +1109,7 @@ impl<'a> ModCx<'a> {
             connected: HashSet::new(),
             conn_defs: Default::default(),
             let_used: HashSet::new(),
+            generic_decls: HashMap::new(),
             walk_failed: false,
         }
     }
@@ -1051,6 +1151,7 @@ impl<'a> ModCx<'a> {
             connected: HashSet::new(),
             conn_defs: Default::default(),
             let_used: HashSet::new(),
+            generic_decls: HashMap::new(),
             walk_failed: false,
         }
     }
@@ -1124,12 +1225,14 @@ impl<'a> ModCx<'a> {
         for g in generics {
             if let Some(v) = given.remove(&g.name.name) {
                 let v = self.check_generic_kind(d, g, v, call_span)?;
+                self.generic_decls.insert(g.name.name.clone(), g.name.span);
                 self.generics.insert(g.name.name.clone(), v);
                 continue;
             }
             match &g.default {
                 Some(def) => {
                     let v = self.eval_generic_arg(d, g, def)?;
+                    self.generic_decls.insert(g.name.name.clone(), g.name.span);
                     self.generics.insert(g.name.name.clone(), v);
                 }
                 None => {
@@ -1695,6 +1798,7 @@ impl<'a> ModCx<'a> {
     pub fn run(&mut self, d: &mut Design<'a>) -> R<()> {
         let body = self.body;
         let errors = d.diags.error_count();
+        let (first_cell, first_wire) = (d.out.cells.len(), d.out.wires.len());
         let ok = self.walk_module(d, body).is_ok();
         // Resolve whatever the walk did not reach (only after errors).
         let names: Vec<String> = self.lazy.keys().cloned().collect();
@@ -1704,7 +1808,24 @@ impl<'a> ModCx<'a> {
             }
         }
         self.walk_failed = !ok;
+        if d.indexing {
+            self.index_decls(d);
+        }
         let fin = self.finish(d, errors);
+        // Anonymous cells and wires carry the instance path, like named ones.
+        if !self.prefix.is_empty() {
+            let prefix = &self.prefix;
+            for c in &mut d.out.cells.as_mut_slice()[first_cell..] {
+                if c.name.starts_with('$') {
+                    c.name.insert_str(0, prefix);
+                }
+            }
+            for w in &mut d.out.wires.as_mut_slice()[first_wire..] {
+                if w.name.starts_with('$') {
+                    w.name.insert_str(0, prefix);
+                }
+            }
+        }
         if ok && fin.is_ok() { Ok(()) } else { Err(()) }
     }
 

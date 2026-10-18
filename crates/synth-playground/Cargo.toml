@@ -1,0 +1,25 @@
+[package]
+name = "synth-playground"
+description = "The synth playground: the whole flow as inspectable data, and its web app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+synth-core.workspace = true
+synth-elab.workspace = true
+synth-logic.workspace = true
+synth-netlist.workspace = true
+synth-rtl.workspace = true
+synth-verilog.workspace = true
+synth-weft.workspace = true
+arch-ice40.workspace = true
+
+[lints]
+workspace = true

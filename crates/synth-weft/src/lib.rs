@@ -12,7 +12,7 @@ pub mod lexer;
 pub mod parser;
 mod types;
 
-pub use elab::Options;
+pub use elab::{Options, RefKind, Reference};
 
 use synth_core::{Diagnostics, FileId, SourceMap};
 
@@ -53,6 +53,41 @@ pub fn compile(
     verilog: Option<&synth_verilog::ast::SourceText>,
     opts: &Options,
 ) -> (Option<synth_rtl::Module>, Diagnostics) {
+    let (m, diags, _, _) = run(sm, files, preludes, verilog, opts);
+    (m, diags)
+}
+
+/// What an editor needs to know about a set of files.
+#[derive(Debug, Default)]
+pub struct Analysis {
+    pub diags: Diagnostics,
+    /// Every resolved name, in no particular order.
+    pub refs: Vec<Reference>,
+    /// False when syntax errors stopped the analysis before elaboration.
+    pub parsed: bool,
+}
+
+/// Checks every module of `files` (whether or not a top can be found) and
+/// indexes the names they use.
+pub fn analyze(
+    sm: &mut SourceMap,
+    files: &[FileId],
+    preludes: &[(&str, &str)],
+    verilog: Option<&synth_verilog::ast::SourceText>,
+    opts: &Options,
+) -> Analysis {
+    let opts = Options { check_all: true, ..opts.clone() };
+    let (_, diags, refs, parsed) = run(sm, files, preludes, verilog, &opts);
+    Analysis { diags, refs, parsed }
+}
+
+fn run(
+    sm: &mut SourceMap,
+    files: &[FileId],
+    preludes: &[(&str, &str)],
+    verilog: Option<&synth_verilog::ast::SourceText>,
+    opts: &Options,
+) -> (Option<synth_rtl::Module>, Diagnostics, Vec<Reference>, bool) {
     let std_id = sm.add("<weft std>", STD);
     let prelude_ids: Vec<FileId> =
         preludes.iter().map(|(n, t)| sm.add(format!("<{n}>"), *t)).collect();
@@ -67,12 +102,12 @@ pub fn compile(
         parsed.push((f, ast));
     }
     if diags.has_errors() {
-        return (None, diags);
+        return (None, diags, Vec::new(), false);
     }
     let refs: Vec<(FileId, &ast::File)> = parsed.iter().map(|(f, a)| (*f, a)).collect();
     let mut quiet = vec![std_id];
     quiet.extend(&prelude_ids);
-    let (m, d) = elab::elaborate(sm, &refs, &quiet, &prelude_ids, verilog, opts);
+    let (m, d, index) = elab::elaborate(sm, &refs, &quiet, &prelude_ids, verilog, opts);
     diags.extend(d);
-    (m, diags)
+    (m, diags, index, true)
 }

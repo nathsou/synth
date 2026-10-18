@@ -382,7 +382,7 @@ pub(crate) fn route_incremental(
         opts.present_factor = 5.0;
         opts.stall_iterations = 30;
     }
-    let t0 = std::time::Instant::now();
+    let t0 = synth_core::time::Instant::now();
     let trace = std::env::var("SYNTH_DEBUG").is_ok();
     let mut progress = |iter: usize, nets: usize, over: &[usize]| {
         if !trace {
