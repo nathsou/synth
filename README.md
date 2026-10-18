@@ -52,7 +52,8 @@ modules can be used from Weft through `extern module` declarations.
 types, ranges and clock domains, go to definition, references, rename,
 outline, completion and semantic highlighting. See [editor support](docs/EDITORS.md)
 for VS Code (an extension is in [`editors/vscode`](editors/vscode)), Neovim,
-Helix and Emacs.
+Helix and Emacs. `synth fmt` formats Weft sources (`--check` only reports the
+files that would change).
 
 ## Playground
 

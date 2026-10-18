@@ -233,6 +233,12 @@ functions; `CamelCase` for structs, enums and variants; `UPPER_CASE` for
 constants and value generics (extern modules keep their Verilog parameter
 names).
 
+**Layout.** `synth fmt` (and the language server's formatting) indents by four
+spaces per open bracket, with one more level for the continuation of a
+statement, and aligns the port names of a port list written one per line
+(`in  start: bool,` above `out tx: bool,`). It changes only layout, never the
+code on a line.
+
 **Scopes.** Items are visible everywhere. Module-level declarations (§7.3) are
 visible throughout their module body, before and after the declaration.
 Declarations inside a block (`let`, `var`, loop variables, and declarations
