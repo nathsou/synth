@@ -21,6 +21,7 @@ dependencies = [
  "synth-elab",
  "synth-logic",
  "synth-netlist",
+ "synth-route",
  "synth-rtl",
  "synth-verilog",
 ]

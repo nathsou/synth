@@ -1,8 +1,10 @@
-# Artix-7 native synthesis foundation
+# Native Artix-7 implementation status
 
-This change is a **draft foundation**, not the requested complete native
-Artix-7 flow. It cannot produce an Artix-7 bitstream, and it does not establish
-QoR parity with Yosys. The full native backend remains outstanding.
+The draft PR includes a native Rust path from Verilog through packing,
+placement, routing, FASM, and an uncompressed Artix-7 bitstream. It is
+**experimental, not at the iCE40 flow's maturity**. Hardware functionality,
+calibrated timing closure, and QoR parity with Yosys remain unproven. Missing
+timing characterization is reported and fails timing acceptance by default.
 
 ## Available functionality
 
@@ -13,7 +15,7 @@ target/release/synth synth design.v --top top --family artix7 --verilog mapped.v
 
 `xc7` aliases `artix7`; the default remains `ice40`. The existing Verilog
 frontend, defines, include paths, top parameters and `--rename` work with
-both synthesis families. Only the `synth` command accepts `--family`.
+both synthesis families. `build`, `pnr`, and `synth` accept `--family`.
 
 The new `arch-xc7` crate emits:
 
@@ -41,6 +43,100 @@ SAT-based don't-care optimization now live in `synth-logic::mapping`. Backends
 provide carry timing and emitted-netlist cost callbacks. The carry timing
 weights for Artix-7 are **mapping heuristics, not calibrated device delays**;
 the printed LUT-level delay is not an Fmax prediction.
+
+## Native physical flow
+
+```sh
+tools/fetch_xc7_db.sh /tmp/prjxray-db
+target/release/synth build design.v --top top --family artix7 \
+  --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
+  --xdc design.xdc --fasm design.fasm -o design.bit --timing-allow-fail
+# Also tested with --device xc7a100tcsg324-1.
+```
+
+The database is CC0 Project X-Ray data pinned to
+`0a0addedd73e7e4139d52a6d8db4258763e0f1f3`. The executable reads it directly;
+Python, Yosys, nextpnr and vendor executables are not runtime dependencies.
+`pnr mapped.il` accepts the same physical options. `.bit` outputs have a
+deterministic header; other output suffixes select the raw configuration stream.
+
+Implemented components:
+
+- Device frame geometry, package pins, site templates and tile connectivity.
+  Union-find collapses tile wires into routing nodes. Templates share pip
+  descriptions; the router uses a compact sparse graph. The 35T import has
+  2,092,063 nodes and about 21.4 million directed edges; the 100T import has
+  3,779,095 nodes and about 39.2 million edges. Import and routing currently
+  use hundreds of MB, not the roadmap's tens-of-MB target.
+- Four LUT6 and four primary FF slots per slice, common clock/enable/reset
+  legality, contiguous carry-chain macros, direct FF input bypasses, carry
+  output legalization, and RAMB18E1 TDP placement. The second FF bank, LUT5
+  sharing, RAMB36, DSP, SRL, LUTRAM and wide-mux packing are not implemented.
+- Deterministic seeded macro placement with HPWL annealing, RAM placement,
+  explicit package-pin placement, BUFG insertion and native PathFinder
+  routing. Only configuration-backed pips and explicitly modeled site
+  pass-throughs can be routed. Clock distribution enable bits are emitted.
+- An explicit XDC subset: `set_property` (including `-dict`), `get_ports`,
+  and `create_clock`. Every port needs PACKAGE_PIN and LVCMOS33. DRIVE, SLEW
+  and PULLTYPE are supported. Unknown commands/properties and nonexistent or
+  duplicate pins are errors. This does not execute Tcl or support complete
+  vendor board constraint files, generated clocks or I/O timing constraints.
+- Native FASM scalar/vector parsing and assembly, alias offsets, negative
+  configuration bits and conflict detection. Frames include ECC, CRC checks,
+  startup packets and row padding. `pack-fasm` assembles FASM;
+  `unpack-xc7` reads full uncompressed streams and checks part ID, frame
+  boundaries, ECC and CRC. It exports frames, not a reverse-mapped FASM file.
+- An SDF reader preserving propagation, interconnect, device, setup/hold and
+  recovery/removal records. The coverage audit reports missing routed pip
+  delays. This is **not STA**: speed-grade models, distributed wire RC,
+  setup/hold analysis and timing-driven repair still need integration.
+
+The 35T uses X-Ray's shared 50T fabric, as the reference tools do. The data
+has no separate 35T disabled-site mask; utilization limits and site legality
+at device capacity have not been independently validated. 50T/200T geometry
+is recognized but has not passed the physical regression suite. Incremental
+checkpoints, calibrated Fmax, PLL/MMCM and advanced I/O are not implemented.
+
+`--timing-allow-fail` is an explicit bring-up override. Without it, a build
+writes its diagnostic bitstream and exits unsuccessfully; it never reports
+uncertified timing as passing.
+
+## Independent physical validation
+
+```sh
+tools/prepare_xc7_oracle.sh /tmp/xc7-oracle
+/tmp/xc7-oracle/venv/bin/python tools/ci_artix7_physical.py \
+  --db /tmp/prjxray-db/artix7 --xray /tmp/xc7-oracle/prjxray \
+  --xray-tools /tmp/xc7-oracle/build/tools \
+  --euler --full-luts --out /tmp/xc7-physical
+```
+
+The oracle setup needs Git, a C++ compiler, CMake and Python with venv.
+Project X-Ray is pinned to `c9f02d8576042325425824647ab5555b1bc77833`;
+Python dependencies are pinned in `tools/xc7-test-requirements.txt`.
+These are test dependencies only. See [THIRD_PARTY.md](../THIRD_PARTY.md).
+
+The suite implements an inverter, clocked counter, mixed reset/enable/clock
+edge registers, initialized block RAM, single-site boundary I/O, and optionally
+Euler 31 on both 35T and 100T. For each routed design, independent X-Ray FASM
+assembly must match every native configuration frame. X-Ray's C++ packet
+writer generates a second bitstream, and its C++ decoder must recover the
+same bits, including ECC, from both streams. Counter builds also check
+byte-for-byte repeatability and the timing-failure gate. `--full-luts`
+randomizes every LUT INIT in the fabric to exercise configuration addressing.
+Sources, XDC, FASM, bitstreams, frames and reports are retained. The latest
+local [physical validation report](ARTIX7_PHYSICAL.json) records 14 passing
+checks, source/constraint hashes and independent tool revisions. The updated
+workspace passes 117 tests, warnings-denied Clippy and Rust 1.88 checks.
+
+A 35T full-fabric run covered 1,044,018 enabled LUT INIT bits and all 5,408
+frames. The raw native startup/frame stream with CRC packets disabled also
+matched `xc7frames2bit` byte-for-byte after synchronization. The regular
+suite uses CRC-enabled native streams. These checks establish configuration
+encoding agreement, **not functional correctness of the placed circuit**.
+There has been no hardware execution or independent vendor timing validation;
+No Vivado installer or validation runner was available in the development
+environment. The CI job retains the generated artifacts for further validation.
 
 ## Validation
 
@@ -118,22 +214,22 @@ python3 tools/qor_artix7.py --out /tmp/xc7-qor \
   --design 57 --design 58 --design 92 --design 97
 ```
 
-Local verification passed: formatting, Clippy with warnings denied, 107 workspace tests, Rust 1.88 compatibility, all default Artix-7 formal/differential checks, and byte-identical iCE40 netlist emission against `a1f312d` for Euler 25, 31 and 97. No Artix-7 hardware or bitstream validation has been performed.
+The synthesis foundation passed formatting, Clippy with warnings denied, 107 workspace tests, Rust 1.88 compatibility, the default Artix-7 formal/differential checks, and byte-identical iCE40 netlist emission against `a1f312d` for Euler 25, 31 and 97. Physical-flow validation is described separately above; these synthesis resource counts do not include packing legalization.
 
-## Remaining requirements for full native support
+## Remaining requirements for iCE40 maturity and requested QoR
 
-- Import and validate an Artix-7 device/routing database (including site routing,
-  package pins and speed-grade timing), starting with XC7A35T and XC7A100T.
-- Implement packing and legality for slices, carry chains, control sets, RAMs,
-  DSPs, clock networks and I/O banks; add XDC constraints.
-- Implement placement, routing, calibrated setup/hold timing and timing repair
-  for that database, with deterministic reproducibility and capacity checks.
-- Generate configuration frames, ECC/CRC and startup packets; independently
-  round-trip the resulting bitstreams and run them on reference hardware.
-- Add DSP, LUTRAM, SRL and wide-mux mapping and close the measured synthesis
-  gaps, then compare complete flows using the same constraints, parts and
-  independent timing analysis.
+- Complete and independently calibrate timing analysis, including the BRAM
+  pip types lacking characterization in the upstream data, wire RC and clock
+  skew. Implement timing-driven placement/routing and hold repair.
+- Validate physical behavior from bitstream readback simulation and reference
+  hardware, with a SoC and realistic clock/I/O constraints. Frame agreement
+  alone cannot establish that the configured circuit implements the RTL.
+- Complete primitive/constraint coverage, device-capacity legality, compact
+  database storage and incremental checkpoints.
+- Close the measured synthesis regressions, including DSP/LUTRAM/SRL mapping,
+  then compare matched physical flows and constraints against Yosys plus a
+  reference backend. The present measurements do not meet QoR parity.
 
-These are pending work, not enabled by the new synthesis CLI option. The
-project's [Phase 2 roadmap](ROADMAP.md#phase-2-artix-7) describes the intended
-native backend and hardware exit criteria.
+The [Phase 2 roadmap](ROADMAP.md#phase-2-artix-7) specifies further scaling,
+SoC and hardware exit criteria. This PR must remain a draft until its stated
+acceptance criteria are met.

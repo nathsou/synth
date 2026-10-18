@@ -126,3 +126,50 @@ fn async_memory_does_not_absorb_an_address_register_on_another_clock() {
     assert_eq!(synth_rtl::mem::merge_read_ffs(&mut m), 0);
     assert!(m.memories.iter().flat_map(|mem| &mem.reads).all(|rd| rd.clk.is_none()));
 }
+
+#[test]
+fn packing_preserves_carry_arithmetic_and_lut_semantics() {
+    for width in [3, 4, 5, 8, 9, 17] {
+        let src = format!(
+            "module top(input [{}:0] a,b, input cin, output [{}:0] sum, output [{}:0] diff, output lt); assign sum={{1'b0,a}}+{{1'b0,b}}+cin; assign diff=a-b; assign lt=a<b; endmodule",
+            width - 1,
+            width,
+            width - 1
+        );
+        let mut nl = synth(&src);
+        let packed = arch_xc7::pack::pack(&mut nl).unwrap();
+        assert!(packed.chains.iter().all(|c| !c.is_empty()));
+        let mask = (1u64 << width) - 1;
+        for i in 0..512u64 {
+            let a = (i.wrapping_mul(193) ^ (i << 12)) & mask;
+            let b = (i.wrapping_mul(73) ^ (i << 7)) & mask;
+            let out = evaluate(&nl, &[("a", a), ("b", b), ("cin", i & 1)]);
+            assert_eq!(out["sum"], a + b + (i & 1));
+            assert_eq!(out["diff"], a.wrapping_sub(b) & mask);
+            assert_eq!(out["lt"], u64::from(a < b));
+        }
+    }
+}
+
+#[test]
+fn packing_enforces_shared_control_sets() {
+    let mut nl = synth(
+        "module top(input aclk,bclk,en,rst,input [7:0] d,output reg [7:0] a,b,c); always @(posedge aclk) if(en) a<=d; always @(negedge aclk) if(rst)b<=0;else b<=d; always @(posedge bclk or posedge rst) if(rst)c<=0;else c<=d; endmodule",
+    );
+    let p = arch_xc7::pack::pack(&mut nl).unwrap();
+    // Twenty-four direct-data registers use six slices and only the two
+    // shared constant LUTs. AX-DX bypasses must not allocate data-buffer LUTs.
+    assert_eq!(p.slices.len(), 6);
+    assert_eq!(nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count(), 2);
+    for slice in &p.slices {
+        for ff in slice.ffs.iter().flatten() {
+            let ctrl = slice.controls.as_ref().unwrap();
+            assert_eq!(nl.pin_net(*ff, "C"), Some(ctrl.clock));
+            assert_eq!(
+                nl.param(*ff, "IS_C_INVERTED").and_then(Param::as_u64).unwrap_or(0) != 0,
+                ctrl.inverted
+            );
+            assert_eq!(matches!(nl.cell_kind(*ff), "FDRE" | "FDSE"), ctrl.synchronous);
+        }
+    }
+}

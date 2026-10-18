@@ -147,23 +147,28 @@ on every design, and the processors and four of the nine solvers end up with
 a higher Fmax, Euler 48 level with nextpnr; Euler 14, 25, 43 and 57 still
 trail by 4 to 7%.
 
-### Experimental Artix-7 synthesis
+### Experimental native Artix-7 flow
 
-The native synthesis foundation can emit Xilinx 7-series primitives:
+The Rust backend supports synthesis, slice/carry/RAM packing, placement,
+routing and configuration-frame generation:
 
 ```sh
-target/release/synth synth design.v --top top --family artix7 --verilog mapped.v
+tools/fetch_xc7_db.sh /tmp/prjxray-db
+target/release/synth build design.v --top top --family artix7 \
+  --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
+  --xdc design.xdc -o design.bit --timing-allow-fail
 ```
 
-`--family xc7` is an alias; omitting `--family` keeps iCE40. The Artix-7
-path maps LUT1–LUT6, CARRY4, flip-flops and synchronous block RAMs entirely
-in Rust, with no external tools at runtime.
+`--family xc7` is an alias; omitting `--family` keeps iCE40. `synth` can emit
+mapped Verilog, and `pnr` accepts mapped RTLIL. External tools are used only
+for independent tests; the runtime reads the pinned CC0 device database.
 
-**This is not full Artix-7 support.** Native packing, placement, routing,
-constraints, timing analysis and bitstream generation are not implemented;
-`build` and `pnr` still target iCE40. DSP, LUTRAM, SRL and wide-mux inference
-also remain to be implemented. Yosys QoR parity has not been achieved.
-See [the Artix-7 status and validation report](docs/ARTIX7.md).
+**Artix-7 has not reached iCE40 maturity or Yosys QoR parity.** Physical tests
+compare native frames/packets against Project X-Ray on 35T and 100T, but
+hardware behavior and timing closure remain unvalidated. Builds require the
+explicit timing override. DSP, LUTRAM, SRL, advanced clocks/I/O and incremental
+checkpoints remain unsupported. See [the detailed status and validation
+report](docs/ARTIX7.md) for the supported XDC subset and remaining criteria.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.

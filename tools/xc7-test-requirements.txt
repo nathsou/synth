@@ -1,0 +1,8 @@
+# Independent test oracles only; synth has no Python runtime dependency.
+fasm==0.0.2.post88
+PyYAML==6.0.3
+simplejson==4.2.0
+intervaltree==3.2.1
+sortedcontainers==2.4.0
+textX==4.4.0
+Arpeggio==2.0.3

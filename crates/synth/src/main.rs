@@ -1,6 +1,7 @@
 //! The `synth` command-line tool.
 
 mod args;
+mod xc7;
 
 use std::process::ExitCode;
 
@@ -14,10 +15,12 @@ USAGE:
 
 COMMANDS:
     check      Parse Verilog files and report errors
-    build      Synthesise, place and route Verilog into an iCE40 bitstream
+    build      Synthesise, place and route Verilog into a bitstream
     synth      Synthesise Verilog to iCE40 or Artix-7 primitives (--verilog <out.v>)
     elab       Elaborate Verilog into RTL (--verilog <out.v> to write it back)
-    pnr        Place and route a mapped netlist (RTLIL) for iCE40
+    pnr        Place and route a mapped netlist (RTLIL)
+    pack-fasm  Assemble Artix-7 FASM into a bitstream
+    unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     help       Print this message
@@ -45,7 +48,17 @@ SYNTH OPTIONS:
     synth synth <files.v...> [--family <ice40|artix7|xc7>] [--top <module>]
               [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--verilog <out.v>] [--rename <module>]
-              Artix-7 synthesis only; native PnR and bitstream are not implemented.
+
+ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
+    synth build <files.v...> --family artix7 --top <module>
+              --device <xc7a35tftg256-1|xc7a100tcsg324-1|...>
+              --db <prjxray-db/artix7> --xdc <file> [-o <out.bit>]
+              [--fasm <out.fasm>] [--seed <n>] [--effort <n>] --timing-allow-fail
+              pnr accepts the same physical options with a mapped RTLIL input.
+              Native Rust packing, placement, routing and frame generation.
+              Timing closure is not certified; --timing-allow-fail is required.
+    synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
+    synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -75,6 +88,8 @@ fn main() -> ExitCode {
         Some("build") => cmd_build(&argv[1..]),
         Some("synth") => cmd_synth(&argv[1..]),
         Some("pnr") => cmd_pnr(&argv[1..]),
+        Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
+        Some("unpack-xc7") => xc7::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -181,6 +196,10 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "-P",
             "--top",
             "--device",
+            "--family",
+            "--db",
+            "--xdc",
+            "--fasm",
             "--package",
             "--pcf",
             "-o",
@@ -195,6 +214,20 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         &["--timing-allow-fail"],
         &["--incremental"],
     )?;
+    if let Some(f) = a.value("--family")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+    {
+        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+    }
+    if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
+        let nl = synthesize(&mut a)?;
+        return xc7::finish(nl, &mut a);
+    }
+    for option in ["--db", "--xdc", "--fasm"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family artix7"));
+        }
+    }
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
     let pcf = match a.value("--pcf") {
@@ -232,6 +265,10 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         argv,
         &[
             "--device",
+            "--family",
+            "--db",
+            "--xdc",
+            "--fasm",
             "--package",
             "--pcf",
             "-o",
@@ -247,6 +284,21 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         &["--incremental"],
     )?;
     let input = a.positional(0, "netlist")?;
+    if let Some(f) = a.value("--family")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+    {
+        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+    }
+    if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
+        let design = synth_rtlil::parse(&read(&input)?).map_err(|e| e.to_string())?;
+        let nl = synth_rtlil::to_netlist(&design, &xc7::Library)?;
+        return xc7::finish(nl, &mut a);
+    }
+    for option in ["--db", "--xdc", "--fasm"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family artix7"));
+        }
+    }
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
     let pcf = match a.value("--pcf") {

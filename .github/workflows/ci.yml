@@ -126,3 +126,35 @@ jobs:
         with:
           name: artix7-validation
           path: ${{ runner.temp }}/artix7-validation
+
+  artix7-physical:
+    name: Artix-7 native frames and routing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and reference build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ python3-venv
+      - name: Fetch pinned device data and build independent oracles
+        run: |
+          tools/fetch_xc7_db.sh "$RUNNER_TEMP/prjxray-db"
+          tools/prepare_xc7_oracle.sh "$RUNNER_TEMP/xc7-oracle"
+      - name: Build native tool
+        run: cargo build --release -p synth
+      - name: Verify routed frames, packets, ECC and reproducibility
+        run: |
+          "$RUNNER_TEMP/xc7-oracle/venv/bin/python" tools/ci_artix7_physical.py \
+            --db "$RUNNER_TEMP/prjxray-db/artix7" \
+            --xray "$RUNNER_TEMP/xc7-oracle/prjxray" \
+            --xray-tools "$RUNNER_TEMP/xc7-oracle/build/tools" \
+            --euler --full-luts --out "$RUNNER_TEMP/artix7-physical"
+      - name: Retain physical verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artix7-physical
+          path: ${{ runner.temp }}/artix7-physical
