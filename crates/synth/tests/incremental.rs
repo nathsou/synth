@@ -72,4 +72,9 @@ fn checkpoint_lifecycle() {
     run(&["--incremental", "--seed", "3"]);
     assert_eq!(checkpoint_paths().len(), 2);
     assert!(run(&["--incremental=", "--seed", "3"]).contains("incremental routing: reused"));
+    run(&["--incremental", "--carry-min-width", "8"]);
+    assert_eq!(checkpoint_paths().len(), 3);
+    assert!(
+        run(&["--incremental", "--carry-min-width", "8"]).contains("incremental routing: reused")
+    );
 }

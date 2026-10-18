@@ -48,6 +48,16 @@ target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf
 See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
 modules can be used from Weft through `extern module` declarations.
 
+## Carry mapping
+
+`--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum
+adder width that uses a hard carry chain (default: 3). Variable comparators use
+a threshold two bits higher. For example, `--carry-min-width 8` leaves short
+arithmetic in LUT logic, which can reduce carry feed-in cells and improve timing
+on designs with many small adders. Compare routed timing and packed cell counts
+for your design; a higher threshold is not always better. Automatic incremental
+checkpoints distinguish explicit carry thresholds.
+
 ## Incremental builds
 
 Add `--incremental` to reuse the previous placement and routing after edits:
