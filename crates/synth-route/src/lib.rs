@@ -162,6 +162,9 @@ struct State {
     tree_gen: u32,
     /// Reverse edge lookup: source node of each edge.
     edge_src: Vec<u32>,
+    /// Nodes all of whose paths stay at their position (like the inputs of
+    /// a logic block): useless for reaching a sink anywhere else.
+    confined: Vec<bool>,
 }
 
 /// Routes `nets` on `graph`. Returns one route per net.
@@ -234,6 +237,7 @@ pub fn route_with(
         looped = dst;
         Graph { edge_dst: &looped, ..graph }
     };
+    let confined = confined_nodes(&graph, &edge_src);
     let mut st = State {
         occupancy: vec![0; n],
         history: vec![0.0; n],
@@ -244,6 +248,7 @@ pub fn route_with(
         in_tree: vec![0; n],
         tree_gen: 0,
         edge_src,
+        confined,
     };
     let mut routes: Vec<NetRoute> = vec![NetRoute::default(); nets.len()];
     let mut pres_fac = opts.present_factor;
@@ -417,6 +422,46 @@ pub struct RouteStats {
     pub wire_nodes: usize,
 }
 
+/// Nodes from which every path stays at the node's position.
+fn confined_nodes(graph: &Graph<'_>, edge_src: &[u32]) -> Vec<bool> {
+    let n = graph.num_nodes();
+    let pos = |k: usize| (graph.node_x[k], graph.node_y[k]);
+    // Nodes reaching another position, found backwards from the edges
+    // leaving their position.
+    let mut confined = vec![true; n];
+    let mut stack = Vec::new();
+    for (e, &d) in graph.edge_dst.iter().enumerate() {
+        let s = edge_src[e] as usize;
+        if pos(s) != pos(d as usize) && confined[s] {
+            confined[s] = false;
+            stack.push(s);
+        }
+    }
+    let mut preds = vec![0u32; n + 1];
+    for &d in graph.edge_dst {
+        preds[d as usize + 1] += 1;
+    }
+    for k in 0..n {
+        preds[k + 1] += preds[k];
+    }
+    let mut fill = preds.clone();
+    let mut pred_edges = vec![0u32; graph.edge_dst.len()];
+    for (e, &d) in graph.edge_dst.iter().enumerate() {
+        pred_edges[fill[d as usize] as usize] = e as u32;
+        fill[d as usize] += 1;
+    }
+    while let Some(k) = stack.pop() {
+        for &e in &pred_edges[preds[k] as usize..preds[k + 1] as usize] {
+            let s = edge_src[e as usize] as usize;
+            if confined[s] {
+                confined[s] = false;
+                stack.push(s);
+            }
+        }
+    }
+    confined
+}
+
 #[allow(clippy::too_many_arguments)]
 fn route_net(
     graph: &Graph<'_>,
@@ -502,7 +547,13 @@ fn route_net(
                         continue;
                     }
                     let (nx, ny) = (graph.node_x[du], graph.node_y[du]);
-                    if d != sink && (nx < bx0 || nx > bx1 || ny < by0 || ny > by1) {
+                    if d != sink
+                        && (nx < bx0
+                            || nx > bx1
+                            || ny < by0
+                            || ny > by1
+                            || st.confined[du] && (nx, ny) != (tx, ty))
+                    {
                         continue;
                     }
                     let occ = st.occupancy[du] as f32;
@@ -698,5 +749,24 @@ mod tests {
         let (routes, _) = route(g, &nets, &opts).unwrap();
         let uses = |i: usize, node: u32| routes[i].edges.iter().any(|&e| d[e as usize] == node);
         assert!(uses(3, r1) && uses(2, s3));
+    }
+
+    #[test]
+    fn confined_nodes_lead_nowhere_else() {
+        // 0 at (0, 0) feeds wire 1 at (1, 0), which feeds the input 2 of a
+        // block there (and its logical input 3) or goes on to 4 at (2, 0).
+        let (o, d, dl, _, _, c) = edge_graph(5, &[(0, 1), (1, 2), (2, 3), (3, 2), (1, 4)]);
+        let (x, y) = (vec![0, 1, 1, 1, 2], vec![0; 5]);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &x,
+            node_y: &y,
+            node_cost: &c,
+        };
+        let src: Vec<u32> =
+            (0..5u32).flat_map(|k| (o[k as usize]..o[k as usize + 1]).map(move |_| k)).collect();
+        assert_eq!(confined_nodes(&g, &src), [false, false, true, true, true]);
     }
 }
