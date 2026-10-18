@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// Echoes every byte received on the Go Board's USB UART, through a FIFO.
+// Pressing SW1 resets the design. LED1 shows the FIFO holding data; the
+// other LEDs show the low bits of the last byte. Build with uart.weft.
+
+/// CLKS_PER_BIT: 25 MHz / 115200.
+module top<CLKS_PER_BIT: int = 217>(in clk: clock, in rx: bool, in sw1: bool, out tx: bool, out led: uint<4>) {
+    let rst = reset_sync(sw1) @clk;
+    default domain sys { clock: clk, async_reset: rst }
+
+    inst rx_u = uart_rx<CLKS_PER_BIT: CLKS_PER_BIT>(rx: rx);
+    inst queue = fifo<T: uint<8>, DEPTH: 64>(push: rx_u.valid, data: rx_u.byte);
+    inst tx_u = uart_tx<CLKS_PER_BIT: CLKS_PER_BIT>();
+
+    // `pop` asks for the next byte; it is on `queue.head` one cycle later.
+    reg loaded: bool = false;
+    queue.pop = !queue.empty && !tx_u.busy && !loaded;
+    loaded := queue.pop;
+    tx_u.start = loaded;
+    tx_u.byte = queue.head;
+
+    reg last: uint<3> = 0;
+    if rx_u.valid { last := rx_u.byte[2:0]; }
+
+    tx = tx_u.tx;
+    led = concat(last, !queue.empty);
+}

@@ -1,0 +1,20 @@
+[package]
+name = "synth-weft"
+description = "Weft, a hardware description language compiled straight to the RTL IR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-rtl.workspace = true
+synth-verilog.workspace = true
+synth-elab.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]

@@ -1,6 +1,6 @@
 # 0003: Input formats
 
-Status: Accepted
+Status: Accepted (extended by [0006](0006-native-hdl.md))
 
 ## Context
 

@@ -13,18 +13,22 @@ USAGE:
     synth <COMMAND> [OPTIONS]
 
 COMMANDS:
-    check      Parse Verilog files and report errors
-    build      Synthesise, place and route Verilog into an iCE40 bitstream
-    synth      Synthesise Verilog to iCE40 primitives (--verilog <out.v>)
-    elab       Elaborate Verilog into RTL (--verilog <out.v> to write it back)
+    check      Check Verilog or Weft sources and report errors
+    build      Synthesise, place and route a design into an iCE40 bitstream
+    synth      Synthesise a design to iCE40 primitives (--verilog <out.v>)
+    elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     help       Print this message
     version    Print version information
 
+INPUTS:
+    Verilog-2005 (`.v`) or Weft (`.weft`, see docs/WEFT.md). Verilog files
+    given with Weft sources define the Weft design's extern modules.
+
 BUILD OPTIONS:
-    synth build <files.v...> --device <hx1k|hx8k|...> --package <pkg>
+    synth build <files.v|.weft...> --device <hx1k|hx8k|...> --package <pkg>
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
@@ -98,17 +102,10 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
     }
 }
 
-/// Elaborates and synthesises the Verilog named by `a` for iCE40.
+/// Elaborates and synthesises the design named by `a` for iCE40.
 fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
-    let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
     let t = std::time::Instant::now();
-    let (sm, src) = load_verilog(a)?;
-    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
-    let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
-    if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
-    }
-    let m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
+    let m = load_rtl(a)?;
     eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
     let (nl, log) = arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
     for l in &log {
@@ -386,6 +383,85 @@ fn cmd_unpack(argv: &[String]) -> Result<(), String> {
     write(&output, arch_ice40::asc::write_asc(&cfg).as_bytes())
 }
 
+/// The input files given on the command line.
+fn input_files(a: &Args) -> Vec<String> {
+    (0..).map_while(|i| a.positional(i, "file").ok()).collect()
+}
+
+fn is_weft(path: &str) -> bool {
+    path.ends_with(".weft")
+}
+
+/// Elaborates the design given on the command line, Verilog or Weft, into
+/// RTL. Weft sources may be mixed with Verilog files that define their
+/// extern modules.
+fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
+    let paths = input_files(a);
+    if !paths.iter().any(|p| is_weft(p)) {
+        let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
+        let (sm, src) = load_verilog(a)?;
+        let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
+        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+        if !diags.items.is_empty() {
+            eprint!("{}", diags.render(&sm));
+        }
+        return m.ok_or_else(|| format!("{} error(s)", diags.error_count()));
+    }
+    let mut params = Vec::new();
+    for p in a.values("-P") {
+        let (k, v) = p.split_once('=').ok_or_else(|| format!("expected NAME=VALUE, got `{p}`"))?;
+        params.push((k.to_string(), v.to_string()));
+    }
+    let mut sm = synth_core::SourceMap::new();
+    let mut weft = Vec::new();
+    let mut verilog = Vec::new();
+    for p in &paths {
+        let id = sm.add(p.clone(), read(p)?);
+        if is_weft(p) { weft.push(id) } else { verilog.push(id) }
+    }
+    let src = if verilog.is_empty() {
+        None
+    } else {
+        let (src, diags) = synth_verilog::parse_files(&mut sm, &verilog, &preproc_options(a));
+        if !diags.items.is_empty() {
+            eprint!("{}", diags.render(&sm));
+        }
+        if diags.has_errors() {
+            return Err(format!("{} error(s)", diags.error_count()));
+        }
+        Some(src)
+    };
+    let opts = synth_weft::Options { top: a.value("--top"), params };
+    let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
+    let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
+    if !diags.items.is_empty() {
+        eprint!("{}", diags.render(&sm));
+    }
+    let warnings =
+        diags.items.iter().filter(|d| d.severity == synth_core::Severity::Warning).count();
+    match m {
+        Some(m) => {
+            if warnings > 0 {
+                eprintln!("info: {warnings} warning(s)");
+            }
+            Ok(m)
+        }
+        None => Err(format!("{} error(s), {warnings} warning(s)", diags.error_count())),
+    }
+}
+
+fn preproc_options(a: &mut Args) -> synth_verilog::PreprocOptions {
+    let mut opts = synth_verilog::PreprocOptions::default();
+    for i in a.values("-I") {
+        opts.include_dirs.push(i.into());
+    }
+    for d in a.values("-D") {
+        let (k, v) = d.split_once('=').unwrap_or((&d, "1"));
+        opts.defines.push((k.to_string(), v.to_string()));
+    }
+    opts
+}
+
 /// Parses Verilog sources given on the command line (`-I dir`, `-D name=value`).
 fn load_verilog(
     a: &mut Args,
@@ -506,7 +582,12 @@ fn parse_param(p: &str) -> Result<(String, synth_core::LogicVec), String> {
 }
 
 fn cmd_check(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["-I", "-D"], &[])?;
+    let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top"], &[])?;
+    if input_files(&a).iter().any(|p| is_weft(p)) {
+        let m = load_rtl(&mut a)?;
+        eprintln!("info: `{}` checked: no errors", m.name);
+        return Ok(());
+    }
     let (_, src) = load_verilog(&mut a)?;
     eprintln!("info: parsed {} module(s)", src.modules.len());
     Ok(())
@@ -516,14 +597,7 @@ fn cmd_elab(argv: &[String]) -> Result<(), String> {
     let mut a =
         Args::parse(argv, &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--pass"], &[])?;
     let passes = a.values("--pass");
-    let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
-    let (sm, src) = load_verilog(&mut a)?;
-    let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
-    let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
-    if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
-    }
-    let mut m = m.ok_or_else(|| format!("{} error(s)", diags.error_count()))?;
+    let mut m = load_rtl(&mut a)?;
     for p in &passes {
         run_rtl_pass(&mut m, p)?;
     }

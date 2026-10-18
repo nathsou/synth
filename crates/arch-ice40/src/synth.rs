@@ -73,6 +73,8 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         opt::clean(&mut m)?;
     }
     mem::merge_write_ports(&mut m);
+    // Dead logic left by control extraction would count as extra readers.
+    opt::clean(&mut m)?;
     let n = mem::merge_read_ffs(&mut m);
     if n > 0 {
         log.push(format!("{n} memory read ports made synchronous"));

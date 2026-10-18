@@ -1,0 +1,79 @@
+// The Weft standard library.
+
+/// Two-flip-flop synchronizer for a single asynchronous bit. The output
+/// follows the input after STAGES or STAGES + 1 clock cycles.
+module sync<STAGES: int = 2>(in x: bool @async, out y: bool) {
+    assert(STAGES >= 2, "a synchronizer needs at least two stages");
+    #[async_reg] reg s: uint<STAGES> init 0;
+    s := concat(s[STAGES - 2:0], unsafe_cross(x));
+    y = s[STAGES - 1];
+}
+
+/// A reset that asserts as soon as `x` is high and releases synchronously,
+/// STAGES cycles after `x` falls.
+module reset_sync<STAGES: int = 2>(in x: bool @async, out rst: bool) {
+    assert(STAGES >= 2, "a reset synchronizer needs at least two stages");
+    domain r { clock: default.clock, async_reset: unsafe_cross(x) }
+    #[async_reg] reg s: uint<STAGES> @r = 2 ** STAGES - 1;
+    s := concat(s[STAGES - 2:0], false);
+    rst = s[STAGES - 1];
+}
+
+/// High for the first CYCLES cycles after configuration.
+module power_on_reset<CYCLES: int = 16>(out rst: bool) {
+    assert(CYCLES >= 1, "the reset lasts at least one cycle");
+    reg count: uint<bits_for(CYCLES)> init 0;
+    rst = count != CYCLES;
+    if rst { count := count +% 1; }
+}
+
+/// One-cycle pulse when `x` goes from low to high.
+module rising(in x: bool, out y: bool) {
+    reg prev: bool init false;
+    prev := x;
+    y = x && !prev;
+}
+
+/// One-cycle pulse when `x` goes from high to low.
+module falling(in x: bool, out y: bool) {
+    reg prev: bool init false;
+    prev := x;
+    y = !x && prev;
+}
+
+/// Pulses `tick` once every N cycles.
+module divider<N: int>(out tick: bool) {
+    assert(N >= 1, "the period is at least one cycle");
+    reg count: index<N> = 0;
+    count := count +% 1;
+    tick = count == N - 1;
+}
+
+/// The number of set bits.
+fn count_ones<N: int>(x: uint<N>) -> uint<bits_for(N)> {
+    var n: uint<bits_for(N)> = 0;
+    for i in 0..N {
+        if x[i] { n = n +% 1; }
+    }
+    n
+}
+
+/// The position of the set bit of a one-hot value (the highest one if
+/// several are set, 0 if none).
+fn onehot_to_index<N: int>(x: uint<N>) -> index<N> {
+    var r: index<N> = 0;
+    for i in 0..N {
+        if x[i] { r = i; }
+    }
+    r
+}
+
+/// The position of the lowest set bit (0 if none).
+fn priority<N: int>(x: uint<N>) -> index<N> {
+    var r: index<N> = 0;
+    for k in 0..N {
+        let i = N - 1 - k;
+        if x[i] { r = i; }
+    }
+    r
+}

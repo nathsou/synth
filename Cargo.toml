@@ -21,6 +21,7 @@ synth-rtl = { path = "crates/synth-rtl" }
 synth-rtlil = { path = "crates/synth-rtlil" }
 synth-route = { path = "crates/synth-route" }
 synth-verilog = { path = "crates/synth-verilog" }
+synth-weft = { path = "crates/synth-weft" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

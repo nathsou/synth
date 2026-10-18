@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// A port of tests/designs/blinky_ram: counter-driven LEDs through an
+// initialized, writable block RAM.
+//
+// The Verilog original feeds the asynchronous button straight into logic,
+// which Weft rejects. To stay equivalent to it, this port declares the
+// button synchronous to the clock (`@clk`); a real design would write
+// `let b = sync(btn);` instead.
+
+module top(in clk: clock, in btn: bool @clk, out led: uint<8>, out tx: bool) {
+    reg cnt: uint<24> init 0;
+    mem ram: [uint<8>; 512] init ram_contents();
+    reg q: uint<8> init 0;
+
+    cnt := cnt +% (if btn { 2 } else { 1 });
+    q := ram[cnt[23:15]];
+    if btn { ram[cnt[8:0]] := cnt[16:9]; }
+    led = q ^ cnt[23:16];
+    tx = cnt.parity();
+}
+
+fn ram_contents() -> [uint<8>; 512] {
+    var t: [uint<8>; 512] = [0; 512];
+    for i in 0..512 { t[i] = (i * 7 + 3) % 256; }
+    t
+}

@@ -12,6 +12,8 @@ cargo build --release
 export PATH=$PWD/target/release:$PATH
 ```
 
+Designs written in Weft, synth's own HDL, are in [`weft/`](weft/).
+
 Each example's bitstream is also checked in CI by simulating the decoded
 bitstream against the RTL (`tools/ci_bitsim.sh`).
 
