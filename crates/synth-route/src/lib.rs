@@ -78,6 +78,10 @@ pub struct RouteOptions {
     /// Extra tiles around a net's bounding box that searches may use (it
     /// grows for nets that stay on congested nodes).
     pub bbox_margin: i16,
+    /// Bound each connection's search by its source and sink alone, plus
+    /// the margin, rather than by the whole net (as nextpnr's router2):
+    /// sinks of nets spanning the device then search near their own path.
+    pub arc_bounding_boxes: bool,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
     /// Iterations between criticality updates while congested (0: never).
@@ -106,6 +110,7 @@ impl Default for RouteOptions {
             lookahead_weight: 1.2,
             delay_scale: 0.001,
             bbox_margin: 3,
+            arc_bounding_boxes: false,
             stall_iterations: 120,
             retime_every: 0,
             reroute_criticality: 0.95,
@@ -1026,19 +1031,29 @@ fn route_net(
                 d * ((1.0 - crit) * opts.astar_cost_per_tile
                     + crit * opts.astar_delay_per_tile * opts.delay_scale)
             };
+            // The search box: the net's, or the connection's alone.
+            let (ax0, ay0, ax1, ay1) = if opts.arc_bounding_boxes {
+                (sx.min(tx), sy.min(ty), sx.max(tx), sy.max(ty))
+            } else {
+                (x0, y0, x1, y1)
+            };
+            let (mut bx0, mut by0, mut bx1, mut by1) =
+                (ax0 - margin, ay0 - margin, ax1 + margin, ay1 + margin);
+            if let Some(c) = clip {
+                (bx0, by0, bx1, by1) = (bx0.max(c.x0), by0.max(c.y0), bx1.min(c.x1), by1.min(c.y1));
+            }
+            let inside = |h: &Hot| h.x >= bx0 && h.x <= bx1 && h.y >= by0 && h.y <= by1;
             // A critical sink pays for the delay from the source to where
             // it joins the tree, so that it does not join at the end of a
             // long branch.
             for &t in &tree_nodes {
+                if t != net.source && !inside(&st.hot[t as usize]) {
+                    continue;
+                }
                 let g = crit * sc.tree_delay[t as usize] * opts.delay_scale;
                 let v = &mut sc.visit[t as usize];
                 (v.best, v.via, v.stamp) = (g, u32::MAX, search_gen);
                 heap.push(QueueEntry { f: g + est(&st.hot[t as usize]), g, node: t });
-            }
-            let (mut bx0, mut by0, mut bx1, mut by1) =
-                (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
-            if let Some(c) = clip {
-                (bx0, by0, bx1, by1) = (bx0.max(c.x0), by0.max(c.y0), bx1.min(c.x1), by1.min(c.y1));
             }
             let mut found = false;
             while let Some(QueueEntry { g, node, .. }) = heap.pop() {

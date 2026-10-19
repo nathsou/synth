@@ -86,11 +86,13 @@ pub fn implement(
         // remaining cost far better than a cost per tile.
         lookahead_radius: 30,
         bbox_margin: 5,
-        // One round of rerouting critical nets: a second rarely helps.
-        timing_rounds: 1,
+        arc_bounding_boxes: true,
         max_iterations: 100,
         stall_iterations: 30,
-        retime_every: 4,
+        // Criticalities follow the routes every other iteration; rerouting
+        // critical nets again after a legal routing gains about 1% for
+        // nearly twice the time, so routing stops at the first.
+        retime_every: 2,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
