@@ -8,6 +8,8 @@ nextpnr-xilinx, and Yosys's netlist through synth's native place and route
 way: occupied slices, LUT sites and flip-flops, block RAMs, DSPs and routing
 pips. Each flow's timing estimate is recorded: nextpnr's, and synth's from
 the same routing delay model; neither is calibrated against vendor timing.
+nextpnr-xilinx does not time block RAM or DSP cells, so synth's estimate
+without those paths (`fabric_mhz`) is the one comparable with nextpnr's.
 A flow that fails records its error.
 
 Set up nextpnr-xilinx with tools/prepare_nextpnr_xilinx.sh.
@@ -54,7 +56,7 @@ def resources(fasm):
                 ffs.add(site + (ff[1],))
         elif m := re.match(r"(BRAM_[LR]_X\d+Y\d+)\.RAMB18_(Y\d)\.IN_USE", feature):
             brams.add(m.groups())
-        elif m := re.match(r"(DSP_[LR]_X\d+Y\d+)\.DSP_(\d)\.", feature):
+        elif m := re.match(r"(DSP_[LR]_X\d+Y\d+)\.DSP48\.DSP_(\d)\.", feature):
             dsps.add(m.groups())
         elif re.match(r"INT_[LR]_X\d+Y\d+\.\S+\.\S+$", feature):
             pips += 1
@@ -79,7 +81,7 @@ def main():
                                                     cwd=ROOT, text=True).strip()}
     report = {"part": a.part, "versions": versions, "timing_certified": False, "designs": []}
     euler = ROOT / "tests/designs/euler"
-    print("design | slices synth/nextpnr/matched | LUT sites | FFs | INT pips | estimated MHz", flush=True)
+    print("design | slices synth/nextpnr/matched | LUT sites | FFs | INT pips | estimated MHz | fabric MHz", flush=True)
     for line in (euler / "designs.txt").read_text().splitlines():
         if not line or line.startswith("#"):
             continue
@@ -129,13 +131,18 @@ def main():
                 else:
                     # The same routing delay model, uncalibrated like nextpnr's.
                     mhz = re.findall(r"timing estimate: clock .*?\(([\d.]+) MHz\)", log)
+                    # nextpnr-xilinx has no block RAM or DSP timing; this
+                    # estimate leaves them out alike.
+                    fabric = re.findall(r"without block RAM and DSP paths: clock .*?\(([\d.]+) MHz\)", log)
+                    result["fabric_mhz"] = float((fabric or mhz)[-1]) if fabric or mhz else None
                 result["fmax_mhz"] = float(mhz[-1]) if mhz else None
+                result.setdefault("fabric_mhz", result["fmax_mhz"])
             row[flow] = result
         report["designs"].append(row)
         (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
         cell = lambda key: "/".join(str(row[f].get(key, "-")) for f in flows)
         print(f'{top} | {cell("slices")} | {cell("lut_sites")} | {cell("ffs")} | {cell("int_pips")} | '
-              f'{cell("fmax_mhz")}', flush=True)
+              f'{cell("fmax_mhz")} | {cell("fabric_mhz")}', flush=True)
 
 
 if __name__ == "__main__":

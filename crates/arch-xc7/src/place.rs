@@ -328,6 +328,14 @@ pub fn place(
             }
         }
     }
+    for &c in dsps.keys() {
+        if crate::physical_dsp::validate(nl, c)?.clocked()
+            && let Some(n) = nl.pin_net(c, "CLK")
+            && nl.nets[n].constant.is_none()
+        {
+            clock_nets.insert(n);
+        }
+    }
     let mut clocks = BTreeMap::new();
     let buffers = sites(db, |k| k == "BUFGCTRL")?;
     let mut used = BTreeSet::new();

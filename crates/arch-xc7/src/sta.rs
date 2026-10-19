@@ -9,6 +9,7 @@
 use crate::device::Device;
 use crate::flow::Owners;
 use crate::pack::{self, Packed};
+use crate::physical_dsp::Config;
 use crate::routing::RoutingGraph;
 use crate::timing::Sdf;
 use std::collections::BTreeMap;
@@ -91,7 +92,135 @@ struct Model {
     srl_setup: f64,
     bram_clk_o: f64,
     bram_setup: f64,
-    dsp: f64,
+    dsp: Dsp,
+}
+
+/// DSP48E1 multiplier timing (ps) by register stage, from the SDF cell of
+/// each configuration (no pre-adder, no pattern detection).
+struct Dsp {
+    /// Combinational A, B and C to P.
+    a_p: f64,
+    b_p: f64,
+    c_p: f64,
+    /// Setup into the A, B and C registers, or through the multiplier into
+    /// the M register, or into the P register.
+    a_reg: f64,
+    b_reg: f64,
+    c_reg: f64,
+    a_m: f64,
+    b_m: f64,
+    a_p_reg: f64,
+    b_p_reg: f64,
+    c_p_reg: f64,
+    /// Clock to P from each register.
+    clk_a: f64,
+    clk_b: f64,
+    clk_c: f64,
+    clk_m: f64,
+    clk_p: f64,
+    /// Setup of the register clock enables and resets.
+    control: f64,
+}
+
+impl Dsp {
+    fn new(a: &Arcs) -> Result<Self, String> {
+        let cell = |k: &str| format!("DSP48E1_{k}");
+        let prop = |k: &str, from: &str| {
+            a.delay(&cell(k), |f, t| f == from && t == "P")
+                .ok_or_else(|| format!("no SDF timing for DSP48E1 {from} to P in {k}"))
+        };
+        let setup = |k: &str, pin: &str| {
+            a.setup(&cell(k), |p| p == pin)
+                .ok_or_else(|| format!("no SDF setup for DSP48E1 {pin} in {k}"))
+        };
+        let (mult_a, mult_b) = ("USE_DPORT_FALSE_USE_MULT_MULTIPLY", "USE_MULT_MULTIPLY");
+        let no_detect = "USE_PATTERN_DETECT_NO_PATDET";
+        Ok(Dsp {
+            a_p: prop(&format!("AREG_0_A_INPUT_DIRECT_MREG_0_PREG_0_{mult_a}"), "A")?,
+            b_p: prop(&format!("BREG_0_B_INPUT_DIRECT_MREG_0_PREG_0_{mult_b}"), "B")?,
+            c_p: prop("CREG_0_PREG_0", "C")?,
+            a_reg: setup("AREG_1_A_INPUT_DIRECT", "A")?,
+            b_reg: setup("BREG_1_B_INPUT_DIRECT", "B")?,
+            c_reg: setup("CREG_1", "C")?,
+            a_m: setup(&format!("AREG_0_A_INPUT_DIRECT_MREG_1_{mult_a}"), "A")?,
+            b_m: setup(&format!("BREG_0_B_INPUT_DIRECT_MREG_1_{mult_b}"), "B")?,
+            a_p_reg: setup(
+                &format!("AREG_0_A_INPUT_DIRECT_MREG_0_PREG_1_{mult_a}_{no_detect}"),
+                "A",
+            )?,
+            b_p_reg: setup(
+                &format!("BREG_0_B_INPUT_DIRECT_MREG_0_PREG_1_{mult_b}_{no_detect}"),
+                "B",
+            )?,
+            c_p_reg: setup(&format!("CREG_0_PREG_1_{no_detect}"), "C")?,
+            clk_a: prop(&format!("AREG_1_MREG_0_PREG_0_{mult_a}"), "CLK")?,
+            clk_b: prop(&format!("BREG_1_MREG_0_PREG_0_{mult_b}"), "CLK")?,
+            clk_c: prop("CREG_1_PREG_0", "CLK")?,
+            clk_m: prop("MREG_1_PREG_0", "CLK")?,
+            clk_p: prop("PREG_1", "CLK")?,
+            control: [
+                ("AREG_1", "CEA2"),
+                ("AREG_1", "RSTA"),
+                ("BREG_1", "CEB2"),
+                ("MREG_1", "CEM"),
+                ("PREG_1", "CEP"),
+                ("PREG_1", "RSTP"),
+            ]
+            .iter()
+            .map(|&(k, p)| setup(k, p))
+            .try_fold(0.0, |m: f64, d| d.map(|d| m.max(d)))?,
+        })
+    }
+
+    /// The combinational delay from input `pin` to P, if not registered.
+    fn arc(&self, c: &Config, pin: &str) -> Option<f64> {
+        let out = c.mreg || c.preg;
+        match pin.as_bytes()[0] {
+            b'A' if pin.starts_with("A[") && !c.areg && !out => Some(self.a_p),
+            b'B' if pin.starts_with("B[") && !c.breg && !out => Some(self.b_p),
+            b'C' if pin.starts_with("C[") && c.add_c && !c.creg && !c.preg => Some(self.c_p),
+            _ => None,
+        }
+    }
+
+    /// The setup check of input `pin`, if it reaches a register.
+    fn setup(&self, c: &Config, pin: &str) -> Option<f64> {
+        let first = |reg: bool, m: Option<f64>, p: f64, r: f64| {
+            if reg {
+                Some(r)
+            } else if let (true, Some(m)) = (c.mreg, m) {
+                Some(m)
+            } else {
+                c.preg.then_some(p)
+            }
+        };
+        if pin.starts_with("A[") {
+            first(c.areg, Some(self.a_m), self.a_p_reg, self.a_reg)
+        } else if pin.starts_with("B[") {
+            first(c.breg, Some(self.b_m), self.b_p_reg, self.b_reg)
+        } else if pin.starts_with("C[") && c.add_c {
+            first(c.creg, None, self.c_p_reg, self.c_reg)
+        } else if pin.starts_with("CE") || pin.starts_with("RST") {
+            Some(self.control)
+        } else {
+            None
+        }
+    }
+
+    /// Clock to P: from the last register before P.
+    fn clk_to_out(&self, c: &Config) -> f64 {
+        if c.preg {
+            self.clk_p
+        } else if c.mreg {
+            self.clk_m
+        } else {
+            [(c.areg, self.clk_a), (c.breg, self.clk_b), (c.creg && c.add_c, self.clk_c)]
+                .iter()
+                .filter(|r| r.0)
+                .map(|r| r.1)
+                .fold(0.0, f64::max)
+        }
+    }
 }
 
 impl Model {
@@ -158,17 +287,7 @@ impl Model {
                 .map(|(_, &d)| d * 1000.0)
                 .reduce(f64::max)
                 .ok_or("no SDF timing for block RAM setup")?,
-            dsp: a
-                .sdf
-                .iter()
-                .flat_map(|s| s.cells.iter().filter(|((_, k), _)| k.starts_with("DSP48E1")))
-                .flat_map(|(_, c)| c.propagation.iter())
-                .filter(|((f, t), _)| {
-                    (f.starts_with('A') || f.starts_with('B')) && t.starts_with('P')
-                })
-                .map(|(_, &(_, max))| max * 1000.0)
-                .reduce(f64::max)
-                .unwrap_or(0.0),
+            dsp: Dsp::new(a)?,
         })
     }
 }
@@ -248,12 +367,14 @@ struct Arrival {
 }
 
 /// A sequential cell: its clock edge, clock-to-output delay and setup.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Sequential {
     cell: CellId,
     edge: Edge,
     clk_to_out: f64,
     setup: f64,
+    /// The inputs checked and their setups, if not all data inputs alike.
+    capture: Option<Vec<(u32, f64)>>,
 }
 
 /// The timing graph of a packed design: cell arcs, launch and capture
@@ -302,6 +423,7 @@ impl<'a> Timer<'a> {
             let ins: Vec<usize> = (0..pins.len()).filter(|&i| pins[i].dir == Dir::Input).collect();
             let outs: Vec<usize> =
                 (0..pins.len()).filter(|&i| pins[i].dir == Dir::Output).collect();
+            let dsp = (k == "DSP48E1").then(|| crate::physical_dsp::validate(nl, c)).transpose()?;
             // Combinational delay from input `i` to output `o`.
             let delay = |i: &str, o: &str| -> Option<f64> {
                 Some(match k {
@@ -317,7 +439,7 @@ impl<'a> Timer<'a> {
                             if i == "CI" { "CIN".to_string() } else { i.replace(['[', ']'], "") };
                         *model.carry.get(&(from, o.replace(['[', ']'], "")))?
                     }
-                    "DSP48E1" if (i.starts_with('A') || i.starts_with('B')) => model.dsp,
+                    "DSP48E1" => model.dsp.arc(dsp.as_ref()?, i)?,
                     // A LUT RAM port reads at its own address.
                     k if pack::is_ram(k)
                         && i.starts_with("ADDR")
@@ -337,6 +459,22 @@ impl<'a> Timer<'a> {
             if !cell_arcs.is_empty() {
                 arcs.insert(c, cell_arcs);
             }
+            if let Some(config) = dsp.filter(|d| d.clocked()) {
+                let capture = ins
+                    .iter()
+                    .filter_map(|&i| model.dsp.setup(&config, pin(c, i)).map(|d| (i as u32, d)))
+                    .collect();
+                if let Some(n) = nl.pin_net(c, "CLK").filter(|&n| nl.nets[n].constant.is_none()) {
+                    seq.push(Sequential {
+                        cell: c,
+                        edge: (n, false),
+                        clk_to_out: model.dsp.clk_to_out(&config),
+                        setup: 0.0,
+                        capture: Some(capture),
+                    });
+                }
+                continue;
+            }
             let (clk, inv, clk_to_out, setup) = if pack::is_ff(k) {
                 ("C", "IS_C_INVERTED", model.ff_clk_q, model.ff_setup)
             } else if pack::is_srl(k) {
@@ -350,7 +488,7 @@ impl<'a> Timer<'a> {
             };
             if let Some(n) = nl.pin_net(c, clk).filter(|&n| nl.nets[n].constant.is_none()) {
                 let edge = (n, pack::param(nl, c, inv, 0) != 0);
-                seq.push(Sequential { cell: c, edge, clk_to_out, setup });
+                seq.push(Sequential { cell: c, edge, clk_to_out, setup, capture: None });
             }
         }
         // Kahn's algorithm over the cells with combinational arcs.
@@ -388,6 +526,21 @@ impl<'a> Timer<'a> {
             return Err("combinational loop in the timing graph".into());
         }
         Ok(Timer { nl, order, arcs, seq })
+    }
+
+    /// The timing graph without block RAM and DSP cells: the paths
+    /// nextpnr-xilinx times, which has no timing for them.
+    pub fn fabric(&self) -> Timer<'a> {
+        let nl = self.nl;
+        let hard = |c: CellId| matches!(nl.cell_kind(c), "RAMB18E1" | "DSP48E1");
+        let arcs: FxHashMap<_, _> =
+            self.arcs.iter().filter(|(c, _)| !hard(**c)).map(|(&c, a)| (c, a.clone())).collect();
+        Timer {
+            nl,
+            order: self.order.iter().copied().filter(|c| arcs.contains_key(c)).collect(),
+            arcs,
+            seq: self.seq.iter().filter(|s| !hard(s.cell)).cloned().collect(),
+        }
     }
 
     /// Analyzes the design with wire delays `wire(cell, net)` (ps) from each
@@ -429,19 +582,25 @@ impl<'a> Timer<'a> {
         }
         // Setup checks: paths within one clock; opposite edges have half a
         // period.
-        let data_inputs = |c: CellId| {
-            let pins = &nl.cells[c].pins;
-            (0..pins.len() as u32).filter(move |&i| {
-                let name = nl.str(pins[i as usize].name);
-                pins[i as usize].dir == Dir::Input
-                    && !name.starts_with("CLK")
-                    && !matches!(name, "C" | "WCLK")
-            })
+        let checks = |s: &Sequential| -> Vec<(u32, f64)> {
+            if let Some(c) = &s.capture {
+                return c.clone();
+            }
+            let pins = &nl.cells[s.cell].pins;
+            (0..pins.len() as u32)
+                .filter(|&i| {
+                    let name = nl.str(pins[i as usize].name);
+                    pins[i as usize].dir == Dir::Input
+                        && !name.starts_with("CLK")
+                        && !matches!(name, "C" | "WCLK")
+                })
+                .map(|i| (i, s.setup))
+                .collect()
         };
         let mut clocks: BTreeMap<NetId, Clock> = BTreeMap::new();
         for s in &self.seq {
             let (clk, falling) = s.edge;
-            for i in data_inputs(s.cell) {
+            for (i, setup) in checks(s) {
                 for ((launch, launch_falling), t) in
                     at_input(&arrival, s.cell, i).unwrap_or_default()
                 {
@@ -449,7 +608,7 @@ impl<'a> Timer<'a> {
                         continue;
                     }
                     let factor = if launch_falling == falling { 1.0 } else { 0.5 };
-                    let period = (t + s.setup) / factor;
+                    let period = (t + setup) / factor;
                     let worst = clocks.entry(clk).or_insert(Clock {
                         net: clk,
                         period: 0.0,
@@ -483,8 +642,8 @@ impl<'a> Timer<'a> {
             };
         for s in &self.seq {
             let Some(t) = clocks.get(&s.edge.0).map(|c| c.period) else { continue };
-            for i in data_inputs(s.cell) {
-                sink(&mut required, s.cell, i, t - s.setup);
+            for (i, setup) in checks(s) {
+                sink(&mut required, s.cell, i, t - setup);
             }
         }
         for &c in self.order.iter().rev() {

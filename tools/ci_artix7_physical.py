@@ -141,6 +141,8 @@ def main():
     # A Yosys-mapped netlist (MUXF7/MUXF8 and SRL16E) through native PnR.
     yosys_cases = [
         ("yosys_wide", "module top(input clk,input [3:0] s,input [15:0] d,input [7:0] a,output reg y,output z,output r); reg [255:0] rom=256'h0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0; reg [4:0] sh=0; always @(posedge clk) begin y<=d[s]; sh<={sh[3:0],d[0]}; end assign z=rom[a]; assign r=sh[4]; endmodule", ["clk","y","z","r"]+[f"{p}[{i}]" for p,n in [("s",4),("d",16),("a",8)] for i in range(n)], ["clk"]),
+        # Registered DSP48E1 inputs and output, plus a constant post-add.
+        ("yosys_dsp", "module top(input clk,input [11:0] a,b,output reg [23:0] y); reg [11:0] ra=0,rb=0; always @(posedge clk) begin ra<=a; rb<=b; y<=ra*rb+24'd7; end endmodule", ["clk"]+[f"{p}[{i}]" for p,n in [("a",12),("b",12),("y",24)] for i in range(n)], ["clk"]),
     ]
     cases += [c + (True,) for c in yosys_cases] if a.yosys else []
     if a.euler:
@@ -175,6 +177,8 @@ def main():
             for required in {"lutram": ["LUT.RAM", "LUT.SMALL", "FFMUX.O5"], "srl": ["LUT.SRL", "CLKINV"],
                              "yosys_wide": ["OUTMUX.F8", "LUT.SRL"]}.get(name, []):
                 assert required in features, f"{name}: no {required}"
+            if name == "yosys_dsp":
+                assert "DSP48.DSP_" in features and "AREG_0" not in features, f"{name}: no registered DSP"
             if name.startswith("ram_sdp"):
                 assert "SDP_READ_WIDTH_36" in fasm.read_text()
                 assert "SDP_WRITE_WIDTH_36" in fasm.read_text()

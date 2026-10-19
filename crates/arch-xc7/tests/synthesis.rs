@@ -268,9 +268,19 @@ fn dsp_products_preserve_signed_extension_and_truncation() {
 fn dsp_packing_rejects_unsupported_modes_and_controls() {
     let original = synth("module top(input [11:0] a,b,output [23:0] y); assign y=a*b; endmodule");
     let dsp = original.live_cells().find(|&c| original.cell_kind(c) == "DSP48E1").unwrap();
+    // One register stage at the inputs, product or output is supported.
+    for key in ["AREG", "BREG", "MREG", "PREG"] {
+        let mut nl = original.clone();
+        nl.set_param(dsp, key, Param::Int(1));
+        if key == "AREG" || key == "BREG" {
+            nl.set_param(dsp, &format!("{}CASCREG", &key[..1]), Param::Int(1));
+        }
+        arch_xc7::pack::pack(&mut nl).unwrap();
+    }
     for (key, value) in [
-        ("AREG", Param::Int(1)),
-        ("PREG", Param::Int(1)),
+        ("AREG", Param::Int(2)),
+        ("ACASCREG", Param::Int(1)),
+        ("PREG", Param::Int(2)),
         ("IS_OPMODE_INVERTED", Param::Int(1)),
         ("USE_MULT", Param::Int(0)),
     ] {
@@ -285,7 +295,7 @@ fn dsp_packing_rejects_unsupported_modes_and_controls() {
     let pin = synth_netlist::PinRef { cell: dsp, pin: index as u32 };
     nl.disconnect(pin);
     nl.connect(pin, dynamic).unwrap();
-    assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("fixed multiplier control"));
+    assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("constant control"));
 }
 
 #[test]

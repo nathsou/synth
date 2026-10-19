@@ -317,16 +317,18 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
             continue;
         };
         for (pin, _, inputs) in &instance.conns {
-            let width = match pin.as_str() {
-                "A" => 25,
-                "B" => 18,
+            // The multiplier, or only the post-adder from C.
+            let (width, delay) = match pin.as_str() {
+                "A" => (25, 800),
+                "B" => (18, 800),
+                "C" => (48, 400),
                 _ => continue,
             };
             for (i, input) in inputs.iter().take(width).enumerate() {
                 let Bit::Snk(from) = *input else { continue };
                 for output in outputs.iter().skip(i) {
                     if let Bit::Src(to) = *output {
-                        t.arcs.push(lutmap::BoxArc { from, to: to as usize, delay: 800 });
+                        t.arcs.push(lutmap::BoxArc { from, to: to as usize, delay });
                     }
                 }
             }

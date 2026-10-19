@@ -177,7 +177,8 @@ pub fn implement(
         start.elapsed().as_secs_f64()
     ));
     let wires = crate::sta::routed_wires(&db, &graph, &requests, &request_nets, &routes, &owners);
-    let timing = timer.analyze(&|c, n| wires.get(&(c, n)).copied().unwrap_or(0.0)).clocks;
+    let routed = |c, n| wires.get(&(c, n)).copied().unwrap_or(0.0);
+    let timing = timer.analyze(&routed).clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
             "timing estimate counts {} uncharacterized pip types as zero delay",
@@ -209,6 +210,17 @@ pub fn implement(
         ));
         if let (Some(first), Some(last)) = (clock.path.first(), clock.path.last()) {
             log.push(format!("critical path: {first} -> {last} ({} pins)", clock.path.len()));
+        }
+    }
+    // For comparison with nextpnr-xilinx, which does not time them.
+    if nl.live_cells().any(|c| matches!(nl.cell_kind(c), "RAMB18E1" | "DSP48E1")) {
+        for clock in timer.fabric().analyze(&routed).clocks {
+            log.push(format!(
+                "timing estimate without block RAM and DSP paths: clock {}: {:.3} ns ({:.1} MHz)",
+                nl.str(nl.nets[clock.net].name),
+                clock.period / 1000.0,
+                1e6 / clock.period.max(1.0)
+            ));
         }
     }
     log.push(
@@ -388,7 +400,7 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
             continue;
         }
         if let Some(site) = pl.dsps.get(&c) {
-            for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site) {
+            for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site)? {
                 add(n, site.node(db, &pin)?, c, &pin);
             }
             continue;

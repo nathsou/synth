@@ -116,6 +116,43 @@ def main():
                 assert "PASS multiplier" in (out/f"{name}.sim.log").read_text()
                 print(f"PASS {name}",flush=True)
 
+        # Additions of a product folded into the DSP48E1 post-adder (one DSP,
+        # no carry logic), including truncation, signed operands and a
+        # 48-bit sum.
+        for a,b,c,y in [(10,10,10,10),(24,17,30,40),(24,17,48,48),(16,16,8,32)]:
+            for signed in [0,1]:
+                name=f"multiply-add-{a}-{b}-{c}-{y}-{signed}"
+                net=synth(SRC / "multiply_add.v", "multiply_add", out / name,
+                          [f"A={a}",f"B={b}",f"C={c}",f"Y={y}",f"SIGNED={signed}"])
+                text=net.read_text()
+                assert text.count("DSP48E1 ") == 1 and "CARRY4" not in text, name
+                tb=out / f"{name}.tb.v"
+                tb.write_text(f'''module tb;
+                  // Nonzero to start: Yosys's DSP48E1 model evaluates the
+                  // combinational C path only when C changes.
+                  reg [{a-1}:0] a=1; reg [{b-1}:0] b=1; reg [{c-1}:0] c=1;
+                  wire [{y-1}:0] refy,got;
+                  multiply_add #(.A({a}),.B({b}),.C({c}),.Y({y}),.SIGNED({signed})) refdut(a,b,c,refy);
+                  multiply_add_net dut(a,b,c,got);
+                  integer i;
+                  initial begin
+                    for(i=0;i<2000;i=i+1) begin
+                      case(i)
+                        0: begin a=0; b=0; c=0; end
+                        1: begin a=-1; b=-1; c=-1; end
+                        2: begin a=1<<({a}-1); b=1<<({b}-1); c=1<<({c}-1); end
+                        default: begin a={{$random,$random}}; b={{$random,$random}}; c={{$random,$random}}; end
+                      endcase
+                      #10; if(got!==refy) $fatal(1,"multiply-add case %d: %h * %h + %h: %h != %h",i,a,b,c,got,refy);
+                    end
+                    $display("PASS multiply-add"); $finish;
+                  end
+                endmodule''')
+                run(["iverilog","-g2012","-s","tb","-o",out/f"{name}.vvp",tb,SRC/"multiply_add.v",net,cells],out/f"{name}.compile.log")
+                run(["vvp",out/f"{name}.vvp"],out/f"{name}.sim.log")
+                assert "PASS multiply-add" in (out/f"{name}.sim.log").read_text()
+                print(f"PASS {name}",flush=True)
+
         # All BRAM modes, parity, replication, bank selection, offsets, masked
         # writes, falling edges, read enables, initialization and read/write collision.
         for w, d, offset, neg, mask in [(1, 1024, 0, 0, 0), (2, 512, 3, 1, 0),
