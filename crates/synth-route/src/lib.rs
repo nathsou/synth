@@ -643,6 +643,11 @@ pub fn route_with_initial(
                 routes[i].edges.iter().any(|&e| is_over[graph.edge_dst[e as usize] as usize])
             })
             .collect();
+        // Each keeps the branches of its tree clear of overused nodes, and
+        // routes again only the sinks they no longer reach.
+        for &i in &to_route {
+            seeds[i] = clear_branches(&graph, &st, &nets[i], &routes[i].edges, &is_over);
+        }
         if iter >= 2 {
             for &i in &to_route {
                 margin[i] = margin[i].saturating_add(1);
@@ -797,6 +802,38 @@ fn route_region(
         }
     }
     Ok(())
+}
+
+/// The edges of tree `edges` (in tree order) on paths from the source to
+/// sinks of `net` that avoid the nodes in `avoid`, in tree order.
+fn clear_branches(
+    graph: &Graph<'_>,
+    st: &State,
+    net: &NetRequest,
+    edges: &[u32],
+    avoid: &[bool],
+) -> Vec<u32> {
+    let mut reached: FxHashSet<u32> = FxHashSet::default();
+    reached.insert(net.source);
+    let mut kept: Vec<u32> = Vec::new();
+    for &e in edges {
+        let (s, d) = (st.edge_src[e as usize], graph.edge_dst[e as usize]);
+        if reached.contains(&s) && !avoid[d as usize] {
+            reached.insert(d);
+            kept.push(e);
+        }
+    }
+    // Drop branches that lead to no sink, from the leaves up.
+    let mut useful: FxHashSet<u32> =
+        net.sinks.iter().copied().filter(|k| reached.contains(k)).collect();
+    let mut keep = vec![false; kept.len()];
+    for (j, &e) in kept.iter().enumerate().rev() {
+        if useful.contains(&graph.edge_dst[e as usize]) {
+            keep[j] = true;
+            useful.insert(st.edge_src[e as usize]);
+        }
+    }
+    kept.into_iter().zip(keep).filter_map(|(e, k)| k.then_some(e)).collect()
 }
 
 /// The part of candidate tree `edges` for net `i` that leads to its current

@@ -101,11 +101,12 @@ pub fn implement(
         // Wires span up to 18 tiles: a lookahead by wire class bounds the
         // remaining cost far better than a cost per tile.
         lookahead_radius: 30,
-        bbox_margin: 15,
+        bbox_margin: 5,
+        // One round of rerouting critical nets: a second rarely helps.
+        timing_rounds: 1,
         max_iterations: 100,
         stall_iterations: 30,
         retime_every: 4,
-        timing_rounds: 2,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
@@ -127,6 +128,11 @@ pub fn implement(
             .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
             .collect();
         let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
+        eprintln!(
+            "info: routed timing estimate: {:.3} ns ({:.1}s)",
+            score / 1000.0,
+            start.elapsed().as_secs_f64()
+        );
         synth_route::Retimed { criticality, score }
     };
     let hooks = synth_route::RouteHooks {
