@@ -10,7 +10,9 @@ pips. Each flow's timing estimate is recorded: nextpnr's, and synth's from
 the same routing delay model; neither is calibrated against vendor timing.
 nextpnr-xilinx does not time block RAM or DSP cells, so synth's estimate
 without those paths (`fabric_mhz`) is the one comparable with nextpnr's.
-A flow that fails records its error.
+A flow that fails records its error. With --seeds N, each flow is placed
+and routed with seeds 1 to N and the run with the median estimate is
+reported, with every run's results: one run's Fmax varies by up to 10%.
 
 Set up nextpnr-xilinx with tools/prepare_nextpnr_xilinx.sh.
 """
@@ -72,6 +74,8 @@ def main():
     p.add_argument("--part", default="xc7a100tcsg324-1")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--design", action="append", help="Euler number; repeat to select a subset")
+    p.add_argument("--seeds", type=int, default=1,
+                   help="place and route each flow with seeds 1..N and report the median")
     a = p.parse_args()
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -116,27 +120,43 @@ def main():
                          "-o", f"{prefix}.matched.bit", "--timing-allow-fail"]],
         }
         for flow, steps in flows.items():
+            # Synthesis once, then place and route once per seed; the run
+            # with the median timing estimate is reported, with every run's.
             result = {"seconds": 0.0}
-            for i, cmd in enumerate(steps):
+            for i, cmd in enumerate(steps[:-1]):
                 seconds, error = run(cmd, out / f"{top}.{flow}.{i}.log")
                 result["seconds"] = round(result["seconds"] + seconds, 3)
                 if error:
                     result["error"] = error
                     break
             else:
-                result.update(resources(Path(f"{prefix}.{flow}.fasm")))
-                log = (out / f"{top}.{flow}.{len(steps) - 1}.log").read_text()
-                if flow == "nextpnr":
-                    mhz = re.findall(r"Max frequency for clock .*?: ([\d.]+) MHz", log)
-                else:
-                    # The same routing delay model, uncalibrated like nextpnr's.
-                    mhz = re.findall(r"timing estimate: clock .*?\(([\d.]+) MHz\)", log)
-                    # nextpnr-xilinx has no block RAM or DSP timing; this
-                    # estimate leaves them out alike.
-                    fabric = re.findall(r"without block RAM and DSP paths: clock .*?\(([\d.]+) MHz\)", log)
-                    result["fabric_mhz"] = float((fabric or mhz)[-1]) if fabric or mhz else None
-                result["fmax_mhz"] = float(mhz[-1]) if mhz else None
-                result.setdefault("fabric_mhz", result["fmax_mhz"])
+                runs = []
+                for seed in range(1, a.seeds + 1):
+                    log_path = out / f"{top}.{flow}.{len(steps) - 1}.seed{seed}.log"
+                    seconds, error = run(steps[-1] + ["--seed", seed], log_path)
+                    if error:
+                        result["error"] = error
+                        break
+                    r = {"seed": seed, "seconds": round(result["seconds"] + seconds, 3)}
+                    r.update(resources(Path(f"{prefix}.{flow}.fasm")))
+                    log = log_path.read_text()
+                    if flow == "nextpnr":
+                        mhz = re.findall(r"Max frequency for clock .*?: ([\d.]+) MHz", log)
+                    else:
+                        # The same routing delay model, uncalibrated like nextpnr's.
+                        mhz = re.findall(r"timing estimate: clock .*?\(([\d.]+) MHz\)", log)
+                        # nextpnr-xilinx has no block RAM or DSP timing; this
+                        # estimate leaves them out alike.
+                        fabric = re.findall(
+                            r"without block RAM and DSP paths: clock .*?\(([\d.]+) MHz\)", log)
+                        r["fabric_mhz"] = float((fabric or mhz)[-1]) if fabric or mhz else None
+                    r["fmax_mhz"] = float(mhz[-1]) if mhz else None
+                    r.setdefault("fabric_mhz", r["fmax_mhz"])
+                    runs.append(r)
+                if runs and "error" not in result:
+                    ranked = sorted(runs, key=lambda r: (r["fmax_mhz"] or 0.0, r["seed"]))
+                    result = dict(ranked[(len(ranked) - 1) // 2])
+                    result["runs"] = runs
             row[flow] = result
         report["designs"].append(row)
         (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
