@@ -52,15 +52,15 @@ pub(crate) fn pseudo_config(kind: &str, src: &str, dst: &str) -> Option<Vec<Stri
     None
 }
 
-/// Whether a tile pip is general routing. The BRAM address cascade from
-/// the tile below (`BRAM_CASCINBOT_*`) exists for cascaded RAMB36s: other
-/// nets would reach it through the address pins of the block RAM below.
-/// The in-tile path (`BRAM_CASCINTOP_*`) lets the two RAMB18 halves share
-/// an address net and stays available. A BUFGCTRL's input-to-output pseudo
+/// Whether a tile pip is general routing. The BRAM address cascades
+/// (`BRAM_CASCINBOT_*`, `BRAM_CASCINTOP_*`) exist for cascaded RAMB36s: a
+/// net would reach them through the address pins of a neighboring block
+/// RAM, using its site pin wires as a route-through. A BUFGCTRL's input-to-output pseudo
 /// pip passes through the buffer, which only conducts when configured; clock
 /// nets are routed to and from the buffers placed for them instead.
 pub(crate) fn general_routing(kind: &str, src: &str, dst: &str) -> bool {
-    let cascade = kind.starts_with("BRAM_") && src.starts_with("BRAM_CASCINBOT_");
+    let cascade = kind.starts_with("BRAM_")
+        && (src.starts_with("BRAM_CASCINBOT_") || src.starts_with("BRAM_CASCINTOP_"));
     let through_bufg =
         kind.starts_with("CLK_BUFG_") && src.contains("BUFGCTRL") && dst.ends_with("_O");
     !(cascade || through_bufg)

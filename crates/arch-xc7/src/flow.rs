@@ -42,30 +42,14 @@ pub fn implement(
     log.push(format!("packed {} slices, {} carry chains", p.slices.len(), p.chains.len()));
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
+    let timer = crate::sta::Timer::new(root, &nl, &p)?;
     let placement = place::place(&db, &nl, &p, xdc, opts.seed, opts.effort)?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     let mut features = cell_features(&db, &nl, &p, &placement, xdc)?;
     let (mut requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;
     // Timing-driven routing: criticalities from delays predicted by the
     // placement, then from the routes as they converge.
-    let timer = crate::sta::Timer::new(root, &nl, &p)?;
-    let located = |c: CellId| location(&db, &p, &placement, c);
-    let predicted = |c: CellId, n: NetId| -> f64 {
-        let Some(d) = nl.nets[n].driver else { return 0.0 };
-        match (located(d.cell), located(c)) {
-            (Some((a, sa)), Some((b, sb))) if a == b => {
-                if sa == sb {
-                    0.0
-                } else {
-                    150.0
-                }
-            }
-            (Some(((ax, ay), _)), Some(((bx, by), _))) => {
-                crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
-            }
-            _ => 0.0,
-        }
-    };
+    let predicted = predictor(&db, &nl, &p, &placement);
     let estimate = timer.analyze(&predicted);
     let criticality = |a: &crate::sta::Analysis, i: usize, sink: u32| -> f32 {
         let Some(net) = request_nets[i] else { return 0.0 };
@@ -228,6 +212,7 @@ pub fn implement(
          uncalibrated against vendor timing or hardware, without clock skew or I/O paths"
             .into(),
     );
+    drop(predicted);
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
 /// The local GND_WIRE and VCC_WIRE nodes of the constant sinks that are
@@ -276,6 +261,32 @@ fn local_constants(
 }
 
 /// The tile coordinates of a placed cell and the site it is in.
+/// Wire delays predicted from a placement: by distance between tiles,
+/// nothing within a site and a local hop within a tile.
+fn predictor<'a>(
+    db: &'a Device,
+    nl: &'a Netlist,
+    p: &'a Packed,
+    pl: &'a Placement,
+) -> impl Fn(CellId, NetId) -> f64 + 'a {
+    move |c, n| {
+        let Some(d) = nl.nets[n].driver else { return 0.0 };
+        match (location(db, p, pl, d.cell), location(db, p, pl, c)) {
+            (Some((a, sa)), Some((b, sb))) if a == b => {
+                if sa == sb {
+                    0.0
+                } else {
+                    150.0
+                }
+            }
+            (Some(((ax, ay), _)), Some(((bx, by), _))) => {
+                crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
+            }
+            _ => 0.0,
+        }
+    }
+}
+
 fn location(
     db: &Device,
     p: &Packed,
