@@ -491,7 +491,14 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
         let idx = p.slices.len();
         let mut slice = Slice { carry: Some(c), ..Slice::default() };
         p.slots.insert(c, (idx, 0));
-        for lane in 0..4 {
+        // A lane whose outputs, and those of the lanes above, are unused
+        // needs no propagate input: its LUT site stays free for any LUT,
+        // whose O6 then drives an S that nothing observes.
+        let used = |pin: String| nl.pin_net(c, &pin).is_some_and(|n| !nl.nets[n].users.is_empty());
+        let live: Vec<bool> = (0..4)
+            .map(|lane| (lane..4).any(|k| used(format!("O[{k}]")) || used(format!("CO[{k}]"))))
+            .collect();
+        for lane in (0..4).filter(|&l| live[l]) {
             let lut = lane_lut(nl, &p, c, &format!("S[{lane}]"))?;
             slice.luts[lane] = Some(lut);
             p.slots.insert(lut, (idx, lane));
