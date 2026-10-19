@@ -1,9 +1,9 @@
 {
   "versions": {
-    "yosys": "Yosys 0.52 (git sha1 fee39a3284c90249e1d9684cf6944ffbbcbb8f90)",
+    "yosys": "Yosys 0.52 (git sha1 fee39a328, ccache clang 18.1.3 -O3 -flto -flto)",
     "synth": "synth 0.1.0",
-    "synth_sha256": "bc266e25d0374dd0d7ec29957e37d3232efcb3225d9c0c8275ad52650ac9156d",
-    "revision": "5714ca0-dirty"
+    "synth_sha256": "74b4a6c214fafa292f72d3abfed15e3e64979b4fff61a712b4e038f8fdf07ac3",
+    "revision": "c9d0731"
   },
   "designs": [
     {
@@ -11,15 +11,22 @@
       "sources": {
         "tests/designs/euler/p014.v": "f4ab4b0c1c0d0d4e5483d143a632d60dca91efb3468a7eabe941f3231fae90d0"
       },
-      "synth_seconds": 24.101,
-      "yosys_seconds": 37.357,
+      "synth_seconds": 25.592,
+      "yosys_seconds": 17.394,
       "synth_packed": {
-        "slices": 969,
-        "lut": 3873,
+        "slices": 992,
+        "slicem": 0,
+        "lut": 4017,
         "carry4": 520
       },
+      "yosys_packed": {
+        "slices": 1207,
+        "slicem": 0,
+        "lut": 4968,
+        "carry4": 592
+      },
       "synth": {
-        "lut": 2968,
+        "lut": 2961,
         "ff": 2214,
         "carry4": 494,
         "bram18": 4,
@@ -29,16 +36,17 @@
           "FDRE": 1925,
           "FDSE": 289,
           "LUT1": 70,
-          "LUT2": 180,
-          "LUT3": 184,
-          "LUT4": 316,
-          "LUT5": 1432,
-          "LUT6": 786,
+          "LUT2": 189,
+          "LUT3": 205,
+          "LUT4": 406,
+          "LUT5": 1092,
+          "LUT6": 999,
+          "MUXF7": 109,
           "RAMB18E1": 4
         }
       },
       "yosys": {
-        "lut": 3222,
+        "lut": 3525,
         "ff": 2201,
         "carry4": 592,
         "bram18": 4,
@@ -48,14 +56,14 @@
           "FDRE": 1658,
           "FDSE": 543,
           "INV": 81,
-          "LUT1": 70,
-          "LUT2": 350,
-          "LUT3": 232,
-          "LUT4": 300,
-          "LUT5": 1543,
-          "LUT6": 646,
-          "MUXF7": 314,
-          "MUXF8": 35,
+          "LUT1": 397,
+          "LUT2": 338,
+          "LUT3": 126,
+          "LUT4": 423,
+          "LUT5": 1499,
+          "LUT6": 661,
+          "MUXF7": 417,
+          "MUXF8": 144,
           "RAMB18E1": 4
         }
       }
@@ -66,29 +74,36 @@
         "tests/designs/euler/p025.v": "d6a3c60186cb978b86e8ec07f00e54272098b81649b0bb2263dbbf9167dee5ef",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 4.252,
-      "yosys_seconds": 17.093,
+      "synth_seconds": 10.26,
+      "yosys_seconds": 8.833,
       "synth_packed": {
-        "slices": 197,
-        "lut": 786,
-        "carry4": 127
+        "slices": 174,
+        "slicem": 0,
+        "lut": 697,
+        "carry4": 89
+      },
+      "yosys_packed": {
+        "slices": 246,
+        "slicem": 0,
+        "lut": 991,
+        "carry4": 179
       },
       "synth": {
-        "lut": 492,
+        "lut": 515,
         "ff": 187,
-        "carry4": 125,
+        "carry4": 87,
         "bram18": 0,
         "dsp48": 0,
         "cells": {
-          "CARRY4": 125,
+          "CARRY4": 87,
           "FDRE": 184,
           "FDSE": 3,
           "LUT1": 2,
-          "LUT2": 80,
-          "LUT3": 60,
-          "LUT4": 21,
-          "LUT5": 204,
-          "LUT6": 125
+          "LUT2": 72,
+          "LUT3": 17,
+          "LUT4": 9,
+          "LUT5": 225,
+          "LUT6": 190
         }
       },
       "yosys": {
@@ -102,11 +117,11 @@
           "FDRE": 184,
           "FDSE": 3,
           "INV": 20,
-          "LUT2": 147,
-          "LUT3": 210,
-          "LUT4": 45,
-          "LUT5": 85,
-          "LUT6": 36,
+          "LUT2": 164,
+          "LUT3": 176,
+          "LUT4": 27,
+          "LUT5": 103,
+          "LUT6": 53,
           "MUXF7": 2,
           "MUXF8": 1
         }
@@ -117,28 +132,35 @@
       "sources": {
         "tests/designs/euler/p031.v": "963e665d179db067e0fb355a1998a2bb9952050887577fb9922946345068e362"
       },
-      "synth_seconds": 0.215,
-      "yosys_seconds": 3.891,
+      "synth_seconds": 0.139,
+      "yosys_seconds": 12.35,
       "synth_packed": {
-        "slices": 140,
-        "lut": 346,
-        "carry4": 78
+        "slices": 109,
+        "slicem": 0,
+        "lut": 419,
+        "carry4": 70
+      },
+      "yosys_packed": {
+        "slices": 178,
+        "slicem": 0,
+        "lut": 397,
+        "carry4": 54
       },
       "synth": {
-        "lut": 198,
+        "lut": 203,
         "ff": 402,
-        "carry4": 65,
+        "carry4": 60,
         "bram18": 6,
         "dsp48": 0,
         "cells": {
-          "CARRY4": 65,
+          "CARRY4": 60,
           "FDRE": 402,
-          "LUT1": 42,
-          "LUT2": 120,
-          "LUT3": 19,
-          "LUT4": 4,
-          "LUT5": 6,
-          "LUT6": 7,
+          "LUT1": 33,
+          "LUT2": 123,
+          "LUT3": 22,
+          "LUT4": 7,
+          "LUT5": 9,
+          "LUT6": 9,
           "RAMB18E1": 6
         }
       },
@@ -152,11 +174,11 @@
           "CARRY4": 54,
           "FDRE": 404,
           "INV": 36,
-          "LUT2": 137,
-          "LUT3": 29,
-          "LUT4": 19,
+          "LUT2": 136,
+          "LUT3": 28,
+          "LUT4": 37,
           "LUT5": 36,
-          "LUT6": 40,
+          "LUT6": 24,
           "MUXF7": 2,
           "MUXF8": 1,
           "RAMB18E1": 6
@@ -168,15 +190,22 @@
       "sources": {
         "tests/designs/euler/p043.v": "156f52c09927aaf5dbf44d206023142a380154c0915a14f08fd5144b25a0cba3"
       },
-      "synth_seconds": 42.715,
-      "yosys_seconds": 92.169,
+      "synth_seconds": 79.335,
+      "yosys_seconds": 66.157,
       "synth_packed": {
-        "slices": 1068,
-        "lut": 4271,
+        "slices": 944,
+        "slicem": 0,
+        "lut": 4095,
         "carry4": 339
       },
+      "yosys_packed": {
+        "slices": 919,
+        "slicem": 0,
+        "lut": 4083,
+        "carry4": 320
+      },
       "synth": {
-        "lut": 3819,
+        "lut": 3637,
         "ff": 1497,
         "carry4": 339,
         "bram18": 0,
@@ -185,16 +214,16 @@
           "CARRY4": 339,
           "FDRE": 1452,
           "FDSE": 45,
-          "LUT1": 11,
-          "LUT2": 1091,
-          "LUT3": 183,
-          "LUT4": 244,
-          "LUT5": 522,
-          "LUT6": 1768
+          "LUT1": 21,
+          "LUT2": 1127,
+          "LUT3": 211,
+          "LUT4": 308,
+          "LUT5": 379,
+          "LUT6": 1591
         }
       },
       "yosys": {
-        "lut": 3404,
+        "lut": 3400,
         "ff": 1517,
         "carry4": 320,
         "bram18": 0,
@@ -204,13 +233,13 @@
           "FDRE": 1472,
           "FDSE": 45,
           "INV": 81,
-          "LUT1": 40,
-          "LUT2": 1060,
-          "LUT3": 577,
-          "LUT4": 371,
-          "LUT5": 213,
-          "LUT6": 1062,
-          "MUXF7": 610,
+          "LUT1": 46,
+          "LUT2": 1072,
+          "LUT3": 578,
+          "LUT4": 357,
+          "LUT5": 233,
+          "LUT6": 1033,
+          "MUXF7": 593,
           "MUXF8": 222
         }
       }
@@ -220,15 +249,22 @@
       "sources": {
         "tests/designs/euler/p048.v": "4d8fcc1d2b45cb12e96332cde97eb39996351dfb4c5d374ebc80dac9ccf4c1a5"
       },
-      "synth_seconds": 16.182,
-      "yosys_seconds": 14.505,
+      "synth_seconds": 12.109,
+      "yosys_seconds": 11.41,
       "synth_packed": {
-        "slices": 1114,
-        "lut": 4454,
+        "slices": 1139,
+        "slicem": 0,
+        "lut": 4589,
         "carry4": 753
       },
+      "yosys_packed": {
+        "slices": 1097,
+        "slicem": 0,
+        "lut": 4532,
+        "carry4": 731
+      },
       "synth": {
-        "lut": 3230,
+        "lut": 3229,
         "ff": 2412,
         "carry4": 709,
         "bram18": 0,
@@ -240,14 +276,14 @@
           "FDSE": 15,
           "LUT1": 101,
           "LUT2": 1288,
-          "LUT3": 261,
-          "LUT4": 290,
-          "LUT5": 756,
-          "LUT6": 534
+          "LUT3": 270,
+          "LUT4": 287,
+          "LUT5": 740,
+          "LUT6": 543
         }
       },
       "yosys": {
-        "lut": 3336,
+        "lut": 3351,
         "ff": 2438,
         "carry4": 731,
         "bram18": 0,
@@ -258,14 +294,14 @@
           "FDRE": 2429,
           "FDSE": 9,
           "INV": 276,
-          "LUT1": 4,
-          "LUT2": 1575,
-          "LUT3": 572,
-          "LUT4": 103,
-          "LUT5": 321,
-          "LUT6": 485,
-          "MUXF7": 43,
-          "MUXF8": 6
+          "LUT1": 8,
+          "LUT2": 1588,
+          "LUT3": 569,
+          "LUT4": 104,
+          "LUT5": 307,
+          "LUT6": 499,
+          "MUXF7": 37,
+          "MUXF8": 4
         }
       }
     },
@@ -275,34 +311,41 @@
         "tests/designs/euler/p057.v": "97bb47dd27ca609fd85a0d43250dd8afbec768f24a8516cfcd02c9dac0dce22f",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 3.906,
-      "yosys_seconds": 13.1,
+      "synth_seconds": 8.61,
+      "yosys_seconds": 10.066,
       "synth_packed": {
-        "slices": 445,
-        "lut": 1727,
-        "carry4": 295
+        "slices": 431,
+        "slicem": 44,
+        "lut": 1639,
+        "carry4": 157
+      },
+      "yosys_packed": {
+        "slices": 523,
+        "slicem": 44,
+        "lut": 2112,
+        "carry4": 288
       },
       "synth": {
-        "lut": 1073,
-        "ff": 857,
-        "carry4": 291,
-        "bram18": 8,
+        "lut": 1139,
+        "ff": 1113,
+        "carry4": 155,
+        "bram18": 0,
         "dsp48": 0,
         "cells": {
-          "CARRY4": 291,
-          "FDRE": 852,
+          "CARRY4": 155,
+          "FDRE": 1108,
           "FDSE": 5,
           "LUT1": 4,
-          "LUT2": 403,
-          "LUT3": 276,
-          "LUT4": 46,
-          "LUT5": 169,
-          "LUT6": 175,
-          "RAMB18E1": 8
+          "LUT2": 272,
+          "LUT3": 174,
+          "LUT4": 146,
+          "LUT5": 231,
+          "LUT6": 312,
+          "RAM32M": 44
         }
       },
       "yosys": {
-        "lut": 1070,
+        "lut": 1067,
         "ff": 1114,
         "carry4": 224,
         "bram18": 0,
@@ -312,14 +355,14 @@
           "FDRE": 1109,
           "FDSE": 5,
           "INV": 4,
-          "LUT1": 7,
-          "LUT2": 757,
-          "LUT3": 36,
-          "LUT4": 105,
-          "LUT5": 104,
-          "LUT6": 57,
-          "MUXF7": 30,
-          "MUXF8": 14,
+          "LUT1": 6,
+          "LUT2": 763,
+          "LUT3": 18,
+          "LUT4": 79,
+          "LUT5": 144,
+          "LUT6": 53,
+          "MUXF7": 22,
+          "MUXF8": 10,
           "RAM32M": 44
         }
       }
@@ -329,33 +372,41 @@
       "sources": {
         "tests/designs/euler/p058.v": "aaf3cc64b404a36366973e84bd1e9ed66968fdb4a8263041773b603010769687"
       },
-      "synth_seconds": 70.484,
-      "yosys_seconds": 35.037,
+      "synth_seconds": 37.934,
+      "yosys_seconds": 29.146,
       "synth_packed": {
-        "slices": 1170,
-        "lut": 4679,
-        "carry4": 260
+        "slices": 1021,
+        "slicem": 1,
+        "lut": 4302,
+        "carry4": 155
+      },
+      "yosys_packed": {
+        "slices": 1232,
+        "slicem": 1,
+        "lut": 5555,
+        "carry4": 225
       },
       "synth": {
-        "lut": 4027,
-        "ff": 2158,
-        "carry4": 192,
+        "lut": 3751,
+        "ff": 2028,
+        "carry4": 132,
         "bram18": 0,
         "dsp48": 0,
         "cells": {
-          "CARRY4": 192,
-          "FDRE": 1944,
-          "FDSE": 214,
-          "LUT1": 180,
-          "LUT2": 551,
-          "LUT3": 414,
-          "LUT4": 379,
-          "LUT5": 777,
-          "LUT6": 1726
+          "CARRY4": 132,
+          "FDRE": 1942,
+          "FDSE": 86,
+          "LUT1": 60,
+          "LUT2": 501,
+          "LUT3": 346,
+          "LUT4": 394,
+          "LUT5": 710,
+          "LUT6": 1740,
+          "RAM64M": 1
         }
       },
       "yosys": {
-        "lut": 4769,
+        "lut": 4706,
         "ff": 2030,
         "carry4": 225,
         "bram18": 0,
@@ -365,14 +416,14 @@
           "FDRE": 1948,
           "FDSE": 82,
           "INV": 197,
-          "LUT1": 37,
-          "LUT2": 1207,
-          "LUT3": 720,
-          "LUT4": 245,
+          "LUT1": 29,
+          "LUT2": 1208,
+          "LUT3": 721,
+          "LUT4": 217,
           "LUT5": 627,
-          "LUT6": 1736,
-          "MUXF7": 407,
-          "MUXF8": 59,
+          "LUT6": 1707,
+          "MUXF7": 363,
+          "MUXF8": 48,
           "RAM64M": 1
         }
       }
@@ -382,34 +433,42 @@
       "sources": {
         "tests/designs/euler/p092.v": "7b55fa9731e53abbc3ca173c54dddca8b1a1826cd47fd8c51a35ee1d53412c45"
       },
-      "synth_seconds": 4.031,
-      "yosys_seconds": 10.003,
+      "synth_seconds": 5.576,
+      "yosys_seconds": 12.623,
       "synth_packed": {
-        "slices": 771,
-        "lut": 1107,
-        "carry4": 190
+        "slices": 484,
+        "slicem": 15,
+        "lut": 1913,
+        "carry4": 161
+      },
+      "yosys_packed": {
+        "slices": 527,
+        "slicem": 15,
+        "lut": 2107,
+        "carry4": 181
       },
       "synth": {
-        "lut": 910,
-        "ff": 2807,
-        "carry4": 173,
+        "lut": 880,
+        "ff": 2616,
+        "carry4": 157,
         "bram18": 7,
         "dsp48": 0,
         "cells": {
-          "CARRY4": 173,
-          "FDRE": 2801,
+          "CARRY4": 157,
+          "FDRE": 2610,
           "FDSE": 6,
-          "LUT1": 21,
-          "LUT2": 527,
-          "LUT3": 27,
-          "LUT4": 89,
-          "LUT5": 70,
-          "LUT6": 176,
-          "RAMB18E1": 7
+          "LUT1": 9,
+          "LUT2": 528,
+          "LUT3": 25,
+          "LUT4": 74,
+          "LUT5": 66,
+          "LUT6": 178,
+          "RAMB18E1": 7,
+          "SRLC32E": 57
         }
       },
       "yosys": {
-        "lut": 948,
+        "lut": 966,
         "ff": 2660,
         "carry4": 181,
         "bram18": 7,
@@ -420,13 +479,13 @@
           "FDRE": 2653,
           "FDSE": 7,
           "INV": 30,
-          "LUT2": 580,
-          "LUT3": 106,
-          "LUT4": 60,
-          "LUT5": 46,
-          "LUT6": 126,
-          "MUXF7": 11,
-          "MUXF8": 3,
+          "LUT2": 594,
+          "LUT3": 117,
+          "LUT4": 61,
+          "LUT5": 37,
+          "LUT6": 127,
+          "MUXF7": 15,
+          "MUXF8": 6,
           "RAMB18E1": 7,
           "SRL16E": 57
         }
@@ -437,34 +496,41 @@
       "sources": {
         "tests/designs/euler/p097.v": "53d5d0f77c5015e07c63373a2c34e4e3918872254ddd7d415b4086ac66af2816"
       },
-      "synth_seconds": 0.819,
-      "yosys_seconds": 3.934,
+      "synth_seconds": 1.07,
+      "yosys_seconds": 9.307,
       "synth_packed": {
-        "slices": 205,
-        "lut": 799,
-        "carry4": 137
+        "slices": 202,
+        "slicem": 0,
+        "lut": 809,
+        "carry4": 129
+      },
+      "yosys_packed": {
+        "slices": 193,
+        "slicem": 0,
+        "lut": 792,
+        "carry4": 125
       },
       "synth": {
-        "lut": 547,
+        "lut": 545,
         "ff": 445,
-        "carry4": 126,
+        "carry4": 121,
         "bram18": 0,
         "dsp48": 3,
         "cells": {
-          "CARRY4": 126,
+          "CARRY4": 121,
           "DSP48E1": 3,
           "FDRE": 436,
           "FDSE": 9,
-          "LUT1": 23,
-          "LUT2": 224,
-          "LUT3": 11,
-          "LUT4": 55,
-          "LUT5": 154,
-          "LUT6": 80
+          "LUT1": 14,
+          "LUT2": 226,
+          "LUT3": 13,
+          "LUT4": 57,
+          "LUT5": 153,
+          "LUT6": 82
         }
       },
       "yosys": {
-        "lut": 621,
+        "lut": 543,
         "ff": 445,
         "carry4": 125,
         "bram18": 0,
@@ -475,14 +541,14 @@
           "FDRE": 437,
           "FDSE": 8,
           "INV": 45,
-          "LUT1": 28,
-          "LUT2": 273,
-          "LUT3": 43,
-          "LUT4": 45,
-          "LUT5": 62,
-          "LUT6": 125,
-          "MUXF7": 59,
-          "MUXF8": 25
+          "LUT1": 1,
+          "LUT2": 264,
+          "LUT3": 33,
+          "LUT4": 40,
+          "LUT5": 83,
+          "LUT6": 77,
+          "MUXF7": 4,
+          "MUXF8": 2
         }
       }
     }
