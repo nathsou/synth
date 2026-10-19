@@ -2,8 +2,8 @@
   "versions": {
     "yosys": "Yosys 0.52 (git sha1 fee39a328, ccache clang 18.1.3 -O3 -flto -flto)",
     "synth": "synth 0.1.0",
-    "synth_sha256": "74b4a6c214fafa292f72d3abfed15e3e64979b4fff61a712b4e038f8fdf07ac3",
-    "revision": "c9d0731"
+    "synth_sha256": "8c17c9819aca6c896872d93e27cfbd16c0746b95379bbd0ce36e0f97261f87ac",
+    "revision": "4875c58"
   },
   "designs": [
     {
@@ -11,18 +11,18 @@
       "sources": {
         "tests/designs/euler/p014.v": "f4ab4b0c1c0d0d4e5483d143a632d60dca91efb3468a7eabe941f3231fae90d0"
       },
-      "synth_seconds": 25.592,
+      "synth_seconds": 25.322,
       "yosys_seconds": 17.394,
       "synth_packed": {
-        "slices": 992,
+        "slices": 964,
         "slicem": 0,
-        "lut": 4017,
+        "lut": 3887,
         "carry4": 520
       },
       "yosys_packed": {
-        "slices": 1207,
+        "slices": 1178,
         "slicem": 0,
-        "lut": 4968,
+        "lut": 4847,
         "carry4": 592
       },
       "synth": {
@@ -74,18 +74,18 @@
         "tests/designs/euler/p025.v": "d6a3c60186cb978b86e8ec07f00e54272098b81649b0bb2263dbbf9167dee5ef",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 10.26,
+      "synth_seconds": 10.633,
       "yosys_seconds": 8.833,
       "synth_packed": {
-        "slices": 174,
+        "slices": 147,
         "slicem": 0,
-        "lut": 697,
+        "lut": 587,
         "carry4": 89
       },
       "yosys_packed": {
-        "slices": 246,
+        "slices": 215,
         "slicem": 0,
-        "lut": 991,
+        "lut": 864,
         "carry4": 179
       },
       "synth": {
@@ -132,18 +132,18 @@
       "sources": {
         "tests/designs/euler/p031.v": "963e665d179db067e0fb355a1998a2bb9952050887577fb9922946345068e362"
       },
-      "synth_seconds": 0.139,
+      "synth_seconds": 0.116,
       "yosys_seconds": 12.35,
       "synth_packed": {
-        "slices": 109,
+        "slices": 104,
         "slicem": 0,
-        "lut": 419,
+        "lut": 391,
         "carry4": 70
       },
       "yosys_packed": {
-        "slices": 178,
+        "slices": 179,
         "slicem": 0,
-        "lut": 397,
+        "lut": 373,
         "carry4": 54
       },
       "synth": {
@@ -190,18 +190,18 @@
       "sources": {
         "tests/designs/euler/p043.v": "156f52c09927aaf5dbf44d206023142a380154c0915a14f08fd5144b25a0cba3"
       },
-      "synth_seconds": 79.335,
+      "synth_seconds": 81.437,
       "yosys_seconds": 66.157,
       "synth_packed": {
-        "slices": 944,
+        "slices": 922,
         "slicem": 0,
-        "lut": 4095,
+        "lut": 4005,
         "carry4": 339
       },
       "yosys_packed": {
-        "slices": 919,
+        "slices": 901,
         "slicem": 0,
-        "lut": 4083,
+        "lut": 4003,
         "carry4": 320
       },
       "synth": {
@@ -249,18 +249,18 @@
       "sources": {
         "tests/designs/euler/p048.v": "4d8fcc1d2b45cb12e96332cde97eb39996351dfb4c5d374ebc80dac9ccf4c1a5"
       },
-      "synth_seconds": 12.109,
+      "synth_seconds": 12.579,
       "yosys_seconds": 11.41,
       "synth_packed": {
-        "slices": 1139,
+        "slices": 1095,
         "slicem": 0,
-        "lut": 4589,
+        "lut": 4405,
         "carry4": 753
       },
       "yosys_packed": {
-        "slices": 1097,
+        "slices": 1061,
         "slicem": 0,
-        "lut": 4532,
+        "lut": 4377,
         "carry4": 731
       },
       "synth": {
@@ -311,18 +311,18 @@
         "tests/designs/euler/p057.v": "97bb47dd27ca609fd85a0d43250dd8afbec768f24a8516cfcd02c9dac0dce22f",
         "tests/designs/euler/bcd.v": "2bdf5e3305661331c65c0896c4546b4c159dcdd2144555f69db56cb637fce4b2"
       },
-      "synth_seconds": 8.61,
+      "synth_seconds": 8.521,
       "yosys_seconds": 10.066,
       "synth_packed": {
-        "slices": 431,
+        "slices": 406,
         "slicem": 44,
-        "lut": 1639,
+        "lut": 1537,
         "carry4": 157
       },
       "yosys_packed": {
-        "slices": 523,
+        "slices": 483,
         "slicem": 44,
-        "lut": 2112,
+        "lut": 1906,
         "carry4": 288
       },
       "synth": {
@@ -372,18 +372,18 @@
       "sources": {
         "tests/designs/euler/p058.v": "aaf3cc64b404a36366973e84bd1e9ed66968fdb4a8263041773b603010769687"
       },
-      "synth_seconds": 37.934,
+      "synth_seconds": 38.899,
       "yosys_seconds": 29.146,
       "synth_packed": {
-        "slices": 1021,
+        "slices": 1010,
         "slicem": 1,
-        "lut": 4302,
+        "lut": 4257,
         "carry4": 155
       },
       "yosys_packed": {
-        "slices": 1232,
+        "slices": 1200,
         "slicem": 1,
-        "lut": 5555,
+        "lut": 5418,
         "carry4": 225
       },
       "synth": {
@@ -433,18 +433,18 @@
       "sources": {
         "tests/designs/euler/p092.v": "7b55fa9731e53abbc3ca173c54dddca8b1a1826cd47fd8c51a35ee1d53412c45"
       },
-      "synth_seconds": 5.576,
+      "synth_seconds": 5.544,
       "yosys_seconds": 12.623,
       "synth_packed": {
-        "slices": 484,
+        "slices": 481,
         "slicem": 15,
-        "lut": 1913,
+        "lut": 1896,
         "carry4": 161
       },
       "yosys_packed": {
-        "slices": 527,
+        "slices": 516,
         "slicem": 15,
-        "lut": 2107,
+        "lut": 2065,
         "carry4": 181
       },
       "synth": {
@@ -496,18 +496,18 @@
       "sources": {
         "tests/designs/euler/p097.v": "53d5d0f77c5015e07c63373a2c34e4e3918872254ddd7d415b4086ac66af2816"
       },
-      "synth_seconds": 1.07,
+      "synth_seconds": 1.125,
       "yosys_seconds": 9.307,
       "synth_packed": {
-        "slices": 202,
+        "slices": 195,
         "slicem": 0,
-        "lut": 809,
+        "lut": 779,
         "carry4": 129
       },
       "yosys_packed": {
-        "slices": 193,
+        "slices": 185,
         "slicem": 0,
-        "lut": 792,
+        "lut": 761,
         "carry4": 125
       },
       "synth": {

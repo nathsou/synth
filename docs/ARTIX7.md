@@ -13,13 +13,15 @@ On nine Project Euler solvers, the native flow is compared with Yosys's
 and routed by synth's own backend. Summary (details below):
 
 - Native packed slices are fewer than nextpnr's on all nine designs (by
-  32% to 57%), and fewer than the matched backend's on six.
+  34% to 61%), and fewer than the matched backend's on six (2–5% more on
+  the other three).
 - The native estimate is faster than the matched backend's (same timer and
   backend, Yosys's netlist) on eight of nine designs.
 - Against nextpnr's own estimates, native timing is better on six of nine;
   the two timers use different cell delay models (see below).
-- Native implementation is slower: 3 to 4 times nextpnr's wall time on
-  the largest designs.
+- End to end (Yosys included for nextpnr), native implementation is
+  faster on two designs and within 1.5 times nextpnr's time on five;
+  Euler 25 takes 1.7 times as long and Euler 48 three times.
 
 ## Synthesis
 
@@ -95,17 +97,20 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   draw from each interconnect tile's own GND/VCC wires where they can.
 - **Placement.** Deterministic simulated annealing of half-perimeter
   wirelength over slice macros, block RAMs and DSPs together, with I/O
-  fixed by the XDC. Clock nets use BUFGs and global routing and are left out
+  fixed by the XDC, on VPR's schedule: the initial temperature from the
+  cost changes of random moves, N^(4/3) moves per temperature within a
+  window adapting toward 44% acceptance, cooling by acceptance rate, and a
+  greedy finish. Clock nets use BUFGs and global routing and are left out
   of the wirelength cost.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in
-  disjoint regions (quadrants, then halves) are routed concurrently;
-  congested nets keep the branches of their trees clear of overused nodes
-  and reroute only the sinks they lose. Routing is timing-driven: sink
-  criticalities come from the placement's predicted delays, then from the
-  routes, and one round reroutes critical nets after the first legal
-  routing. Address cascades between block RAM tiles and buffer
+  disjoint regions (quadrants, then halves) are routed concurrently, and
+  each connection searches only around its own source and sink; congested
+  nets keep the branches of their trees clear of overused nodes and reroute
+  only the sinks they lose. Routing is timing-driven: sink criticalities
+  come from the placement's predicted delays, then from the routes every
+  other iteration. Address cascades between block RAM tiles and buffer
   pass-throughs are not general routing.
 - **Timing estimate.** Static timing over the packed netlist using X-Ray's
   SDF cell delays (slow-corner maxima, per CARRY4 arc and per DSP register
@@ -191,25 +196,25 @@ and tops, flattened. The reference is `synth_xilinx -family xc7 -flatten
 -noiopad -noclkbuf` with Yosys's other defaults: DSP, RAM, SRL and wide mux
 inference enabled. LUTs are LUT1–LUT6 plus Yosys's INV cells; LUT RAM,
 SRL and MUXF7/F8 cells are counted separately in the JSON. Packed slices
-are each netlist through synth's packer. Measured with Yosys 0.52 (`fee39a3`) at revision `c9d0731`; each
+are each netlist through synth's packer. Measured with Yosys 0.52 (`fee39a3`) at revision `4875c58`; each
 column is **synth / Yosys**. Full counts: [ARTIX7_QOR.json](ARTIX7_QOR.json).
 
 | Design | LUTs | FFs | CARRY4 | BRAM18 | DSP48 | Packed slices |
 |---|---:|---:|---:|---:|---:|---:|
-| Euler 14 | 2961 / 3525 | 2214 / 2201 | 494 / 592 | 4 / 4 | 0 / 0 | 992 / 1207 |
-| Euler 25 | 515 / 543 | 187 / 187 | 87 / 143 | 0 / 0 | 0 / 0 | 174 / 246 |
-| Euler 31 | 203 / 297 | 402 / 404 | 60 / 54 | 6 / 6 | 0 / 0 | 109 / 178 |
-| Euler 43 | 3637 / 3400 | 1497 / 1517 | 339 / 320 | 0 / 0 | 0 / 0 | 944 / 919 |
-| Euler 48 | 3229 / 3351 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 | 1139 / 1097 |
-| Euler 57 | 1139 / 1067 | 1113 / 1114 | 155 / 224 | 0 / 0 | 0 / 0 | 431 / 523 |
-| Euler 58 | 3751 / 4706 | 2028 / 2030 | 132 / 225 | 0 / 0 | 0 / 0 | 1021 / 1232 |
-| Euler 92 | 880 / 966 | 2616 / 2660 | 157 / 181 | 7 / 7 | 0 / 1 | 484 / 527 |
-| Euler 97 | 545 / 543 | 445 / 445 | 121 / 125 | 0 / 0 | 3 / 3 | 202 / 193 |
+| Euler 14 | 2961 / 3525 | 2214 / 2201 | 494 / 592 | 4 / 4 | 0 / 0 | 964 / 1178 |
+| Euler 25 | 515 / 543 | 187 / 187 | 87 / 143 | 0 / 0 | 0 / 0 | 147 / 215 |
+| Euler 31 | 203 / 297 | 402 / 404 | 60 / 54 | 6 / 6 | 0 / 0 | 104 / 179 |
+| Euler 43 | 3637 / 3400 | 1497 / 1517 | 339 / 320 | 0 / 0 | 0 / 0 | 922 / 901 |
+| Euler 48 | 3229 / 3351 | 2412 / 2438 | 709 / 731 | 0 / 0 | 13 / 13 | 1095 / 1061 |
+| Euler 57 | 1139 / 1067 | 1113 / 1114 | 155 / 224 | 0 / 0 | 0 / 0 | 406 / 483 |
+| Euler 58 | 3751 / 4706 | 2028 / 2030 | 132 / 225 | 0 / 0 | 0 / 0 | 1010 / 1200 |
+| Euler 92 | 880 / 966 | 2616 / 2660 | 157 / 181 | 7 / 7 | 0 / 1 | 481 / 516 |
+| Euler 97 | 545 / 543 | 445 / 445 | 121 / 125 | 0 / 0 | 3 / 3 | 195 / 185 |
 
 Euler 43 needs 7% more LUTs: Yosys implements more of its wide
 multiplexing in MUXF7/F8 (610 and 222 cells). Euler 57 trades 72 LUTs for
-69 fewer CARRY4s. Euler 48 and 97 have fewer or equal LUTs but pack into
-more slices, from the LUTs replicated into carry lanes.
+69 fewer CARRY4s. Euler 43, 48 and 97 pack into 2–5% more slices than
+Yosys's netlists, mostly from propagate LUTs replicated into carry lanes.
 
 ### Routed
 
@@ -222,15 +227,18 @@ Results: [ARTIX7_PNR.json](ARTIX7_PNR.json).
 
 | Design | Slices: synth / nextpnr / matched | INT pips | MHz: synth / nextpnr / matched | Seconds: synth / nextpnr |
 |---|---:|---:|---:|---:|
-| Euler 14 | 992 / 2266 / 1207 | 53257 / 68048 / 61122 | 104.5 / 89.9 / 87.9 | 236 / 51 |
-| Euler 25 | 174 / 380 / 246 | 9402 / 7229 / 9519 | 111.4 / 90.4 / 72.9 | 25 / 12 |
-| Euler 31 | 109 / 254 / 178 | 5017 / 7266 / 6416 | 234.1 / 232.7 / 189.0 | 10 / 11 |
-| Euler 43 | 944 / 1398 / 919 | 58809 / 49108 / 55141 | 83.3 / 76.2 / 71.6 | 319 / 76 |
-| Euler 48 | 1139 / 2364 / 1097 | 61444 / 58139 / 56418 | 118.3 / 133.9 / 116.8 | 125 / 36 |
-| Euler 57 | 431 / 784 / 523 | 23170 / 21300 / 20530 | 93.8 / 108.0 / 86.2 | 57 / 18 |
-| Euler 58 | 1021 / 2152 / 1232 | 64869 / 71300 / 73314 | 104.2 / 90.6 / 84.9 | 193 / 56 |
-| Euler 92 | 484 / 926 / 527 | 23351 / 28446 / 24223 | 119.5 / 116.6 / 89.7 | 31 / 28 |
-| Euler 97 | 202 / 446 / 193 | 10810 / 10539 / 9656 | 76.5 / 141.8 / 77.8 | 17 / 11 |
+| Euler 14 | 964 / 2266 / 1178 | 49407 / 68048 / 55324 | 105.7 / 89.9 / 114.0 | 59 / 51 |
+| Euler 25 | 147 / 380 / 215 | 8770 / 7229 / 8365 | 117.5 / 90.4 / 90.0 | 22 / 13 |
+| Euler 31 | 104 / 254 / 179 | 4552 / 7266 / 5440 | 254.8 / 232.7 / 253.4 | 9 / 11 |
+| Euler 43 | 922 / 1398 / 901 | 50641 / 49108 / 48004 | 82.9 / 76.2 / 76.3 | 125 / 84 |
+| Euler 48 | 1095 / 2364 / 1061 | 56647 / 58139 / 51862 | 125.6 / 133.9 / 111.2 | 117 / 38 |
+| Euler 57 | 406 / 784 / 483 | 22094 / 21300 / 18978 | 106.0 / 108.0 / 100.0 | 28 / 19 |
+| Euler 58 | 1010 / 2152 / 1200 | 55820 / 71300 / 67874 | 115.3 / 90.6 / 84.4 | 77 / 56 |
+| Euler 92 | 481 / 926 / 516 | 19624 / 28446 / 21241 | 135.0 / 116.6 / 110.9 | 21 / 28 |
+| Euler 97 | 195 / 446 / 185 | 9213 / 10539 / 9004 | 78.4 / 141.8 / 71.6 | 17 / 12 |
+
+Seconds are end to end: synthesis included, Yosys's for nextpnr. The
+synth columns are at revision `46b82d1`.
 
 How to read the timing columns:
 
@@ -241,8 +249,8 @@ How to read the timing columns:
   Q, against X-Ray's slow-corner SDF maxima), and it does not time block RAM
   or DSP paths.
 - **Euler 97** is limited by a chain of two DSP multiplies in one cycle.
-  Without block RAM and DSP paths, synth estimates 137.9 MHz and the matched
-  flow 142.7.
+  Without block RAM and DSP paths, synth estimates 162.6 MHz and the matched
+  flow 139.9. Euler 48's estimate without DSP paths is 129.8 MHz.
 - **No timing is certified.**
 
 ## Remaining work
@@ -250,10 +258,11 @@ How to read the timing columns:
 - Calibrate timing against vendor tools or hardware (cell corners, clock
   skew, I/O and hold), and characterize the BRAM pips missing from the
   upstream data.
-- Reduce implementation time on large designs (3–4 times nextpnr's now),
-  dominated by the first routing pass.
+- Reduce routing time on designs with wide high-fanout critical nets
+  (Euler 48: three times nextpnr's). Their sinks' A* searches are loosely
+  bounded by a lookahead that classes wires without their index.
 - Close the remaining synthesis gaps: Euler 43's wide multiplexing, and
-  carry-lane LUT replication that costs slices on Euler 48 and 97.
+  carry-lane LUT replication that costs 2–5% slices on Euler 43, 48 and 97.
 - Validate on hardware with a SoC and realistic clock and I/O constraints;
   extend primitive coverage (RAMB36, DSP cascades, clocking) and verify
   legality at device capacity.
