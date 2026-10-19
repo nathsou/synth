@@ -43,7 +43,14 @@ pub fn implement(
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
-    let placement = place::place(&db, &nl, &p, xdc, opts.seed, opts.effort)?;
+    // Timing-driven placement: criticalities from the delays the placement
+    // being annealed predicts.
+    let mut criticality = |pl: &place::Placement| {
+        let a = timer.analyze(&predictor(&db, &nl, &p, pl));
+        a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
+    };
+    let placement =
+        place::place(&db, &nl, &p, xdc, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     let mut features = cell_features(&db, &nl, &p, &placement, xdc)?;
     let (mut requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;

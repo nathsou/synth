@@ -6,9 +6,11 @@ use crate::{
     pack::Packed,
     xdc::Constraints,
 };
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use synth_core::FxHashMap;
 use synth_core::rng::Rng;
-use synth_netlist::{CellId, Netlist};
+use synth_netlist::{CellId, NetId, Netlist};
 
 #[derive(Clone, Debug)]
 pub struct Site {
@@ -58,6 +60,20 @@ fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> 
     }
     Ok(out)
 }
+/// Criticalities of each cell's reading of a net in a placement, for
+/// timing-driven placement.
+pub type Criticality<'a> = &'a mut dyn FnMut(&Placement) -> FxHashMap<(CellId, NetId), f32>;
+
+/// The weight of timing against wirelength in timing-driven placement:
+/// VPR's 0.5 lengthened wires enough on congested designs (Euler 48) to
+/// lose more in routing than placement gained; 0.25 helped or held on each
+/// design measured. The criticality exponent's range, raised as moves
+/// become local, is VPR's.
+const TIMING_TRADEOFF: f64 = 0.25;
+const CRITICALITY_EXPONENT: (f64, f64) = (1.0, 8.0);
+/// Temperatures between timing analyses of the placement.
+const RETIME_TEMPERATURES: usize = 4;
+
 /// The smallest move window in tiles: neighboring slice columns are two or
 /// more tile columns apart, across their interconnect.
 const MIN_WINDOW: i32 = 3;
@@ -69,6 +85,7 @@ pub fn place(
     xdc: &Constraints,
     seed: u64,
     effort: f64,
+    mut criticality: Option<Criticality<'_>>,
 ) -> Result<Placement, String> {
     if !effort.is_finite() || effort <= 0.0 || effort > 100.0 {
         return Err("placement effort must be in (0,100]".into());
@@ -221,13 +238,38 @@ pub fn place(
             }
         }
     }
-    // Nets as the slices, hard blocks and fixed pins they connect. Clocks
+    // From here, locations change only through moves, which the timing
+    // analysis between temperatures reads.
+    let loc: Vec<Cell<usize>> = loc.into_iter().map(Cell::new).collect();
+    let hard_loc: Vec<Cell<usize>> = hard_loc.into_iter().map(Cell::new).collect();
+    // Nets as the slices, hard blocks and fixed pins they connect, and their
+    // connections from driver to each reader with its criticality. Clocks
     // use global routing, not the fabric's.
+    #[derive(Clone, Copy, PartialEq)]
+    enum End {
+        Slice(usize),
+        Hard(usize),
+        Fixed(i32, i32),
+    }
     struct PlacedNet {
         slices: Vec<usize>,
         hard: Vec<usize>,
         fixed: Vec<(f64, f64)>,
+        driver: Option<End>,
+        /// Readers with their timing weights: criticality raised to the
+        /// exponent.
+        sinks: Vec<(End, (CellId, NetId), Cell<f64>)>,
     }
+    let end = |c: CellId| {
+        if let Some(&(s, _)) = p.slots.get(&c) {
+            Some(End::Slice(s))
+        } else if let Some(&h) = hard_index.get(&c) {
+            Some(End::Hard(h))
+        } else {
+            let t = &db.tiles[ports.get(&c)?.tile];
+            Some(End::Fixed(i32::from(t.x), i32::from(t.y)))
+        }
+    };
     let nets: Vec<PlacedNet> = nl
         .live_nets()
         .filter(|n| !clock_nets.contains(n) && nl.nets[*n].constant.is_none())
@@ -249,10 +291,22 @@ pub fn place(
             if clusters.len() + blocks.len() + fixed.len() < 2 || net.users.len() > 100 {
                 return None;
             }
+            let driver = net.driver.and_then(|d| end(d.cell));
+            let mut sinks: Vec<(End, (CellId, NetId), Cell<f64>)> = Vec::new();
+            for u in &net.users {
+                if let Some(e) = end(u.cell)
+                    && Some(e) != driver
+                    && !sinks.iter().any(|(_, (c, _), _)| *c == u.cell)
+                {
+                    sinks.push((e, (u.cell, n), Cell::new(0.0)));
+                }
+            }
             Some(PlacedNet {
                 slices: clusters.into_iter().collect(),
                 hard: blocks.into_iter().collect(),
                 fixed,
+                driver,
+                sinks,
             })
         })
         .collect();
@@ -266,14 +320,25 @@ pub fn place(
             hard_affected[h].insert(i);
         }
     }
-    let cost = |i: usize, loc: &[usize], hard_loc: &[usize]| {
+    let tile_at = |e: End| match e {
+        End::Slice(s) => {
+            let t = &db.tiles[all[loc[s].get()].tile];
+            (i32::from(t.x), i32::from(t.y))
+        }
+        End::Hard(h) => {
+            let t = &db.tiles[kinds[hard[h].1][hard_loc[h].get()].tile];
+            (i32::from(t.x), i32::from(t.y))
+        }
+        End::Fixed(x, y) => (x, y),
+    };
+    let hpwl = |i: usize| {
         let net = &nets[i];
         let mut bounds = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        let slices = net.slices.iter().map(|&s| &db.tiles[all[loc[s]].tile]);
-        let blocks = net.hard.iter().map(|&h| &db.tiles[kinds[hard[h].1][hard_loc[h]].tile]);
+        let slices = net.slices.iter().map(|&s| tile_at(End::Slice(s)));
+        let blocks = net.hard.iter().map(|&h| tile_at(End::Hard(h)));
         for (x, y) in slices
             .chain(blocks)
-            .map(|t| (f64::from(t.x), f64::from(t.y)))
+            .map(|(x, y)| (f64::from(x), f64::from(y)))
             .chain(net.fixed.iter().copied())
         {
             bounds.0 = bounds.0.min(x);
@@ -282,6 +347,32 @@ pub fn place(
             bounds.3 = bounds.3.max(y);
         }
         bounds.2 - bounds.0 + bounds.3 - bounds.1
+    };
+    // The timing cost of a net: each connection's predicted delay weighted
+    // by its criticality raised to the current exponent (VPR).
+    let timing = |i: usize| {
+        let net = &nets[i];
+        let Some(d) = net.driver else { return 0.0 };
+        let (dx, dy) = tile_at(d);
+        net.sinks
+            .iter()
+            .map(|(e, _, weight)| {
+                let (x, y) = tile_at(*e);
+                let delay = if (x, y) == (dx, dy) {
+                    0.0
+                } else {
+                    crate::sta::predicted_delay(x - dx, y - dy)
+                };
+                weight.get() * delay
+            })
+            .sum::<f64>()
+    };
+    // Each net costs its wirelength and timing cost, normalized by their
+    // totals at the start of each temperature.
+    let (wl_weight, td_weight) = (Cell::new(1.0), Cell::new(0.0));
+    let cost = |i: usize| {
+        let td = td_weight.get();
+        wl_weight.get() * hpwl(i) + if td == 0.0 { 0.0 } else { td * timing(i) }
     };
     // Tile coordinates of every slice and hard block site, and each macro
     // shape's candidate placements by the tile of their first slice, so
@@ -301,7 +392,6 @@ pub fn place(
     let span =
         slice_xy.iter().chain(hard_xy.iter().flatten()).fold(1, |m, &(x, y)| m.max(x).max(y));
     let objects = macros.len() + hard.len();
-    let mut total: f64 = (0..nets.len()).map(|i| cost(i, &loc, &hard_loc)).sum();
     let mut step =
         |m: usize, window: i32, temperature: f64, rng: &mut Rng| -> Option<(f64, bool)> {
             let accept = |delta: f64, rng: &mut Rng| {
@@ -314,13 +404,13 @@ pub fn place(
                 // swapping with the block there.
                 let h = m - macros.len();
                 let k = hard[h].1;
-                let (cx, cy) = hard_xy[k][hard_loc[h]];
+                let (cx, cy) = hard_xy[k][hard_loc[h].get()];
                 // Hard block columns are sparse: the window spans at least a few.
                 let w = window.max(10);
                 let near: Vec<usize> = (0..kinds[k].len())
                     .filter(|&t| {
                         let (x, y) = hard_xy[k][t];
-                        t != hard_loc[h] && (x - cx).abs() <= w && (y - cy).abs() <= w
+                        t != hard_loc[h].get() && (x - cx).abs() <= w && (y - cy).abs() <= w
                     })
                     .collect();
                 if near.is_empty() {
@@ -332,21 +422,21 @@ pub fn place(
                 if let Some(o) = other {
                     changed.extend(hard_affected[o].iter().copied());
                 }
-                let old: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
-                let from = hard_loc[h];
-                hard_loc[h] = target;
+                let old: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let from = hard_loc[h].get();
+                hard_loc[h].set(target);
                 if let Some(o) = other {
-                    hard_loc[o] = from;
+                    hard_loc[o].set(from);
                 }
-                let new: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+                let new: f64 = changed.iter().map(|&i| cost(i)).sum();
                 let accepted = accept(new - old, rng);
                 if accepted {
                     hard_occupied[k][target] = Some(h);
                     hard_occupied[k][from] = other;
                 } else {
-                    hard_loc[h] = from;
+                    hard_loc[h].set(from);
                     if let Some(o) = other {
-                        hard_loc[o] = target;
+                        hard_loc[o].set(target);
                     }
                 }
                 return Some((new - old, accepted));
@@ -386,15 +476,15 @@ pub fn place(
                 .iter()
                 .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
                 .collect();
-            let old: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+            let old: f64 = changed.iter().map(|&i| cost(i)).sum();
             let saved: Vec<_> = moved.iter().map(|&m| macro_sites[m].clone()).collect();
             for (&s, &t) in macros[m].iter().zip(target) {
-                loc[s] = t;
+                loc[s].set(t);
             }
             if let Some(o) = swap {
-                loc[macros[o][0]] = saved[0][0];
+                loc[macros[o][0]].set(saved[0][0]);
             }
-            let new: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+            let new: f64 = changed.iter().map(|&i| cost(i)).sum();
             let accepted = accept(new - old, rng);
             if accepted {
                 for v in &saved {
@@ -414,12 +504,50 @@ pub fn place(
             } else {
                 for (&m, v) in moved.iter().zip(saved) {
                     for (&cluster, s) in macros[m].iter().zip(v) {
-                        loc[cluster] = s;
+                        loc[cluster].set(s);
                     }
                 }
             }
             Some((new - old, accepted))
         };
+    let snapshot = || {
+        let (mut rams, mut dsps) = (BTreeMap::new(), BTreeMap::new());
+        for (h, &(c, k)) in hard.iter().enumerate() {
+            let site = kinds[k][hard_loc[h].get()].clone();
+            if k == 0 {
+                rams.insert(c, site)
+            } else {
+                dsps.insert(c, site)
+            };
+        }
+        Placement {
+            slices: loc.iter().map(|s| all[s.get()].clone()).collect(),
+            ports: ports.clone(),
+            clocks: BTreeMap::new(),
+            rams,
+            dsps,
+            hpwl: (0..nets.len()).map(hpwl).sum(),
+        }
+    };
+    // Timing-driven placement: criticalities from the current placement,
+    // the exponent raised as moves become local, and both costs weighted by
+    // the inverse of their totals.
+    let mut retime = |window: i32| {
+        let Some(criticality) = criticality.as_mut() else { return };
+        let local = 1.0 - f64::from(window - MIN_WINDOW) / f64::from((span - MIN_WINDOW).max(1));
+        let (first, last) = CRITICALITY_EXPONENT;
+        let exponent = first + (last - first) * local.clamp(0.0, 1.0);
+        let crit = criticality(&snapshot());
+        for net in &nets {
+            for (_, key, weight) in &net.sinks {
+                weight.set(f64::from(crit.get(key).copied().unwrap_or(0.0)).powf(exponent));
+            }
+        }
+        let wl: f64 = (0..nets.len()).map(hpwl).sum();
+        let td: f64 = (0..nets.len()).map(timing).sum();
+        wl_weight.set((1.0 - TIMING_TRADEOFF) / wl.max(1.0));
+        td_weight.set(if td > 0.0 { TIMING_TRADEOFF / td } else { 0.0 });
+    };
     if objects != 0 && !nets.is_empty() {
         // VPR's schedule (Betz and Rose): the initial temperature is twenty
         // times the deviation of cost changes from random moves; each
@@ -428,24 +556,23 @@ pub fn place(
         // moderate, and ends when the temperature is negligible beside the
         // cost per net.
         let mut window = span;
+        retime(window);
         let deltas: Vec<f64> = (0..objects)
             .filter_map(|_| step(rng.below(objects), window, f64::INFINITY, &mut rng).map(|d| d.0))
             .collect();
-        total += deltas.iter().sum::<f64>();
         let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
         let deviation = (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
             / deltas.len().max(1) as f64)
             .sqrt();
         let mut temperature = 20.0 * deviation.max(1e-3);
         let moves = ((objects as f64).powf(4.0 / 3.0) * effort).max(objects as f64) as usize;
-        loop {
+        for round in 1.. {
             let (mut tried, mut accepted) = (0, 0);
             for _ in 0..moves {
-                if let Some((delta, ok)) = step(rng.below(objects), window, temperature, &mut rng) {
+                if let Some((_, ok)) = step(rng.below(objects), window, temperature, &mut rng) {
                     tried += 1;
                     if ok {
                         accepted += 1;
-                        total += delta;
                     }
                 }
             }
@@ -461,6 +588,10 @@ pub fn place(
             } else {
                 0.8
             };
+            if round % RETIME_TEMPERATURES == 0 {
+                retime(window);
+            }
+            let total: f64 = (0..nets.len()).map(cost).sum();
             if temperature < 0.005 * total / nets.len() as f64 {
                 break;
             }
@@ -470,17 +601,7 @@ pub fn place(
             step(rng.below(objects), MIN_WINDOW, 0.0, &mut rng);
         }
     }
-    let hpwl = (0..nets.len()).map(|i| cost(i, &loc, &hard_loc)).sum();
-    let mut rams = BTreeMap::new();
-    let mut dsps = BTreeMap::new();
-    for (h, &(c, k)) in hard.iter().enumerate() {
-        let site = kinds[k][hard_loc[h]].clone();
-        if k == 0 {
-            rams.insert(c, site)
-        } else {
-            dsps.insert(c, site)
-        };
-    }
+    let mut placement = snapshot();
     let mut clocks = BTreeMap::new();
     let buffers = sites(db, |k| k == "BUFGCTRL")?;
     let mut used = BTreeSet::new();
@@ -489,7 +610,7 @@ pub fn place(
         let origin = ports
             .get(&drv.cell)
             .map(|s| s.tile)
-            .or_else(|| p.slots.get(&drv.cell).map(|&(s, _)| all[loc[s]].tile))
+            .or_else(|| p.slots.get(&drv.cell).map(|&(s, _)| all[loc[s].get()].tile))
             .ok_or("unsupported clock source")?;
         let source = &db.tiles[origin];
         let selected = buffers
@@ -504,12 +625,6 @@ pub fn place(
         used.insert(selected.0);
         clocks.insert(clock, selected.1.clone());
     }
-    Ok(Placement {
-        slices: loc.into_iter().map(|s| all[s].clone()).collect(),
-        ports,
-        clocks,
-        rams,
-        dsps,
-        hpwl,
-    })
+    placement.clocks = clocks;
+    Ok(placement)
 }
