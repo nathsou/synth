@@ -513,7 +513,10 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
                     if name.starts_with("S[") {
                         None
                     } else if name.starts_with("DI[") {
-                        Some(format!("{}X", char::from(b'A' + name.as_bytes()[3] - b'0')))
+                        let lane = usize::from(name.as_bytes()[3] - b'0');
+                        // From the lane's O5 inside the slice, or its X input.
+                        (!p.slices[s].di_from_o5(nl, lane))
+                            .then(|| format!("{}X", char::from(b'A' + lane as u8)))
                     } else if name == "CI" && pack::value(nl, n).is_none() {
                         Some("CIN".into())
                     } else if matches!(name, "CI" | "CYINIT") {
@@ -600,8 +603,15 @@ fn external(nl: &Netlist, p: &Packed, n: NetId) -> bool {
     nl.nets[n].users.iter().any(|u| {
         let Some(&(s, l)) = p.slots.get(&u.cell) else { return true };
         let slice = &p.slices[s];
+        let pin = nl.str(nl.cells[u.cell].pins[u.pin as usize].name);
         let internal = Some(s) == driver
             && (slice.f8 == Some(u.cell)
+                || slice.carry == Some(u.cell)
+                    && pin
+                        .strip_prefix("DI[")
+                        .and_then(|x| x.strip_suffix(']'))
+                        .and_then(|x| x.parse().ok())
+                        .is_some_and(|k| slice.di_from_o5(nl, k))
                 || pack::is_ff(nl.cell_kind(u.cell))
                     && pack::ff_mux(nl, slice, l, u.cell) != "BYPASS");
         !internal
@@ -771,6 +781,9 @@ fn cell_features(
             };
             enable(&mut f, &prefix, &format!("PRECYINIT.{init}"));
             for l in 0..4 {
+                if s.di_from_o5(nl, usize::from(l)) {
+                    enable(&mut f, &prefix, &format!("CARRY4.{}CY0", char::from(b'A' + l)));
+                }
                 let used =
                     |pin: &str| nl.pin_net(c, pin).is_some_and(|n| !nl.nets[n].users.is_empty());
                 if used(&format!("O[{l}]")) {
