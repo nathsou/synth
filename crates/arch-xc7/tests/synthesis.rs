@@ -205,10 +205,14 @@ fn packing_enforces_shared_control_sets() {
         "module top(input aclk,bclk,en,rst,input [7:0] d,output reg [7:0] a,b,c); always @(posedge aclk) if(en) a<=d; always @(negedge aclk) if(rst)b<=0;else b<=d; always @(posedge bclk or posedge rst) if(rst)c<=0;else c<=d; endmodule",
     );
     let p = arch_xc7::pack::pack(&mut nl).unwrap();
-    // Twenty-four direct-data registers use six slices and only the two
-    // shared constant LUTs. AX-DX bypasses must not allocate data-buffer LUTs.
-    assert_eq!(p.slices.len(), 6);
-    assert_eq!(nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count(), 2);
+    // Twenty-four direct-data registers in three control sets fill three
+    // slices: four through the AX-DX bypasses and four through O5 route-
+    // throughs into the second bank. A fourth slice holds the two shared
+    // constant LUTs; the route-throughs are the only other LUTs.
+    assert_eq!(p.slices.len(), 4);
+    let luts = nl.live_cells().filter(|&c| arch_xc7::pack::is_lut(nl.cell_kind(c))).count();
+    let through: usize = p.slices.iter().map(|s| s.lut5.iter().flatten().count()).sum();
+    assert_eq!((luts, through), (14, 12));
     for slice in &p.slices {
         for ff in slice.ffs.iter().flatten() {
             let ctrl = slice.controls.as_ref().unwrap();
@@ -220,6 +224,30 @@ fn packing_enforces_shared_control_sets() {
             assert_eq!(matches!(nl.cell_kind(*ff), "FDRE" | "FDSE"), ctrl.synchronous);
         }
     }
+}
+
+#[test]
+fn unused_carry_lanes_take_no_propagate_luts() {
+    // A six-bit sum leaves the top two lanes of its second CARRY4 unused;
+    // their sites are free for other LUTs.
+    let mut nl = synth(
+        "module top(input clk,input [5:0] a,b,output reg [5:0] y); always @(posedge clk) y<=a+b; endmodule",
+    );
+    let p = arch_xc7::pack::pack(&mut nl).unwrap();
+    let mut dead = 0;
+    for slice in &p.slices {
+        let Some(c) = slice.carry else { continue };
+        let used = |pin: String| nl.pin_net(c, &pin).is_some_and(|n| !nl.nets[n].users.is_empty());
+        for lane in 0..4 {
+            if !(lane..4).any(|k| used(format!("O[{k}]")) || used(format!("CO[{k}]"))) {
+                // Any LUT there is unrelated logic, not a propagate copy.
+                let s = nl.pin_net(c, &format!("S[{lane}]"));
+                assert!(slice.luts[lane].is_none_or(|l| nl.pin_net(l, "O") != s), "lane {lane}");
+                dead += 1;
+            }
+        }
+    }
+    assert!(dead >= 2, "{dead} unused lanes");
 }
 
 #[test]
@@ -264,9 +292,19 @@ fn dsp_products_preserve_signed_extension_and_truncation() {
 fn dsp_packing_rejects_unsupported_modes_and_controls() {
     let original = synth("module top(input [11:0] a,b,output [23:0] y); assign y=a*b; endmodule");
     let dsp = original.live_cells().find(|&c| original.cell_kind(c) == "DSP48E1").unwrap();
+    // One register stage at the inputs, product or output is supported.
+    for key in ["AREG", "BREG", "MREG", "PREG"] {
+        let mut nl = original.clone();
+        nl.set_param(dsp, key, Param::Int(1));
+        if key == "AREG" || key == "BREG" {
+            nl.set_param(dsp, &format!("{}CASCREG", &key[..1]), Param::Int(1));
+        }
+        arch_xc7::pack::pack(&mut nl).unwrap();
+    }
     for (key, value) in [
-        ("AREG", Param::Int(1)),
-        ("PREG", Param::Int(1)),
+        ("AREG", Param::Int(2)),
+        ("ACASCREG", Param::Int(1)),
+        ("PREG", Param::Int(2)),
         ("IS_OPMODE_INVERTED", Param::Int(1)),
         ("USE_MULT", Param::Int(0)),
     ] {
@@ -281,7 +319,7 @@ fn dsp_packing_rejects_unsupported_modes_and_controls() {
     let pin = synth_netlist::PinRef { cell: dsp, pin: index as u32 };
     nl.disconnect(pin);
     nl.connect(pin, dynamic).unwrap();
-    assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("fixed multiplier control"));
+    assert!(arch_xc7::pack::pack(&mut nl).unwrap_err().contains("constant control"));
 }
 
 #[test]
@@ -330,4 +368,38 @@ fn shared_propagate_luts_are_replicated_without_an_extra_logic_level() {
             assert_eq!(out["y"], (510 - a - b) & 255);
         }
     }
+}
+
+fn count(nl: &Netlist, kind: &str) -> usize {
+    nl.live_cells().filter(|&c| nl.cell_kind(c) == kind).count()
+}
+
+#[test]
+fn shallow_memories_become_distributed_ram() {
+    // Seven bits read at another address take four RAM32M ports of two bits
+    // (three per primitive); a second read at the write address can use
+    // port D. Writes keep one write enable per primitive.
+    let nl = synth(
+        "module m(input clk, we, input [3:0] wa, ra, input [6:0] d, output [6:0] q, p);
+         reg [6:0] mem [0:15];
+         always @(posedge clk) if (we) mem[wa] <= d;
+         assign q = mem[ra];
+         assign p = mem[wa];
+         endmodule",
+    );
+    assert_eq!(count(&nl, "RAM32M"), 2);
+    assert_eq!(count(&nl, "RAMB18E1"), 0);
+    let deep = synth(
+        "module m(input clk, input [1:0] we, input [5:0] a, input [3:0] d, output reg [3:0] q);
+         reg [3:0] mem [0:63];
+         always @(posedge clk) begin
+           if (we[0]) mem[a][1:0] <= d[1:0];
+           if (we[1]) mem[a][3:2] <= d[3:2];
+           q <= mem[a];
+         end
+         endmodule",
+    );
+    // Two write-enable groups of two bits, each read at the write address.
+    assert_eq!(count(&deep, "RAM64M"), 2);
+    assert_eq!(count(&deep, "FDRE"), 4);
 }

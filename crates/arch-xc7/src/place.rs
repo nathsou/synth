@@ -1,4 +1,6 @@
-//! Deterministic macro placement with legal carry chains and HPWL annealing.
+//! Deterministic placement by annealing HPWL (VPR's adaptive schedule and
+//! move window): slice macros with legal carry chains, and block RAMs and
+//! DSPs on sites of their kind.
 use crate::{
     device::{Device, xy},
     pack::Packed,
@@ -56,6 +58,10 @@ fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> 
     }
     Ok(out)
 }
+/// The smallest move window in tiles: neighboring slice columns are two or
+/// more tile columns apart, across their interconnect.
+const MIN_WINDOW: i32 = 3;
+
 pub fn place(
     db: &Device,
     nl: &Netlist,
@@ -106,6 +112,10 @@ pub fn place(
         }
     }
     let all = sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
+    let is_m: Vec<bool> = all
+        .iter()
+        .map(|s| db.templates[db.tiles[s.tile].template].sites[s.index].kind == "SLICEM")
+        .collect();
     let by_xy: BTreeMap<_, _> = all.iter().enumerate().map(|(i, s)| ((s.x, s.y), i)).collect();
     let mut macros = p.chains.clone();
     let chained: BTreeSet<_> = macros.iter().flatten().copied().collect();
@@ -114,15 +124,20 @@ pub fn place(
             macros.push(vec![i]);
         }
     }
-    macros.sort_by_key(|m| (std::cmp::Reverse(m.len()), m[0]));
-    let mut choices: BTreeMap<usize, Vec<Vec<usize>>> = BTreeMap::new();
-    for m in &macros {
-        choices.entry(m.len()).or_insert_with(|| {
+    // A macro of slices needing LUT RAM or shift registers needs SLICEMs.
+    let needs_m = |m: &[usize]| m.iter().any(|&s| p.slices[s].needs_m(nl));
+    // SLICEM macros go first: their sites are the scarcer.
+    macros.sort_by_key(|m| (std::cmp::Reverse(m.len()), !needs_m(m), m[0]));
+    let macro_m: Vec<bool> = macros.iter().map(|m| needs_m(m)).collect();
+    let mut choices: BTreeMap<(usize, bool), Vec<Vec<usize>>> = BTreeMap::new();
+    for (m, &mm) in macros.iter().zip(&macro_m) {
+        choices.entry((m.len(), mm)).or_insert_with(|| {
             all.iter()
                 .filter_map(|s| {
                     (0..m.len())
                         .map(|i| by_xy.get(&(s.x, s.y + i as u32)).copied())
                         .collect::<Option<Vec<_>>>()
+                        .filter(|v| !mm || v.iter().all(|&i| is_m[i]))
                 })
                 .collect()
         });
@@ -132,54 +147,134 @@ pub fn place(
     let mut macro_sites = vec![Vec::new(); macros.len()];
     let mut rng = Rng::new(seed);
     for (i, m) in macros.iter().enumerate() {
-        let mut candidates = choices[&m.len()].clone();
+        let mut candidates = choices[&(m.len(), macro_m[i])].clone();
         rng.shuffle(&mut candidates);
-        let v = candidates
-            .into_iter()
-            .find(|v| v.iter().all(|&s| occupied[s].is_none()))
-            .ok_or("not enough legal slice sites for carry macros")?;
+        let v = candidates.into_iter().find(|v| v.iter().all(|&s| occupied[s].is_none())).ok_or(
+            if macro_m[i] {
+                "not enough SLICEM sites for LUT RAM and shift registers"
+            } else {
+                "not enough legal slice sites for carry macros"
+            },
+        )?;
         for (&cluster, &s) in m.iter().zip(&v) {
             loc[cluster] = s;
             occupied[s] = Some(i);
         }
         macro_sites[i] = v;
     }
-    let nets: Vec<_> = nl
+    // Block RAMs and DSPs anneal with the slices, each on a site of its kind.
+    let kinds =
+        [sites(db, |k| k == "RAMB18E1" || k == "FIFO18E1")?, sites(db, |k| k == "DSP48E1")?];
+    let mut hard: Vec<(CellId, usize)> = Vec::new();
+    for c in nl.live_cells() {
+        match nl.cell_kind(c) {
+            "RAMB18E1" => {
+                crate::physical_bram::validate(nl, c)?;
+                hard.push((c, 0));
+            }
+            "DSP48E1" => {
+                crate::physical_dsp::validate(nl, c)?;
+                hard.push((c, 1));
+            }
+            _ => {}
+        }
+    }
+    let hard_index: BTreeMap<CellId, usize> =
+        hard.iter().enumerate().map(|(h, &(c, _))| (c, h)).collect();
+    let mut hard_occupied: Vec<Vec<Option<usize>>> =
+        kinds.iter().map(|k| vec![None; k.len()]).collect();
+    let mut hard_loc = vec![0; hard.len()];
+    for (h, &(c, k)) in hard.iter().enumerate() {
+        let mut candidates: Vec<usize> = (0..kinds[k].len()).collect();
+        rng.shuffle(&mut candidates);
+        let site = candidates
+            .into_iter()
+            .find(|&i| hard_occupied[k][i].is_none())
+            .ok_or_else(|| format!("not enough {} sites", nl.cell_kind(c)))?;
+        hard_occupied[k][site] = Some(h);
+        hard_loc[h] = site;
+    }
+    let mut clock_nets: BTreeSet<_> = p
+        .slices
+        .iter()
+        .flat_map(|s| {
+            s.controls
+                .as_ref()
+                .map(|c| c.clock)
+                .into_iter()
+                .chain(s.memory.as_ref().map(|m| m.clock))
+        })
+        .collect();
+    for &(c, k) in &hard {
+        let pins: &[&str] = if k == 0 {
+            &["CLKARDCLK", "CLKBWRCLK"]
+        } else if crate::physical_dsp::validate(nl, c)?.clocked() {
+            &["CLK"]
+        } else {
+            &[]
+        };
+        for pin in pins {
+            if let Some(n) = nl.pin_net(c, pin)
+                && nl.nets[n].constant.is_none()
+            {
+                clock_nets.insert(n);
+            }
+        }
+    }
+    // Nets as the slices, hard blocks and fixed pins they connect. Clocks
+    // use global routing, not the fabric's.
+    struct PlacedNet {
+        slices: Vec<usize>,
+        hard: Vec<usize>,
+        fixed: Vec<(f64, f64)>,
+    }
+    let nets: Vec<PlacedNet> = nl
         .live_nets()
+        .filter(|n| !clock_nets.contains(n) && nl.nets[*n].constant.is_none())
         .filter_map(|n| {
             let net = &nl.nets[n];
             let mut clusters = BTreeSet::new();
+            let mut blocks = BTreeSet::new();
             let mut fixed = Vec::new();
             for pin in net.driver.iter().chain(&net.users) {
                 if let Some(&(s, _)) = p.slots.get(&pin.cell) {
                     clusters.insert(s);
+                } else if let Some(&h) = hard_index.get(&pin.cell) {
+                    blocks.insert(h);
                 } else if let Some(site) = ports.get(&pin.cell) {
                     let tile = &db.tiles[site.tile];
                     fixed.push((f64::from(tile.x), f64::from(tile.y)));
                 }
             }
-            if clusters.len() + fixed.len() < 2 || net.users.len() > 100 {
+            if clusters.len() + blocks.len() + fixed.len() < 2 || net.users.len() > 100 {
                 return None;
             }
-            Some((clusters.into_iter().collect::<Vec<_>>(), fixed))
+            Some(PlacedNet {
+                slices: clusters.into_iter().collect(),
+                hard: blocks.into_iter().collect(),
+                fixed,
+            })
         })
         .collect();
     let mut affected = vec![BTreeSet::new(); p.slices.len()];
-    for (i, (v, _)) in nets.iter().enumerate() {
-        for &s in v {
+    let mut hard_affected = vec![BTreeSet::new(); hard.len()];
+    for (i, net) in nets.iter().enumerate() {
+        for &s in &net.slices {
             affected[s].insert(i);
         }
+        for &h in &net.hard {
+            hard_affected[h].insert(i);
+        }
     }
-    let cost = |i: usize, loc: &[usize]| {
-        let (v, fixed) = &nets[i];
+    let cost = |i: usize, loc: &[usize], hard_loc: &[usize]| {
+        let net = &nets[i];
         let mut bounds = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for (x, y) in v
-            .iter()
-            .map(|&s| {
-                let t = &db.tiles[all[loc[s]].tile];
-                (f64::from(t.x), f64::from(t.y))
-            })
-            .chain(fixed.iter().copied())
+        let slices = net.slices.iter().map(|&s| &db.tiles[all[loc[s]].tile]);
+        let blocks = net.hard.iter().map(|&h| &db.tiles[kinds[hard[h].1][hard_loc[h]].tile]);
+        for (x, y) in slices
+            .chain(blocks)
+            .map(|t| (f64::from(t.x), f64::from(t.y)))
+            .chain(net.fixed.iter().copied())
         {
             bounds.0 = bounds.0.min(x);
             bounds.1 = bounds.1.min(y);
@@ -188,122 +283,203 @@ pub fn place(
         }
         bounds.2 - bounds.0 + bounds.3 - bounds.1
     };
-    if !macros.is_empty() {
-        for round in 0..40 {
-            let temperature = 20.0 * (0.85f64).powi(round);
-            for _ in 0..((macros.len() * 10) as f64 * effort) as usize {
-                let m = rng.below(macros.len());
-                let candidates = &choices[&macros[m].len()];
-                let target = &candidates[rng.below(candidates.len())];
-                if *target == macro_sites[m] {
-                    continue;
-                }
-                let owners: BTreeSet<_> =
-                    target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
-                let swap = if owners.is_empty() {
-                    None
-                } else if owners.len() == 1
-                    && macros[m].len() == 1
-                    && macros[*owners.first().unwrap()].len() == 1
-                {
-                    owners.first().copied()
-                } else {
-                    continue;
-                };
-                let mut moved = vec![m];
-                if let Some(o) = swap {
-                    moved.push(o);
-                }
-                let changed: BTreeSet<_> = moved
-                    .iter()
-                    .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
+    // Tile coordinates of every slice and hard block site, and each macro
+    // shape's candidate placements by the tile of their first slice, so
+    // that moves can stay within a window around a macro.
+    let tile_of = |s: &Site| (i32::from(db.tiles[s.tile].x), i32::from(db.tiles[s.tile].y));
+    let slice_xy: Vec<(i32, i32)> = all.iter().map(tile_of).collect();
+    let hard_xy: Vec<Vec<(i32, i32)>> =
+        kinds.iter().map(|k| k.iter().map(tile_of).collect()).collect();
+    type ByTile = BTreeMap<(i32, i32), Vec<usize>>;
+    let mut nearby: BTreeMap<(usize, bool), ByTile> = BTreeMap::new();
+    for (key, list) in &choices {
+        let index = nearby.entry(*key).or_default();
+        for (i, v) in list.iter().enumerate() {
+            index.entry(slice_xy[v[0]]).or_default().push(i);
+        }
+    }
+    let span =
+        slice_xy.iter().chain(hard_xy.iter().flatten()).fold(1, |m, &(x, y)| m.max(x).max(y));
+    let objects = macros.len() + hard.len();
+    let mut total: f64 = (0..nets.len()).map(|i| cost(i, &loc, &hard_loc)).sum();
+    let mut step =
+        |m: usize, window: i32, temperature: f64, rng: &mut Rng| -> Option<(f64, bool)> {
+            let accept = |delta: f64, rng: &mut Rng| {
+                delta <= 0.0
+                    || temperature.is_infinite()
+                    || rng.unit() < (-delta / temperature).exp()
+            };
+            if m >= macros.len() {
+                // A hard block moves to another site of its kind in the window,
+                // swapping with the block there.
+                let h = m - macros.len();
+                let k = hard[h].1;
+                let (cx, cy) = hard_xy[k][hard_loc[h]];
+                // Hard block columns are sparse: the window spans at least a few.
+                let w = window.max(10);
+                let near: Vec<usize> = (0..kinds[k].len())
+                    .filter(|&t| {
+                        let (x, y) = hard_xy[k][t];
+                        t != hard_loc[h] && (x - cx).abs() <= w && (y - cy).abs() <= w
+                    })
                     .collect();
-                let old: f64 = changed.iter().map(|&i| cost(i, &loc)).sum();
-                let saved: Vec<_> = moved.iter().map(|&m| macro_sites[m].clone()).collect();
-                for (&s, &t) in macros[m].iter().zip(target) {
-                    loc[s] = t;
+                if near.is_empty() {
+                    return None;
                 }
-                if let Some(o) = swap {
-                    loc[macros[o][0]] = saved[0][0];
+                let target = near[rng.below(near.len())];
+                let other = hard_occupied[k][target];
+                let mut changed = hard_affected[h].clone();
+                if let Some(o) = other {
+                    changed.extend(hard_affected[o].iter().copied());
                 }
-                let new: f64 = changed.iter().map(|&i| cost(i, &loc)).sum();
-                if new <= old || rng.unit() < ((old - new) / temperature).exp() {
-                    for v in &saved {
-                        for &s in v {
-                            occupied[s] = None;
-                        }
-                    }
-                    macro_sites[m] = target.clone();
-                    if let Some(o) = swap {
-                        macro_sites[o] = saved[0].clone();
-                    }
-                    for &m in &moved {
-                        for &s in &macro_sites[m] {
-                            occupied[s] = Some(m);
-                        }
-                    }
+                let old: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+                let from = hard_loc[h];
+                hard_loc[h] = target;
+                if let Some(o) = other {
+                    hard_loc[o] = from;
+                }
+                let new: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+                let accepted = accept(new - old, rng);
+                if accepted {
+                    hard_occupied[k][target] = Some(h);
+                    hard_occupied[k][from] = other;
                 } else {
-                    for (&m, v) in moved.iter().zip(saved) {
-                        for (&cluster, s) in macros[m].iter().zip(v) {
-                            loc[cluster] = s;
-                        }
+                    hard_loc[h] = from;
+                    if let Some(o) = other {
+                        hard_loc[o] = target;
+                    }
+                }
+                return Some((new - old, accepted));
+            }
+            let key = (macros[m].len(), macro_m[m]);
+            let (cx, cy) = slice_xy[macro_sites[m][0]];
+            // Offsets land on tiles without a site for this shape
+            // (interconnect columns, the device edge): try a few.
+            let d = 2 * window as usize + 1;
+            let at = (0..16).find_map(|_| {
+                let (dx, dy) = (rng.below(d) as i32 - window, rng.below(d) as i32 - window);
+                nearby[&key].get(&(cx + dx, cy + dy))
+            })?;
+            let target = &choices[&key][at[rng.below(at.len())]];
+            if *target == macro_sites[m] {
+                return None;
+            }
+            let owners: BTreeSet<_> =
+                target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
+            let swap = if owners.is_empty() {
+                None
+            } else if owners.len() == 1
+            && macros[m].len() == 1
+            && macros[*owners.first().unwrap()].len() == 1
+            // The displaced slice takes this one's site.
+            && (!macro_m[*owners.first().unwrap()] || is_m[macro_sites[m][0]])
+            {
+                owners.first().copied()
+            } else {
+                return None;
+            };
+            let mut moved = vec![m];
+            if let Some(o) = swap {
+                moved.push(o);
+            }
+            let changed: BTreeSet<_> = moved
+                .iter()
+                .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
+                .collect();
+            let old: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+            let saved: Vec<_> = moved.iter().map(|&m| macro_sites[m].clone()).collect();
+            for (&s, &t) in macros[m].iter().zip(target) {
+                loc[s] = t;
+            }
+            if let Some(o) = swap {
+                loc[macros[o][0]] = saved[0][0];
+            }
+            let new: f64 = changed.iter().map(|&i| cost(i, &loc, &hard_loc)).sum();
+            let accepted = accept(new - old, rng);
+            if accepted {
+                for v in &saved {
+                    for &s in v {
+                        occupied[s] = None;
+                    }
+                }
+                macro_sites[m] = target.clone();
+                if let Some(o) = swap {
+                    macro_sites[o] = saved[0].clone();
+                }
+                for &m in &moved {
+                    for &s in &macro_sites[m] {
+                        occupied[s] = Some(m);
+                    }
+                }
+            } else {
+                for (&m, v) in moved.iter().zip(saved) {
+                    for (&cluster, s) in macros[m].iter().zip(v) {
+                        loc[cluster] = s;
                     }
                 }
             }
+            Some((new - old, accepted))
+        };
+    if objects != 0 && !nets.is_empty() {
+        // VPR's schedule (Betz and Rose): the initial temperature is twenty
+        // times the deviation of cost changes from random moves; each
+        // temperature tries about N^(4/3) moves in a window that adapts
+        // toward 44% acceptance; cooling is slower while acceptance is
+        // moderate, and ends when the temperature is negligible beside the
+        // cost per net.
+        let mut window = span;
+        let deltas: Vec<f64> = (0..objects)
+            .filter_map(|_| step(rng.below(objects), window, f64::INFINITY, &mut rng).map(|d| d.0))
+            .collect();
+        total += deltas.iter().sum::<f64>();
+        let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
+        let deviation = (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
+            / deltas.len().max(1) as f64)
+            .sqrt();
+        let mut temperature = 20.0 * deviation.max(1e-3);
+        let moves = ((objects as f64).powf(4.0 / 3.0) * effort).max(objects as f64) as usize;
+        loop {
+            let (mut tried, mut accepted) = (0, 0);
+            for _ in 0..moves {
+                if let Some((delta, ok)) = step(rng.below(objects), window, temperature, &mut rng) {
+                    tried += 1;
+                    if ok {
+                        accepted += 1;
+                        total += delta;
+                    }
+                }
+            }
+            let rate = accepted as f64 / tried.max(1) as f64;
+            window =
+                ((f64::from(window) * (1.0 - 0.44 + rate)).round() as i32).clamp(MIN_WINDOW, span);
+            temperature *= if rate > 0.96 {
+                0.5
+            } else if rate > 0.8 {
+                0.9
+            } else if rate > 0.15 {
+                0.95
+            } else {
+                0.8
+            };
+            if temperature < 0.005 * total / nets.len() as f64 {
+                break;
+            }
+        }
+        // A final greedy pass.
+        for _ in 0..moves {
+            step(rng.below(objects), MIN_WINDOW, 0.0, &mut rng);
         }
     }
-    let hpwl = (0..nets.len()).map(|i| cost(i, &loc)).sum();
+    let hpwl = (0..nets.len()).map(|i| cost(i, &loc, &hard_loc)).sum();
     let mut rams = BTreeMap::new();
     let mut dsps = BTreeMap::new();
-    for (kind, placed) in [("RAMB18E1", &mut rams), ("DSP48E1", &mut dsps)] {
-        let hard_sites = sites(db, |k| {
-            if kind == "RAMB18E1" { k == "RAMB18E1" || k == "FIFO18E1" } else { k == "DSP48E1" }
-        })?;
-        let mut occupied = BTreeSet::new();
-        for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == kind) {
-            if kind == "RAMB18E1" {
-                crate::physical_bram::validate(nl, c)?;
-            } else {
-                crate::physical_dsp::validate(nl, c)?;
-            }
-            let neighbors: Vec<_> = nl.cells[c]
-                .pins
-                .iter()
-                .filter_map(|p| p.net)
-                .flat_map(|n| nl.nets[n].driver.iter().chain(&nl.nets[n].users))
-                .filter_map(|pin| {
-                    p.slots
-                        .get(&pin.cell)
-                        .map(|&(s, _)| &db.tiles[all[loc[s]].tile])
-                        .or_else(|| ports.get(&pin.cell).map(|s| &db.tiles[s.tile]))
-                })
-                .collect();
-            let (i, site) = hard_sites
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !occupied.contains(i))
-                .min_by_key(|(_, s)| {
-                    let t = &db.tiles[s.tile];
-                    neighbors
-                        .iter()
-                        .map(|n| i64::from((t.x - n.x).abs()) + i64::from((t.y - n.y).abs()))
-                        .sum::<i64>()
-                })
-                .ok_or_else(|| format!("not enough {kind} sites"))?;
-            occupied.insert(i);
-            placed.insert(c, site.clone());
-        }
-    }
-    let mut clock_nets: BTreeSet<_> =
-        p.slices.iter().filter_map(|s| s.controls.as_ref().map(|c| c.clock)).collect();
-    for &c in rams.keys() {
-        for pin in ["CLKARDCLK", "CLKBWRCLK"] {
-            if let Some(n) = nl.pin_net(c, pin)
-                && nl.nets[n].constant.is_none()
-            {
-                clock_nets.insert(n);
-            }
-        }
+    for (h, &(c, k)) in hard.iter().enumerate() {
+        let site = kinds[k][hard_loc[h]].clone();
+        if k == 0 {
+            rams.insert(c, site)
+        } else {
+            dsps.insert(c, site)
+        };
     }
     let mut clocks = BTreeMap::new();
     let buffers = sites(db, |k| k == "BUFGCTRL")?;

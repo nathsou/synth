@@ -40,7 +40,15 @@ fn useful(a: &Sig, b: &Sig) -> bool {
     }
     true
 }
-fn multiplier(m: &mut Module, a: Sig, b: Sig, a_signed: bool, b_signed: bool) -> Sig {
+/// A DSP48E1 computing `a * b`, plus `c` (48 bits) through the post-adder.
+fn multiplier(
+    m: &mut Module,
+    a: Sig,
+    b: Sig,
+    a_signed: bool,
+    b_signed: bool,
+    c: Option<Sig>,
+) -> Sig {
     let p = m.new_sig(48);
     let mut params: Vec<_> =
         REGISTERS.iter().map(|&k| (k.into(), Attr::Const(LogicVec::from_u64(0, 32)))).collect();
@@ -58,16 +66,18 @@ fn multiplier(m: &mut Module, a: Sig, b: Sig, a_signed: bool, b_signed: bool) ->
         ("P".into(), PortDir::Output, p.clone()),
         ("A".into(), PortDir::Input, a.extend(30, a_signed)),
         ("B".into(), PortDir::Input, b.extend(18, b_signed)),
+        ("C".into(), PortDir::Input, c.clone().unwrap_or_else(|| Sig::zeros(48))),
     ];
+    // X = Y = M (the product), Z = C or zero.
+    let opmode = if c.is_some() { 0b011_0101 } else { 0b000_0101 };
     for (name, w, value) in [
         ("ACIN", 30, 0),
         ("BCIN", 18, 0),
-        ("C", 48, 0),
         ("D", 25, 0),
         ("PCIN", 48, 0),
         ("ALUMODE", 4, 0),
         ("INMODE", 5, 0),
-        ("OPMODE", 7, 5),
+        ("OPMODE", 7, opmode),
         ("CARRYINSEL", 3, 0),
     ] {
         conns.push((name.into(), PortDir::Input, Sig::from_const(&LogicVec::from_u64(value, w))));
@@ -121,20 +131,83 @@ fn chunks(s: &Sig, capacity: usize, signed: bool) -> Vec<(usize, Sig, bool)> {
     }
     out
 }
-pub(crate) fn map(m: &mut Module) -> usize {
-    let cells: Vec<_> = m.live_cells().collect();
+/// The operands of multiplication `y = a * b` (`width` bits), widest first,
+/// trimmed of redundant high bits.
+fn operands(a: &Sig, b: &Sig, width: usize, signed: bool) -> (Sig, Sig) {
+    let (a, b) =
+        (trimmed(&a.extend(width, signed), signed), trimmed(&b.extend(width, signed), signed));
+    if a.width() < b.width() { (b, a) } else { (a, b) }
+}
+
+/// Folds additions of a product into the post-adder of the product's DSP:
+/// `x * y + z` is one DSP48E1 computing `P = A * B + C` when the product
+/// has no other use and fits one multiplier, and the sum at most 48 bits.
+fn fold_additions(m: &mut Module) -> usize {
+    let uses = synth_rtl::opt::use_counts(m);
+    let mut products = synth_core::FxHashMap::default();
+    for c in m.live_cells() {
+        if let CellKind::Binary { op: BinaryOp::Mul, y, .. } = &m.cells[c].kind
+            && y.iter().all(|b| matches!(b, SigBit::Wire(..)) && uses.get(b) == Some(&1))
+        {
+            products.insert(y.clone(), c);
+        }
+    }
     let mut count = 0;
+    let adds: Vec<_> = m.live_cells().collect();
+    for c in adds {
+        let CellKind::Binary { op: BinaryOp::Add, a, b, y, .. } = m.cells[c].kind.clone() else {
+            continue;
+        };
+        if y.width() > 48 {
+            continue;
+        }
+        // An operand that is a product, or an untruncated product extended.
+        let found = [(&a, &b), (&b, &a)].into_iter().find_map(|(x, z)| {
+            (1..=x.width()).rev().find_map(|k| {
+                let &p = products.get(&x.slice(0, k))?;
+                Some((p, k, x, z))
+            })
+        });
+        let Some((p, k, operand, addend)) = found else { continue };
+        if !m.cells[p].alive {
+            continue;
+        }
+        let CellKind::Binary { signed, a: x, b: z, y: product, .. } = m.cells[p].kind.clone()
+        else {
+            continue;
+        };
+        let (x, z) = operands(&x, &z, product.width(), signed);
+        if !useful(&x, &z) || chunks(&x, 25, signed).len() > 1 || chunks(&z, 18, signed).len() > 1 {
+            continue;
+        }
+        let top = operand.0[k - 1];
+        let extension =
+            operand.0[k..].iter().all(|&e| e == if signed { top } else { SigBit::ZERO });
+        if k < operand.width() && !(extension && k >= x.width() + z.width()) {
+            continue;
+        }
+        // Sums are modulo the result width, so any extension of the
+        // addend to 48 bits will do.
+        let sum = multiplier(m, x, z, signed, signed, Some(addend.extend(48, false)));
+        m.cells[p].alive = false;
+        m.cells[c].alive = false;
+        m.connect(y.clone(), sum.slice(0, y.width()));
+        products.remove(&product);
+        count += 1;
+    }
+    count
+}
+
+pub(crate) fn map(m: &mut Module) -> usize {
+    let mut count = fold_additions(m);
+    let cells: Vec<_> = m.live_cells().collect();
     for c in cells {
         let CellKind::Binary { op: BinaryOp::Mul, signed, a, b, y } = m.cells[c].kind.clone()
         else {
             continue;
         };
         let width = y.width();
-        let (mut a, mut b) =
-            (trimmed(&a.extend(width, signed), signed), trimmed(&b.extend(width, signed), signed));
-        if a.width() < b.width() {
-            std::mem::swap(&mut a, &mut b);
-        }
+        let (a, b) = operands(&a, &b, width, signed);
         if !useful(&a, &b) {
             continue;
         }
@@ -155,7 +228,7 @@ pub(crate) fn map(m: &mut Module) -> usize {
                 // operands, obscuring the small partial product.
                 let p = if useful(&ap, &bp) || a_signed || b_signed {
                     count += 1;
-                    multiplier(m, ap.clone(), bp, a_signed, b_signed)
+                    multiplier(m, ap.clone(), bp, a_signed, b_signed, None)
                         .extend(bits, a_signed || b_signed)
                 } else {
                     m.binary(

@@ -1,5 +1,6 @@
 //! Device CSR construction and configuration-bearing site pass-throughs.
 use crate::device::Device;
+use synth_core::FxHashMap;
 
 /// Only explicitly modelled site pass-throughs are allowed. X-Ray `hint` pips
 /// are not wires: many cross LUTs or muxes that require configuration.
@@ -51,6 +52,20 @@ pub(crate) fn pseudo_config(kind: &str, src: &str, dst: &str) -> Option<Vec<Stri
     None
 }
 
+/// Whether a tile pip is general routing. The BRAM address cascades
+/// (`BRAM_CASCINBOT_*`, `BRAM_CASCINTOP_*`) exist for cascaded RAMB36s: a
+/// net would reach them through the address pins of a neighboring block
+/// RAM, using its site pin wires as a route-through. A BUFGCTRL's input-to-output pseudo
+/// pip passes through the buffer, which only conducts when configured; clock
+/// nets are routed to and from the buffers placed for them instead.
+pub(crate) fn general_routing(kind: &str, src: &str, dst: &str) -> bool {
+    let cascade = kind.starts_with("BRAM_")
+        && (src.starts_with("BRAM_CASCINBOT_") || src.starts_with("BRAM_CASCINTOP_"));
+    let through_bufg =
+        kind.starts_with("CLK_BUFG_") && src.contains("BUFGCTRL") && dst.ends_with("_O");
+    !(cascade || through_bufg)
+}
+
 #[derive(Debug)]
 pub struct RoutingGraph {
     pub offsets: Vec<u32>,
@@ -61,6 +76,8 @@ pub struct RoutingGraph {
     pub x: Vec<i16>,
     pub y: Vec<i16>,
     pub cost: Vec<f32>,
+    /// Lookahead class of each node.
+    pub class: Vec<u16>,
     pub missing_timing: usize,
 }
 impl RoutingGraph {
@@ -89,6 +106,7 @@ impl RoutingGraph {
             x: db.node_x.clone(),
             y: db.node_y.clone(),
             cost: vec![1.0; n],
+            class: vec![0; n],
             missing_timing: 0,
         };
         for (i, t) in db.tiles.iter().enumerate() {
@@ -107,6 +125,22 @@ impl RoutingGraph {
                 if p.delay.is_none() && !p.fixed {
                     graph.missing_timing += 1;
                 }
+            }
+        }
+        // Nodes are classed by the wire they start as, ignoring its index:
+        // wires of a type (a hex wire, a logic block's input) have like
+        // remaining costs to a sink at like distances.
+        let mut seen = vec![false; n];
+        let mut names: FxHashMap<&str, u16> = FxHashMap::default();
+        for t in &db.tiles {
+            for (w, &node) in t.nodes.iter().enumerate() {
+                if std::mem::replace(&mut seen[node as usize], true) {
+                    continue;
+                }
+                let name = db.templates[t.template].wires[w]
+                    .trim_end_matches(|c: char| c.is_ascii_digit());
+                let next = u16::try_from(names.len()).map_err(|_| "too many wire classes")?;
+                graph.class[node as usize] = *names.entry(name).or_insert(next);
             }
         }
         Ok(graph)

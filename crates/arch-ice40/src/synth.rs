@@ -575,7 +575,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     }
     for l in &mapping.luts {
         let o = e.nl.add_net(&format!("$n{}", l.node));
-        e.lut_of.insert(l.node, (o, l.leaves.clone(), l.truth));
+        e.lut_of.insert(l.node, (o, l.leaves.clone(), l.truth6()));
         let (pos, neg) = refs.get(&l.node).copied().unwrap_or_default();
         e.phase.insert(l.node, neg > pos);
     }
@@ -610,7 +610,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     for l in &mapping.luts {
         let out = e.lut_of[&l.node].0;
         let ins: Vec<NetId> = l.leaves.iter().map(|&x| e.node_net(x)).collect::<Result<_, _>>()?;
-        let truth = e.net_truth(l.node, &l.leaves, l.truth, false);
+        let truth = e.net_truth(l.node, &l.leaves, l.truth6(), false);
         e.lut(&format!("$lut{}", l.node), &ins, truth, out)?;
     }
     // Ports.

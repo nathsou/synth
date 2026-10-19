@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// The RV32I base instruction set, shared by the three RISC-V cores
+// (rv_single.weft, rv_multi.weft, rv_pipe.weft): the decoder, the ALU, the
+// load and store lanes, the memory-mapped devices, and an assembler made of
+// functions that the program (rv_program.weft) is written with. FENCE, ECALL
+// and EBREAK execute as no-ops; there are no CSRs, interrupts or traps.
+//
+// Memory map, the same for every core:
+//   instructions 0x0000_0000  a ROM, read by fetches only
+//   data         0x0001_0000  a RAM (any address below 0x1000_0000)
+//   LEDs         0x1000_0000  write: the low 8 bits drive the LEDs
+//   UART         0x1000_0004  write: send the low byte; read: bit 0 is busy
+
+enum AluOp { Add, Sub, Sll, Slt, Sltu, Xor, Srl, Sra, Or, And, PassB }
+
+/// What an instruction does.
+struct Decoded {
+    rd: uint<5>,
+    rs1: uint<5>,
+    rs2: uint<5>,
+    funct3: uint<3>,
+    imm: uint<32>,
+    alu: AluOp,
+    a_pc: bool,   // the ALU's first operand is the PC instead of rs1
+    b_imm: bool,  // the ALU's second operand is the immediate instead of rs2
+    writes: bool, // writes rd (never x0)
+    load: bool,
+    store: bool,
+    branch: bool,
+    jal: bool,
+    jalr: bool,
+}
+
+fn sext<N: int>(x: uint<N>) -> uint<32> {
+    sint<32>(x.as_sint()).bits()
+}
+
+/// The ALU operation of OP and OP-IMM instructions; `alt` is bit 30.
+fn alu_op(funct3: uint<3>, alt: bool) -> AluOp {
+    match funct3 {
+        0 => if alt { .Sub } else { .Add },
+        1 => .Sll,
+        2 => .Slt,
+        3 => .Sltu,
+        4 => .Xor,
+        5 => if alt { .Sra } else { .Srl },
+        6 => .Or,
+        7 => .And,
+    }
+}
+
+fn decode(i: uint<32>) -> Decoded {
+    var d: Decoded = Decoded {
+        rd: i[11:7],
+        rs1: i[19:15],
+        rs2: i[24:20],
+        funct3: i[14:12],
+        imm: sext(i[31:20]),
+        alu: .Add,
+        a_pc: false,
+        b_imm: true,
+        writes: false,
+        load: false,
+        store: false,
+        branch: false,
+        jal: false,
+        jalr: false,
+    };
+    let u_imm = concat(i[31:12], uint<12>(0));
+    match i[6:0] {
+        0b0110111 => { // LUI
+            d.imm = u_imm;
+            d.alu = .PassB;
+            d.writes = true;
+        }
+        0b0010111 => { // AUIPC
+            d.imm = u_imm;
+            d.a_pc = true;
+            d.writes = true;
+        }
+        0b1101111 => { // JAL
+            d.imm = sext(concat(i[31], i[19:12], i[20], i[30:21], 0b0));
+            d.jal = true;
+            d.writes = true;
+        }
+        0b1100111 => { // JALR
+            d.jalr = true;
+            d.writes = true;
+        }
+        0b1100011 => { // BEQ, BNE, BLT, BGE, BLTU, BGEU
+            d.imm = sext(concat(i[31], i[7], i[30:25], i[11:8], 0b0));
+            d.branch = true;
+        }
+        0b0000011 => { // LB, LH, LW, LBU, LHU
+            d.load = true;
+            d.writes = true;
+        }
+        0b0100011 => { // SB, SH, SW
+            d.imm = sext(concat(i[31:25], i[11:7]));
+            d.store = true;
+        }
+        0b0010011 => { // ADDI … SRAI: bit 30 only selects SRAI
+            d.alu = alu_op(i[14:12], i[14:12] == 5 && i[30]);
+            d.writes = true;
+        }
+        0b0110011 => { // ADD … AND
+            d.alu = alu_op(i[14:12], i[30]);
+            d.b_imm = false;
+            d.writes = true;
+        }
+        _ => {} // FENCE, ECALL, EBREAK and the rest: no-ops
+    }
+    if d.rd == 0 { d.writes = false; }
+    d
+}
+
+/// The three shifts share one shifter: a left shift is a right shift of the
+/// bit-reversed value, reversed back.
+fn shift(op: AluOp, a: uint<32>, amount: uint<5>) -> uint<32> {
+    let left = op == .Sll;
+    let x = if left { a.reverse() } else { a };
+    let fill = op == .Sra && a[31];
+    let r = (concat(fill, x).as_sint() >> amount).bits()[31:0];
+    if left { r.reverse() } else { r }
+}
+
+fn alu(op: AluOp, a: uint<32>, b: uint<32>) -> uint<32> {
+    match op {
+        .Add => a +% b,
+        .Sub => a -% b,
+        .Sll | .Srl | .Sra => shift(op, a, b[4:0]),
+        .Slt => if a.as_sint() < b.as_sint() { 1 } else { 0 },
+        .Sltu => if a < b { 1 } else { 0 },
+        .Xor => a ^ b,
+        .Or => a | b,
+        .And => a & b,
+        .PassB => b,
+    }
+}
+
+fn branch_taken(funct3: uint<3>, a: uint<32>, b: uint<32>) -> bool {
+    match funct3 {
+        0 => a == b,
+        1 => a != b,
+        4 => a.as_sint() < b.as_sint(),
+        5 => a.as_sint() >= b.as_sint(),
+        6 => a < b,
+        7 => a >= b,
+        _ => false,
+    }
+}
+
+/// The value a load gives, from the word holding the addressed bytes.
+fn load_value(funct3: uint<3>, offset: uint<2>, word: uint<32>) -> uint<32> {
+    let v = word >> concat(offset, 0b000);
+    match funct3 {
+        0 => sext(v[7:0]),
+        1 => sext(v[15:0]),
+        4 => uint<32>(v[7:0]),
+        5 => uint<32>(v[15:0]),
+        _ => word,
+    }
+}
+
+/// The data a store writes, repeated into every byte lane it may go to;
+/// `store_mask` selects the lanes.
+fn store_lanes(funct3: uint<3>, v: uint<32>) -> uint<32> {
+    match funct3[1:0] {
+        0 => v[7:0].replicate(4),
+        1 => v[15:0].replicate(2),
+        _ => v,
+    }
+}
+
+fn store_mask(funct3: uint<3>, offset: uint<2>) -> uint<4> {
+    match funct3[1:0] {
+        0 => uint<4>(1) << offset,
+        1 => if offset[1] { 0b1100 } else { 0b0011 },
+        _ => 0b1111,
+    }
+}
+
+/// Whether a data address is a device rather than the RAM.
+fn is_device(addr: uint<32>) -> bool {
+    addr[28]
+}
+
+/// The LEDs and the UART, at 0x1000_0000. A write takes effect at the end of
+/// the cycle; `rdata` is the UART's status in the same cycle.
+module devices<CLKS_PER_BIT: int>(
+    in  write: bool,
+    in  uart_port: bool, // address bit 2: the UART rather than the LEDs
+    in  wdata: uint<32>,
+    out rdata: uint<32>,
+    out tx: bool,
+    out led: uint<8>,
+) {
+    inst uart = uart_tx<CLKS_PER_BIT>();
+    reg leds: uint<8> = 0;
+
+    uart.start = write && uart_port;
+    uart.byte = wdata[7:0];
+    if write && !uart_port { leds := wdata[7:0]; }
+    rdata = uint<32>(uart.busy.bits());
+    tx = uart.tx;
+    led = leds;
+}
+
+// The assembler. Registers by their ABI names; offsets of branches and jumps
+// are in bytes, from the instruction itself.
+
+const ZERO: uint<5> = 0;
+const RA: uint<5> = 1;
+const SP: uint<5> = 2;
+const T0: uint<5> = 5;
+const T1: uint<5> = 6;
+const T2: uint<5> = 7;
+const S0: uint<5> = 8;
+const S1: uint<5> = 9;
+const A0: uint<5> = 10;
+const A1: uint<5> = 11;
+const A2: uint<5> = 12;
+const A3: uint<5> = 13;
+const A4: uint<5> = 14;
+const A5: uint<5> = 15;
+const A6: uint<5> = 16;
+const A7: uint<5> = 17;
+const T3: uint<5> = 28;
+const T4: uint<5> = 29;
+const T5: uint<5> = 30;
+
+fn r_type(funct7: uint<7>, rs2: uint<5>, rs1: uint<5>, funct3: uint<3>, rd: uint<5>) -> uint<32> {
+    concat(funct7, rs2, rs1, funct3, rd, 0b0110011)
+}
+fn i_type(imm: sint<12>, rs1: uint<5>, funct3: uint<3>, rd: uint<5>, opcode: uint<7>) -> uint<32> {
+    concat(imm.bits(), rs1, funct3, rd, opcode)
+}
+fn s_type(imm: sint<12>, rs2: uint<5>, rs1: uint<5>, funct3: uint<3>) -> uint<32> {
+    let b = imm.bits();
+    concat(b[11:5], rs2, rs1, funct3, b[4:0], 0b0100011)
+}
+fn b_type(off: sint<13>, rs2: uint<5>, rs1: uint<5>, funct3: uint<3>) -> uint<32> {
+    let b = off.bits();
+    concat(b[12], b[10:5], rs2, rs1, funct3, b[4:1], b[11], 0b1100011)
+}
+fn shift_imm(funct7: uint<7>, shamt: uint<5>, rs1: uint<5>, funct3: uint<3>, rd: uint<5>) -> uint<32> {
+    concat(funct7, shamt, rs1, funct3, rd, 0b0010011)
+}
+
+fn lui(rd: uint<5>, imm: uint<20>) -> uint<32> { concat(imm, rd, 0b0110111) }
+fn auipc(rd: uint<5>, imm: uint<20>) -> uint<32> { concat(imm, rd, 0b0010111) }
+fn jal(rd: uint<5>, off: sint<21>) -> uint<32> {
+    let b = off.bits();
+    concat(b[20], b[10:1], b[11], b[19:12], rd, 0b1101111)
+}
+fn jalr(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 0, rd, 0b1100111) }
+fn beq(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 0) }
+fn bne(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 1) }
+fn blt(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 4) }
+fn bge(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 5) }
+fn bltu(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 6) }
+fn bgeu(rs1: uint<5>, rs2: uint<5>, off: sint<13>) -> uint<32> { b_type(off, rs2, rs1, 7) }
+fn lb(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 0, rd, 0b0000011) }
+fn lh(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 1, rd, 0b0000011) }
+fn lw(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 2, rd, 0b0000011) }
+fn lbu(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 4, rd, 0b0000011) }
+fn lhu(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 5, rd, 0b0000011) }
+fn sb(rs2: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { s_type(imm, rs2, rs1, 0) }
+fn sh(rs2: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { s_type(imm, rs2, rs1, 1) }
+fn sw(rs2: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { s_type(imm, rs2, rs1, 2) }
+fn addi(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 0, rd, 0b0010011) }
+fn slti(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 2, rd, 0b0010011) }
+fn sltiu(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 3, rd, 0b0010011) }
+fn xori(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 4, rd, 0b0010011) }
+fn ori(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 6, rd, 0b0010011) }
+fn andi(rd: uint<5>, rs1: uint<5>, imm: sint<12>) -> uint<32> { i_type(imm, rs1, 7, rd, 0b0010011) }
+fn slli(rd: uint<5>, rs1: uint<5>, shamt: uint<5>) -> uint<32> { shift_imm(0, shamt, rs1, 1, rd) }
+fn srli(rd: uint<5>, rs1: uint<5>, shamt: uint<5>) -> uint<32> { shift_imm(0, shamt, rs1, 5, rd) }
+fn srai(rd: uint<5>, rs1: uint<5>, shamt: uint<5>) -> uint<32> { shift_imm(0b0100000, shamt, rs1, 5, rd) }
+fn add(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 0, rd) }
+fn sub(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0b0100000, rs2, rs1, 0, rd) }
+fn sll(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 1, rd) }
+fn slt(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 2, rd) }
+fn sltu(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 3, rd) }
+fn xor(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 4, rd) }
+fn srl(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 5, rd) }
+fn sra(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0b0100000, rs2, rs1, 5, rd) }
+fn or(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 6, rd) }
+fn and(rd: uint<5>, rs1: uint<5>, rs2: uint<5>) -> uint<32> { r_type(0, rs2, rs1, 7, rd) }

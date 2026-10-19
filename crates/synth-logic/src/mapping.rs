@@ -28,10 +28,12 @@ pub fn optimize_observed(
     log: &mut Vec<String>,
     mut observe: impl FnMut(&LogicNet),
 ) -> Result<lutmap::Mapping, String> {
+    assert!(opts.wide.is_none(), "wide functions are mapped by `widen`");
     let t = Instant::now();
     let before = net.aig.num_ands();
     let mut merged = 0;
     let mut chain_bits = 0;
+    let mut lut_chains = 0;
     let mut const_ffs = 0;
     // Merging equivalent logic can make carry-chain operands constant;
     // simplifying the chains feeds their sums back into the graph.
@@ -45,13 +47,18 @@ pub fn optimize_observed(
         merged += st.proved;
         let removed = crate::carry::simplify_carries(net);
         chain_bits += removed;
+        let lowered = crate::carry::lower_lut_sized_carries(net, opts.k);
+        lut_chains += lowered;
         let ffs = crate::seq::remove_constant_ffs(net) + crate::seq::merge_duplicate_ffs(net);
         const_ffs += ffs;
         net.cleanup();
-        if removed + ffs == 0 {
+        if removed + ffs + lowered == 0 {
             break;
         }
         unfraiged = None;
+    }
+    if lut_chains > 0 {
+        log.push(format!("{lut_chains} carry chains mapped to LUTs (boundary inputs fit a LUT)"));
     }
     // Snapshots for structural choices: the fraiged graph, its balanced
     // form, rounds of rewriting scripts (the last is the mapped graph) and
@@ -140,6 +147,30 @@ pub fn optimize_observed(
     ));
     net.aig = best.graph;
     Ok(best.mapping)
+}
+
+/// Remaps `mapping` of `net` (its graph after [`optimize`]) onto the wide
+/// functions of `opts.wide`, within the mapping's depth so that the
+/// multiplexers' speed buys area. Returns the new graph and mapping if the
+/// netlist gets smaller. Restructuring and don't-care optimisation stay with
+/// LUTs of at most `k` inputs, so this is the last step.
+pub fn widen(
+    net: &LogicNet,
+    mapping: &lutmap::Mapping,
+    opts: &MapOptions,
+    timing: impl Fn(&LogicNet) -> lutmap::Timing,
+    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+) -> Result<Option<(crate::Aig, lutmap::Mapping)>, String> {
+    assert!(opts.wide.is_some());
+    let luts = cost(net, &net.aig, mapping)?;
+    let lg = lutmap::lut_graph(&net.aig, mapping);
+    let choices = crate::choice::build(&[&net.aig, &lg], &Default::default());
+    let mut t = timing(net);
+    t.output_required = vec![Some(mapping.depth); net.aig.outputs.len()];
+    // Cuts of up to eight leaves need more room per node.
+    let o = MapOptions { cuts_per_node: 2 * opts.cuts_per_node, ..opts.clone() };
+    let c = map_best(net, choices, &o, &t, &cost)?;
+    Ok((c.luts < luts && c.mapping.depth <= mapping.depth).then_some((c.graph, c.mapping)))
 }
 
 /// A mapping, the graph it maps and the LUTs of its netlist.

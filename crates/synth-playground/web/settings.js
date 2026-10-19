@@ -207,6 +207,7 @@ const SECTIONS = [
       [`${mod} Space`, 'Complete a name'],
       ['.', 'Complete ports, fields and variants'],
       [`${mod} /`, 'Comment or uncomment lines'],
+      ['Shift Alt F', 'Format the file'],
       ['Tab / Shift Tab', 'Indent or dedent'],
       ['F', 'Fit the schematic or the chip to the view'],
       ['Esc', 'Clear the selection'],

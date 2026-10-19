@@ -3,8 +3,10 @@
 
 Both flows use the same sources/top, flatten hierarchy, and omit I/O and clock
 buffers. Yosys otherwise uses its default synth_xilinx -family xc7 flow,
-including DSP, LUTRAM, SRL and wide mux inference. Preserve all reports and
-netlists in --out. Nonzero tool exits fail the run; missing tools are errors.
+including DSP, LUTRAM, SRL and wide mux inference. Both netlists are also
+packed by the same native packer (slices, SLICEMs, packed LUTs and CARRY4s),
+a matched area comparison. Preserve all reports and netlists in --out.
+Nonzero tool exits fail the run; missing tools are errors.
 """
 import argparse
 from collections import Counter
@@ -46,6 +48,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--design", action="append", help="Euler number; repeat to select a subset")
+    parser.add_argument("--yosys-cache", type=Path,
+                        help="reuse Yosys results keyed by Yosys version, script and source hashes")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -55,7 +59,7 @@ def main():
                 "revision": subprocess.check_output(["git", "describe", "--always", "--dirty"], cwd=ROOT, text=True).strip()}
     report = {"versions": versions, "designs": []}
     print(json.dumps(versions), flush=True)
-    print("design | LUT synth/yosys | FF | CARRY4 | BRAM18 | DSP48 | seconds", flush=True)
+    print("design | LUT synth/yosys | FF | CARRY4 | BRAM18 | DSP48 | packed slices | seconds", flush=True)
     source_dir = ROOT / "tests/designs/euler"
     for line in (source_dir / "designs.txt").read_text().splitlines():
         if not line or line.startswith("#"):
@@ -74,16 +78,39 @@ def main():
              f'read_verilog -lib +/xilinx/cells_sim.v; read_verilog "{net}"; hierarchy -check -top {top}; check -assert; blackbox =A:whitebox; write_json "{sj}"'],
             out / f"{top}.validate.log")
         src = " ".join(f'"{p}"' for p in files)
-        row["yosys_seconds"] = run(["yosys", "-Q", "-T", "-p",
-             f'read_verilog {src}; synth_xilinx -family xc7 -flatten -top {top} -noiopad -noclkbuf; write_json "{yj}"'], out / f"{top}.yosys.log")
-        packed = re.search(r"^info: packed (.+)$", (out / f"{top}.synth.log").read_text(), re.M)
-        if packed is None:
-            raise RuntimeError(f"missing native packed statistics for {top}")
-        row["synth_packed"] = json.loads(packed[1])
+        script = f'read_verilog {src}; synth_xilinx -family xc7 -flatten -top {top} -noiopad -noclkbuf; write_json "{yj}"'
+        key = hashlib.sha256(json.dumps([versions["yosys"], script.replace(str(yj), ""), hashes]).encode()).hexdigest()[:16]
+        cached = args.yosys_cache and args.yosys_cache / f"{top}-{key}.json"
+        if cached and cached.exists():
+            shutil.copyfile(cached, yj)
+            row["yosys_seconds"] = json.loads(cached.with_suffix(".seconds").read_text())
+        else:
+            row["yosys_seconds"] = run(["yosys", "-Q", "-T", "-p", script], out / f"{top}.yosys.log")
+            if cached:
+                args.yosys_cache.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(yj, cached)
+                cached.with_suffix(".seconds").write_text(json.dumps(row["yosys_seconds"]))
+        il = out / f"{top}.yosys.il"
+        run(["yosys", "-Q", "-p", f'read_json "{yj}"; write_rtlil "{il}"'], out / f"{top}.rtlil.log")
+        # The native packer may not implement every Yosys cell mode; record
+        # the reason instead of a count.
+        pack_log = out / f"{top}.yosys.pack.log"
+        with pack_log.open("w") as f:
+            subprocess.run([SYNTH, "pnr", il, "--family", "artix7", "--pack-stats"], cwd=ROOT,
+                           stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+        for tool, log in [("synth", out / f"{top}.synth.log"), ("yosys", pack_log)]:
+            packed = re.search(r"^info: packed (.+)$", log.read_text(), re.M)
+            if packed:
+                row[f"{tool}_packed"] = json.loads(packed[1])
+            elif tool == "yosys" and (error := re.search(r"^error: (.+)$", log.read_text(), re.M)):
+                row[f"{tool}_packed"] = {"unsupported": error[1]}
+            else:
+                raise RuntimeError(f"missing native packed statistics for {top} ({tool})")
         row["synth"], row["yosys"] = counts(sj, top), counts(yj, top)
         report["designs"].append(row)
         (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
         fields = " | ".join(f'{row["synth"][k]}/{row["yosys"][k]}' for k in ["lut", "ff", "carry4", "bram18", "dsp48"])
+        fields += f' | {row["synth_packed"]["slices"]}/{row["yosys_packed"].get("slices", "-")}' 
         print(f'{top} | {fields} | {row["synth_seconds"]}/{row["yosys_seconds"]}', flush=True)
     if not report["designs"]:
         parser.error("no matching designs")

@@ -136,6 +136,11 @@ fn tokenize(line: &str, ln: usize) -> Result<Vec<Tok>, ParseError> {
                 if let Some((width, bits)) = w.split_once('\'') {
                     let width: usize =
                         width.parse().map_err(|_| err(format!("bad constant `{w}`")))?;
+                    // `s` marks a signed constant: short values sign-extend.
+                    let (signed, bits) = match bits.strip_prefix('s') {
+                        Some(rest) => (true, rest),
+                        None => (false, bits),
+                    };
                     let mut v: Vec<Bit> = bits
                         .chars()
                         .rev()
@@ -145,7 +150,9 @@ fn tokenize(line: &str, ln: usize) -> Result<Vec<Tok>, ParseError> {
                         })
                         .collect::<Option<_>>()
                         .ok_or_else(|| err(format!("bad constant `{w}`")))?;
-                    v.resize(width, Bit::Zero);
+                    let fill =
+                        if signed { v.last().copied().unwrap_or(Bit::Zero) } else { Bit::Zero };
+                    v.resize(width, fill);
                     out.push(Tok::Const(v));
                 } else if w.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
                     out.push(Tok::Int(w.parse().map_err(|_| err(format!("bad number `{w}`")))?));
@@ -842,6 +849,16 @@ end
                 SigChunk::Wire { wire: "b".into(), offset: 0, width: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn signed_constants_sign_extend() {
+        // Yosys writes signed parameters such as `32'sx` in cell models.
+        let text = "module \\m\n cell \\C \\c\n  parameter signed \\P 4's10\n  parameter \\Q 4'10\n end\nend\n";
+        let d = parse(text).unwrap();
+        let params = &d.modules[0].cells[0].params;
+        assert_eq!(params[0].1.as_u64(), Some(0b1110));
+        assert_eq!(params[1].1.as_u64(), Some(0b0010));
     }
 
     #[test]

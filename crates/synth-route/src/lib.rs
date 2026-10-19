@@ -13,8 +13,14 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::Mutex;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicUsize};
 
 use synth_core::{FxHashMap, FxHashSet};
+
+mod lookahead;
+use lookahead::Lookahead;
 
 /// A routing graph: nodes with positions and base costs, directed edges
 /// with intrinsic delays.
@@ -60,11 +66,22 @@ pub struct RouteOptions {
     pub astar_cost_per_tile: f32,
     /// Delay per tile used in the A* estimate for critical connections.
     pub astar_delay_per_tile: f32,
+    /// When positive, the A* estimate is instead a table of the least cost
+    /// and delay to a sink by distance, searched on the graph up to this
+    /// many tiles away (for graphs whose wires span many positions).
+    pub lookahead_radius: i16,
+    /// Weight of the lookahead estimate: above 1 it may overestimate,
+    /// trading route quality for search effort (VPR's `astar_fac`).
+    pub lookahead_weight: f32,
     /// Scale converting delay units into cost units.
     pub delay_scale: f32,
     /// Extra tiles around a net's bounding box that searches may use (it
     /// grows for nets that stay on congested nodes).
     pub bbox_margin: i16,
+    /// Bound each connection's search by its source and sink alone, plus
+    /// the margin, rather than by the whole net (as nextpnr's router2):
+    /// sinks of nets spanning the device then search near their own path.
+    pub arc_bounding_boxes: bool,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
     /// Iterations between criticality updates while congested (0: never).
@@ -89,8 +106,11 @@ impl Default for RouteOptions {
             history_factor: 0.4,
             astar_cost_per_tile: 0.1,
             astar_delay_per_tile: 0.0,
+            lookahead_radius: 0,
+            lookahead_weight: 1.2,
             delay_scale: 0.001,
             bbox_margin: 3,
+            arc_bounding_boxes: false,
             stall_iterations: 120,
             retime_every: 0,
             reroute_criticality: 0.95,
@@ -145,8 +165,15 @@ impl Eq for QueueEntry {}
 
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Min-heap on f; break ties on node index for determinism.
-        other.f.partial_cmp(&self.f).unwrap_or(Ordering::Equal).then(other.node.cmp(&self.node))
+        // Min-heap on f; among equals the deepest first (with uniform costs
+        // many paths tie, and only one needs exploring), then by node index
+        // for determinism.
+        other
+            .f
+            .partial_cmp(&self.f)
+            .unwrap_or(Ordering::Equal)
+            .then(self.g.partial_cmp(&other.g).unwrap_or(Ordering::Equal))
+            .then(other.node.cmp(&self.node))
     }
 }
 
@@ -156,27 +183,188 @@ impl PartialOrd for QueueEntry {
     }
 }
 
-/// Per-node search and congestion state.
-struct State {
-    occupancy: Vec<u16>,
-    history: Vec<f32>,
+/// What a search reads of a node it reaches, together so that reaching a
+/// node touches one cache line.
+#[derive(Debug)]
+struct Hot {
+    x: i16,
+    y: i16,
+    /// Nets using the node. Nets routed at once use nodes in disjoint
+    /// regions, so they never update the same count.
+    occupancy: AtomicU16,
+    /// Lookahead class.
+    class: u16,
+    /// The net whose source or sink the node is ([`FREE`] if none, or
+    /// [`BLOCKED`]): no other net may use it.
+    reserved: u32,
+    /// Base cost plus history cost.
+    cost: f32,
+    /// All paths from the node stay at its position (like the inputs of a
+    /// logic block): useless for reaching a sink anywhere else.
+    confined: bool,
+}
+
+impl Hot {
+    fn occupancy(&self) -> u16 {
+        self.occupancy.load(Relaxed)
+    }
+}
+
+const FREE: u32 = u32::MAX;
+const BLOCKED: u32 = u32::MAX - 1;
+
+/// A node's marks in the current search and tree.
+#[derive(Debug, Clone, Copy, Default)]
+struct Visit {
     /// Best cost found in the current search, valid when `stamp == search_gen`.
-    best: Vec<f32>,
+    best: f32,
+    stamp: u32,
     /// Edge used to reach the node in the current search (`u32::MAX` for roots).
-    via: Vec<u32>,
-    stamp: Vec<u32>,
+    via: u32,
+    /// The node belongs to the tree of the net being routed when equal to
+    /// `tree_gen`.
+    tree: u32,
+}
+
+/// Per-node congestion state, shared by the searches of an iteration.
+struct State {
+    hot: Vec<Hot>,
+    /// Exclusive or of the nets using each node: with one user, that net.
+    users: Vec<AtomicU32>,
+    /// Reverse edge lookup: source node of each edge.
+    edge_src: Vec<u32>,
+    lookahead: Option<Lookahead>,
+}
+
+/// Search state of one thread.
+struct Scratch {
+    visit: Vec<Visit>,
     search_gen: u32,
-    /// Nodes belonging to the tree of the net being routed.
-    in_tree: Vec<u32>,
     tree_gen: u32,
     /// Delay from the source of the net being routed to its tree nodes.
     tree_delay: Vec<f32>,
-    /// Reverse edge lookup: source node of each edge.
-    edge_src: Vec<u32>,
-    /// Nodes all of whose paths stay at their position (like the inputs of
-    /// a logic block): useless for reaching a sink anywhere else.
-    confined: Vec<bool>,
 }
+
+impl Scratch {
+    fn new(n: usize) -> Scratch {
+        Scratch {
+            visit: vec![Visit::default(); n],
+            search_gen: 0,
+            tree_gen: 0,
+            tree_delay: vec![0.0; n],
+        }
+    }
+}
+
+/// A region of positions, inclusive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Region {
+    x0: i16,
+    y0: i16,
+    x1: i16,
+    y1: i16,
+}
+
+impl Region {
+    fn contains(&self, x: i16, y: i16) -> bool {
+        (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
+    }
+    fn within(&self, outer: &Region) -> bool {
+        outer.contains(self.x0, self.y0) && outer.contains(self.x1, self.y1)
+    }
+}
+
+/// What routing one net in an iteration reads.
+struct Pass<'a> {
+    graph: &'a Graph<'a>,
+    nets: &'a [NetRequest],
+    crit: &'a [Vec<f32>],
+    margin: &'a [i16],
+    opts: &'a RouteOptions,
+    pres_fac: f32,
+    iter: usize,
+    /// Last iteration each net was (or is to be) routed in.
+    routed: &'a [AtomicUsize],
+}
+
+impl Pass<'_> {
+    /// The region spanned by net `i` and the nodes of its current route.
+    fn region(&self, st: &State, i: usize, route: &NetRoute) -> Region {
+        let net = &self.nets[i];
+        let at = |k: u32| (self.graph.node_x[k as usize], self.graph.node_y[k as usize]);
+        let (x, y) = at(net.source);
+        let mut r = Region { x0: x, y0: y, x1: x, y1: y };
+        for &k in &net.sinks {
+            let (x, y) = at(k);
+            r = Region { x0: r.x0.min(x), y0: r.y0.min(y), x1: r.x1.max(x), y1: r.y1.max(y) };
+        }
+        for &e in &route.edges {
+            let h = &st.hot[self.graph.edge_dst[e as usize] as usize];
+            r = Region {
+                x0: r.x0.min(h.x),
+                y0: r.y0.min(h.y),
+                x1: r.x1.max(h.x),
+                y1: r.y1.max(h.y),
+            };
+        }
+        r
+    }
+
+    /// Rips up net `i` and routes it again within `clip`, adding the nets
+    /// whose nodes it takes to `displaced`. Returns false, leaving the net
+    /// unrouted, if it needs more than `clip`.
+    #[allow(clippy::too_many_arguments)]
+    fn reroute(
+        &self,
+        st: &State,
+        sc: &mut Scratch,
+        i: usize,
+        route: &mut NetRoute,
+        seed: &[u32],
+        clip: Option<Region>,
+        displaced: &mut Vec<usize>,
+    ) -> Result<bool, RouteError> {
+        let graph = self.graph;
+        for &e in &route.edges {
+            let d = graph.edge_dst[e as usize] as usize;
+            st.hot[d].occupancy.fetch_sub(1, Relaxed);
+            st.users[d].fetch_xor(i as u32, Relaxed);
+        }
+        route.edges.clear();
+        let (net, crit) = (&self.nets[i], &self.crit[i]);
+        if !route_net(
+            graph,
+            st,
+            sc,
+            net,
+            crit,
+            i as u32,
+            self.opts,
+            self.margin[i],
+            self.pres_fac,
+            seed,
+            clip,
+            route,
+        )? {
+            route.edges.clear();
+            return Ok(false);
+        }
+        for &e in &route.edges {
+            let d = graph.edge_dst[e as usize] as usize;
+            if st.hot[d].occupancy.fetch_add(1, Relaxed) == 1 {
+                let v = st.users[d].load(Relaxed) as usize;
+                if self.routed[v].swap(self.iter, Relaxed) != self.iter {
+                    displaced.push(v);
+                }
+            }
+            st.users[d].fetch_xor(i as u32, Relaxed);
+        }
+        Ok(true)
+    }
+}
+
+/// Nets routed at once: below this many, one after another.
+const PARALLEL_NETS: usize = 64;
 
 /// Routes `nets` on `graph`. Returns one route per net.
 pub fn route(
@@ -209,6 +397,10 @@ pub struct RouteHooks<'a> {
     pub blocked: &'a [u32],
     /// Edges no net may use.
     pub blocked_edges: &'a [u32],
+    /// A class for each node (empty: all alike), distinguishing nodes whose
+    /// remaining cost to a sink differs at the same distance, like wires of
+    /// different lengths, for [`RouteOptions::lookahead_radius`].
+    pub node_class: &'a [u16],
     /// Called after every iteration with the iteration number, the number of
     /// nets routed in it and the overused nodes.
     pub progress: Option<Progress<'a>>,
@@ -273,33 +465,44 @@ pub fn route_with_initial(
         looped = dst;
         Graph { edge_dst: &looped, ..graph }
     };
-    let confined = confined_nodes(&graph, &edge_src);
-    let mut st = State {
-        occupancy: vec![0; n],
-        history: vec![0.0; n],
-        best: vec![0.0; n],
-        via: vec![u32::MAX; n],
-        stamp: vec![0; n],
-        search_gen: 0,
-        in_tree: vec![0; n],
-        tree_gen: 0,
-        tree_delay: vec![0.0; n],
-        edge_src,
-        confined,
-    };
+    let (preds, pred_edges) = predecessors(&graph);
+    let confined = confined_nodes(&graph, &edge_src, &preds, &pred_edges);
+    let lookahead = (opts.lookahead_radius > 0).then(|| {
+        let searched = lookahead::Searched {
+            graph: &graph,
+            preds: &preds,
+            pred_edges: &pred_edges,
+            edge_src: &edge_src,
+        };
+        Lookahead::new(&searched, hooks.node_class, nets, opts.lookahead_radius)
+    });
+    let hot = (0..n)
+        .map(|k| Hot {
+            x: graph.node_x[k],
+            y: graph.node_y[k],
+            occupancy: AtomicU16::new(0),
+            class: hooks.node_class.get(k).copied().unwrap_or(0),
+            reserved: FREE,
+            cost: graph.node_cost[k],
+            confined: confined[k],
+        })
+        .collect();
+    let mut st =
+        State { hot, users: (0..n).map(|_| AtomicU32::new(0)).collect(), edge_src, lookahead };
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(4);
+    let mut scratch: Vec<Scratch> = (0..threads).map(|_| Scratch::new(n)).collect();
     let mut routes: Vec<NetRoute> = vec![NetRoute::default(); nets.len()];
     let mut pres_fac = opts.present_factor;
     let mut stats = RouteStats::default();
 
     // Sources and sinks of other nets are reserved: never route through them.
-    let mut reserved = vec![u32::MAX; n];
     for &b in hooks.blocked {
-        reserved[b as usize] = u32::MAX - 1;
+        st.hot[b as usize].reserved = BLOCKED;
     }
     for (i, net) in nets.iter().enumerate() {
-        reserved[net.source as usize] = i as u32;
+        st.hot[net.source as usize].reserved = i as u32;
         for &s in &net.sinks {
-            reserved[s as usize] = i as u32;
+            st.hot[s as usize].reserved = i as u32;
         }
     }
 
@@ -310,24 +513,20 @@ pub fn route_with_initial(
     let mut margin = vec![opts.bbox_margin; nets.len()];
     let mut timing_rounds = 0;
     let mut legal: Option<(Vec<NetRoute>, RouteStats, f64)> = None;
-    // Exclusive or of the nets using each node: with one user, that net.
-    let mut users = vec![0u32; n];
     let mut seen = if initial.is_empty() { Vec::new() } else { vec![usize::MAX; n] };
     let mut to_route = Vec::new();
     // Partial trees of nets that gained sinks: their first route grows them.
     let mut seeds: Vec<Vec<u32>> = vec![Vec::new(); nets.len()];
     for (i, net) in nets.iter().enumerate() {
-        let kept = initial
-            .get(i)
-            .and_then(|r| prune_tree(graph, &st, &reserved, net, i, &r.edges, &mut seen));
+        let kept = initial.get(i).and_then(|r| prune_tree(graph, &st, net, i, &r.edges, &mut seen));
         let Some((edges, complete)) = kept else {
             to_route.push(i);
             continue;
         };
         for &e in &edges {
             let d = graph.edge_dst[e as usize] as usize;
-            st.occupancy[d] += 1;
-            users[d] ^= i as u32;
+            *st.hot[d].occupancy.get_mut() += 1;
+            *st.users[d].get_mut() ^= i as u32;
         }
         if complete {
             stats.reused_nets += 1;
@@ -342,58 +541,46 @@ pub fn route_with_initial(
     // Route nets with many sinks first: they are hardest to fit later.
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
     // Last iteration each net was (or is to be) routed in.
-    let mut routed = vec![usize::MAX; nets.len()];
+    let routed: Vec<AtomicUsize> = (0..nets.len()).map(|_| AtomicUsize::new(usize::MAX)).collect();
     for iter in 0..opts.max_iterations {
         stats.iterations = iter + 1;
         for &i in &to_route {
-            routed[i] = iter;
+            routed[i].store(iter, Relaxed);
         }
+        let pass = Pass {
+            graph: &graph,
+            nets,
+            crit: &crit,
+            margin: &margin,
+            opts,
+            pres_fac,
+            iter,
+            routed: &routed,
+        };
+        // Nets within one quadrant of the region of those to route are
+        // routed at once with the others of their quadrant, as they use
+        // disjoint nodes; then the rest one after another.
+        let mut queue = if to_route.len() >= PARALLEL_NETS && threads > 1 {
+            parallel(&pass, &st, &mut scratch, &mut routes, &mut seeds, &to_route)?
+        } else {
+            std::mem::take(&mut to_route)
+        };
         // A net taking the node of another is routed again in this
         // iteration, now that it has company: it moves if it can, before the
         // first net comes back to the same choice (two nets could otherwise
         // swap nodes forever while the one that should move never sees the
         // other on its node).
         let mut k = 0;
-        while k < to_route.len() {
-            let i = to_route[k];
+        while k < queue.len() {
+            let i = queue[k];
             k += 1;
-            // Rip up.
-            for &e in &routes[i].edges {
-                let d = graph.edge_dst[e as usize] as usize;
-                st.occupancy[d] -= 1;
-                users[d] ^= i as u32;
-            }
-            routes[i].edges.clear();
-            route_net(
-                &graph,
-                &nets[i],
-                &crit[i],
-                i as u32,
-                &reserved,
-                &mut st,
-                opts,
-                margin[i],
-                pres_fac,
-                &std::mem::take(&mut seeds[i]),
-                &mut routes[i],
-            )?;
-            for &e in &routes[i].edges {
-                let d = graph.edge_dst[e as usize] as usize;
-                if st.occupancy[d] == 1 {
-                    let v = users[d] as usize;
-                    if routed[v] != iter {
-                        routed[v] = iter;
-                        to_route.push(v);
-                    }
-                }
-                st.occupancy[d] += 1;
-                users[d] ^= i as u32;
-            }
+            let seed = std::mem::take(&mut seeds[i]);
+            pass.reroute(&st, &mut scratch[0], i, &mut routes[i], &seed, None, &mut queue)?;
         }
-        let overused: Vec<usize> = (0..n).filter(|&k| st.occupancy[k] > 1).collect();
+        let overused: Vec<usize> = (0..n).filter(|&k| st.hot[k].occupancy() > 1).collect();
         stats.overused_history.push(overused.len());
         if let Some(p) = hooks.progress.as_mut() {
-            p(iter, to_route.len(), &overused);
+            p(iter, routed.iter().filter(|r| r.load(Relaxed) == iter).count(), &overused);
         }
         if best.as_ref().is_none_or(|b: &(Vec<u32>, Vec<usize>)| overused.len() < b.0.len()) {
             let set: std::collections::HashSet<usize> = overused.iter().copied().collect();
@@ -446,7 +633,8 @@ pub fn route_with_initial(
             break;
         }
         for &k in &overused {
-            st.history[k] += opts.history_factor * (st.occupancy[k] - 1) as f32;
+            let h = &mut st.hot[k];
+            h.cost += opts.history_factor * (h.occupancy() - 1) as f32;
         }
         // Bounded so that costs stay finite on hopeless nets.
         pres_fac = (pres_fac * opts.present_growth).min(1e6);
@@ -460,6 +648,11 @@ pub fn route_with_initial(
                 routes[i].edges.iter().any(|&e| is_over[graph.edge_dst[e as usize] as usize])
             })
             .collect();
+        // Each keeps the branches of its tree clear of overused nodes, and
+        // routes again only the sinks they no longer reach.
+        for &i in &to_route {
+            seeds[i] = clear_branches(&graph, &st, &nets[i], &routes[i].edges, &is_over);
+        }
         if iter >= 2 {
             for &i in &to_route {
                 margin[i] = margin[i].saturating_add(1);
@@ -488,13 +681,172 @@ pub fn route_with_initial(
     Err(RouteError::Congested { overused_nodes, nodes, nets })
 }
 
+/// Routes the nets of `to_route` concurrently where they lie in disjoint
+/// regions: first those within one quadrant of the region all span, then
+/// of those left, those within its left or right half and those within its
+/// lower or upper half (as nextpnr's router2 partitions). A thread takes a
+/// region at a time. Returns the nets left to route one after another:
+/// those spanning both halves in order, then (in net order) those
+/// displaced from a region or needing more than theirs.
+fn parallel(
+    pass: &Pass<'_>,
+    st: &State,
+    scratch: &mut [Scratch],
+    routes: &mut Vec<NetRoute>,
+    seeds: &mut [Vec<u32>],
+    to_route: &[usize],
+) -> Result<Vec<usize>, RouteError> {
+    let regions: Vec<Region> = to_route.iter().map(|&i| pass.region(st, i, &routes[i])).collect();
+    let median = |mut v: Vec<i16>| {
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
+    let xs = median(regions.iter().map(|r| r.x0 + (r.x1 - r.x0) / 2).collect());
+    let ys = median(regions.iter().map(|r| r.y0 + (r.y1 - r.y0) / 2).collect());
+    let (lo, hi) = (i16::MIN, i16::MAX);
+    let region = |x0, y0, x1, y1| Region { x0, y0, x1, y1 };
+    let levels = [
+        vec![
+            region(lo, lo, xs - 1, ys - 1),
+            region(xs, lo, hi, ys - 1),
+            region(lo, ys, xs - 1, hi),
+            region(xs, ys, hi, hi),
+        ],
+        vec![region(lo, lo, xs - 1, hi), region(xs, lo, hi, hi)],
+        vec![region(lo, lo, hi, ys - 1), region(lo, ys, hi, hi)],
+    ];
+    let cells: Vec<Mutex<(NetRoute, Vec<u32>)>> =
+        routes.drain(..).zip(seeds.iter_mut().map(std::mem::take)).map(Mutex::new).collect();
+    let threads = scratch.len();
+    let mut rest: Vec<(usize, Region)> = to_route.iter().copied().zip(regions).collect();
+    let mut later = Vec::new();
+    let mut failed = None;
+    for parts in &levels {
+        let mut buckets = vec![Vec::new(); parts.len()];
+        rest.retain(|&(i, r)| match parts.iter().position(|q| r.within(q)) {
+            Some(q) => {
+                buckets[q].push(i);
+                false
+            }
+            None => true,
+        });
+        let results: Vec<Result<Vec<usize>, RouteError>> = std::thread::scope(|s| {
+            let workers: Vec<_> = scratch
+                .iter_mut()
+                .enumerate()
+                .map(|(t, sc)| {
+                    let (buckets, cells) = (&buckets, &cells);
+                    s.spawn(move || {
+                        let mut later = Vec::new();
+                        for q in (t..parts.len()).step_by(threads) {
+                            route_region(pass, st, sc, cells, &buckets[q], parts[q], &mut later)?;
+                        }
+                        Ok(later)
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().expect("router thread panicked")).collect()
+        });
+        for r in results {
+            match r {
+                Ok(l) => later.extend(l),
+                Err(e) => failed = failed.or(Some(e)),
+            }
+        }
+        if failed.is_some() {
+            break;
+        }
+    }
+    for (i, cell) in cells.into_iter().enumerate() {
+        let (route, seed) = cell.into_inner().expect("route lock");
+        routes.push(route);
+        seeds[i] = seed;
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    later.sort_unstable();
+    let mut queue: Vec<usize> = rest.into_iter().map(|(i, _)| i).collect();
+    queue.extend(later);
+    Ok(queue)
+}
+
+/// Routes `nets` within `clip`, and the nets they displace that lie within
+/// it; adds the others, and nets needing more than `clip`, to `later`.
+fn route_region(
+    pass: &Pass<'_>,
+    st: &State,
+    sc: &mut Scratch,
+    cells: &[Mutex<(NetRoute, Vec<u32>)>],
+    nets: &[usize],
+    clip: Region,
+    later: &mut Vec<usize>,
+) -> Result<(), RouteError> {
+    let mut queue = nets.to_vec();
+    let mut k = 0;
+    while k < queue.len() {
+        let i = queue[k];
+        k += 1;
+        let mut displaced = Vec::new();
+        {
+            let mut cell = cells[i].lock().expect("route lock");
+            let (route, seed) = &mut *cell;
+            let kept = std::mem::take(seed);
+            if !pass.reroute(st, sc, i, route, &kept, Some(clip), &mut displaced)? {
+                *seed = kept;
+                later.push(i);
+            }
+        }
+        for v in displaced {
+            let route = &cells[v].lock().expect("route lock").0;
+            if pass.region(st, v, route).within(&clip) {
+                queue.push(v);
+            } else {
+                later.push(v);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The edges of tree `edges` (in tree order) on paths from the source to
+/// sinks of `net` that avoid the nodes in `avoid`, in tree order.
+fn clear_branches(
+    graph: &Graph<'_>,
+    st: &State,
+    net: &NetRequest,
+    edges: &[u32],
+    avoid: &[bool],
+) -> Vec<u32> {
+    let mut reached: FxHashSet<u32> = FxHashSet::default();
+    reached.insert(net.source);
+    let mut kept: Vec<u32> = Vec::new();
+    for &e in edges {
+        let (s, d) = (st.edge_src[e as usize], graph.edge_dst[e as usize]);
+        if reached.contains(&s) && !avoid[d as usize] {
+            reached.insert(d);
+            kept.push(e);
+        }
+    }
+    // Drop branches that lead to no sink, from the leaves up.
+    let mut useful: FxHashSet<u32> =
+        net.sinks.iter().copied().filter(|k| reached.contains(k)).collect();
+    let mut keep = vec![false; kept.len()];
+    for (j, &e) in kept.iter().enumerate().rev() {
+        if useful.contains(&graph.edge_dst[e as usize]) {
+            keep[j] = true;
+            useful.insert(st.edge_src[e as usize]);
+        }
+    }
+    kept.into_iter().zip(keep).filter_map(|(e, k)| k.then_some(e)).collect()
+}
+
 /// The part of candidate tree `edges` for net `i` that leads to its current
 /// sinks, and whether it reaches them all; `None` if the tree is invalid,
 /// blocked, overlaps wires already taken, or keeps nothing.
 fn prune_tree(
     graph: Graph<'_>,
     st: &State,
-    reserved: &[u32],
     net: &NetRequest,
     i: usize,
     edges: &[u32],
@@ -511,8 +863,8 @@ fn prune_tree(
         let (s, d) = (st.edge_src[e] as usize, graph.edge_dst[e] as usize);
         if seen[s] != i
             || seen[d] == i
-            || st.occupancy[d] != 0
-            || (reserved[d] != u32::MAX && reserved[d] != i as u32)
+            || st.hot[d].occupancy() != 0
+            || ![FREE, i as u32].contains(&st.hot[d].reserved)
         {
             return None;
         }
@@ -552,20 +904,9 @@ pub struct RouteStats {
 }
 
 /// Nodes from which every path stays at the node's position.
-fn confined_nodes(graph: &Graph<'_>, edge_src: &[u32]) -> Vec<bool> {
+/// The edges entering each node `k`: `pred_edges[preds[k]..preds[k + 1]]`.
+fn predecessors(graph: &Graph<'_>) -> (Vec<u32>, Vec<u32>) {
     let n = graph.num_nodes();
-    let pos = |k: usize| (graph.node_x[k], graph.node_y[k]);
-    // Nodes reaching another position, found backwards from the edges
-    // leaving their position.
-    let mut confined = vec![true; n];
-    let mut stack = Vec::new();
-    for (e, &d) in graph.edge_dst.iter().enumerate() {
-        let s = edge_src[e] as usize;
-        if pos(s) != pos(d as usize) && confined[s] {
-            confined[s] = false;
-            stack.push(s);
-        }
-    }
     let mut preds = vec![0u32; n + 1];
     for &d in graph.edge_dst {
         preds[d as usize + 1] += 1;
@@ -578,6 +919,28 @@ fn confined_nodes(graph: &Graph<'_>, edge_src: &[u32]) -> Vec<bool> {
     for (e, &d) in graph.edge_dst.iter().enumerate() {
         pred_edges[fill[d as usize] as usize] = e as u32;
         fill[d as usize] += 1;
+    }
+    (preds, pred_edges)
+}
+
+fn confined_nodes(
+    graph: &Graph<'_>,
+    edge_src: &[u32],
+    preds: &[u32],
+    pred_edges: &[u32],
+) -> Vec<bool> {
+    let n = graph.num_nodes();
+    let pos = |k: usize| (graph.node_x[k], graph.node_y[k]);
+    // Nodes reaching another position, found backwards from the edges
+    // leaving their position.
+    let mut confined = vec![true; n];
+    let mut stack = Vec::new();
+    for (e, &d) in graph.edge_dst.iter().enumerate() {
+        let s = edge_src[e] as usize;
+        if pos(s) != pos(d as usize) && confined[s] {
+            confined[s] = false;
+            stack.push(s);
+        }
     }
     while let Some(k) = stack.pop() {
         for &e in &pred_edges[preds[k] as usize..preds[k + 1] as usize] {
@@ -594,28 +957,29 @@ fn confined_nodes(graph: &Graph<'_>, edge_src: &[u32]) -> Vec<bool> {
 #[allow(clippy::too_many_arguments)]
 fn route_net(
     graph: &Graph<'_>,
+    st: &State,
+    sc: &mut Scratch,
     net: &NetRequest,
     criticality: &[f32],
     net_id: u32,
-    reserved: &[u32],
-    st: &mut State,
     opts: &RouteOptions,
     margin: i16,
     pres_fac: f32,
     seed: &[u32],
+    clip: Option<Region>,
     out: &mut NetRoute,
-) -> Result<(), RouteError> {
-    st.tree_gen += 1;
-    let tg = st.tree_gen;
-    st.in_tree[net.source as usize] = tg;
-    st.tree_delay[net.source as usize] = 0.0;
+) -> Result<bool, RouteError> {
+    sc.tree_gen += 1;
+    let tg = sc.tree_gen;
+    sc.visit[net.source as usize].tree = tg;
+    sc.tree_delay[net.source as usize] = 0.0;
     let mut tree_nodes: Vec<u32> = vec![net.source];
     // Start from a kept partial tree (in tree order).
     for &e in seed {
         let d = graph.edge_dst[e as usize];
-        st.tree_delay[d as usize] =
-            st.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
-        st.in_tree[d as usize] = tg;
+        sc.tree_delay[d as usize] =
+            sc.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
+        sc.visit[d as usize].tree = tg;
         tree_nodes.push(d);
         out.edges.push(e);
     }
@@ -643,7 +1007,7 @@ fn route_net(
     let mut heap = BinaryHeap::new();
     for k in order {
         let sink = net.sinks[k];
-        if st.in_tree[sink as usize] == tg {
+        if sc.visit[sink as usize].tree == tg {
             continue;
         }
         // Never fully ignore congestion, or critical nets cannot be moved
@@ -652,65 +1016,81 @@ fn route_net(
         let tx = graph.node_x[sink as usize];
         let ty = graph.node_y[sink as usize];
         loop {
-            st.search_gen += 1;
-            let search_gen = st.search_gen;
+            sc.search_gen += 1;
+            let search_gen = sc.search_gen;
             heap.clear();
-            let est = |node: usize| {
-                let d = ((graph.node_x[node] - tx).abs() + (graph.node_y[node] - ty).abs()) as f32;
+            let lookahead = st.lookahead.as_ref();
+            let est = |h: &Hot| {
+                let (dx, dy) = (h.x - tx, h.y - ty);
+                if let Some(table) = lookahead {
+                    let (cost, delay) = table.at(h.class as usize, dx, dy);
+                    return opts.lookahead_weight
+                        * ((1.0 - crit) * cost + crit * delay * opts.delay_scale);
+                }
+                let d = (dx.abs() + dy.abs()) as f32;
                 d * ((1.0 - crit) * opts.astar_cost_per_tile
                     + crit * opts.astar_delay_per_tile * opts.delay_scale)
             };
+            // The search box: the net's, or the connection's alone.
+            let (ax0, ay0, ax1, ay1) = if opts.arc_bounding_boxes {
+                (sx.min(tx), sy.min(ty), sx.max(tx), sy.max(ty))
+            } else {
+                (x0, y0, x1, y1)
+            };
+            let (mut bx0, mut by0, mut bx1, mut by1) =
+                (ax0 - margin, ay0 - margin, ax1 + margin, ay1 + margin);
+            if let Some(c) = clip {
+                (bx0, by0, bx1, by1) = (bx0.max(c.x0), by0.max(c.y0), bx1.min(c.x1), by1.min(c.y1));
+            }
+            let inside = |h: &Hot| h.x >= bx0 && h.x <= bx1 && h.y >= by0 && h.y <= by1;
             // A critical sink pays for the delay from the source to where
             // it joins the tree, so that it does not join at the end of a
             // long branch.
             for &t in &tree_nodes {
-                let g = crit * st.tree_delay[t as usize] * opts.delay_scale;
-                st.best[t as usize] = g;
-                st.via[t as usize] = u32::MAX;
-                st.stamp[t as usize] = search_gen;
-                heap.push(QueueEntry { f: g + est(t as usize), g, node: t });
+                if t != net.source && !inside(&st.hot[t as usize]) {
+                    continue;
+                }
+                let g = crit * sc.tree_delay[t as usize] * opts.delay_scale;
+                let v = &mut sc.visit[t as usize];
+                (v.best, v.via, v.stamp) = (g, u32::MAX, search_gen);
+                heap.push(QueueEntry { f: g + est(&st.hot[t as usize]), g, node: t });
             }
-            let (bx0, by0, bx1, by1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
             let mut found = false;
             while let Some(QueueEntry { g, node, .. }) = heap.pop() {
                 if node == sink {
                     found = true;
                     break;
                 }
-                if st.stamp[node as usize] == search_gen && g > st.best[node as usize] {
+                let v = sc.visit[node as usize];
+                if v.stamp == search_gen && g > v.best {
                     continue;
                 }
                 for e in graph.offsets[node as usize]..graph.offsets[node as usize + 1] {
                     let d = graph.edge_dst[e as usize];
                     let du = d as usize;
-                    let r = reserved[du];
-                    if r != u32::MAX && r != net_id {
+                    let h = &st.hot[du];
+                    if h.reserved != FREE && h.reserved != net_id {
                         continue;
                     }
-                    if st.in_tree[du] == tg {
-                        continue;
-                    }
-                    let (nx, ny) = (graph.node_x[du], graph.node_y[du]);
                     if d != sink
-                        && (nx < bx0
-                            || nx > bx1
-                            || ny < by0
-                            || ny > by1
-                            || st.confined[du] && (nx, ny) != (tx, ty))
+                        && (h.x < bx0
+                            || h.x > bx1
+                            || h.y < by0
+                            || h.y > by1
+                            || h.confined && (h.x, h.y) != (tx, ty))
                     {
                         continue;
                     }
-                    let occ = st.occupancy[du] as f32;
-                    let present = 1.0 + pres_fac * occ;
-                    let congestion = (graph.node_cost[du] + st.history[du]) * present;
+                    let v = &mut sc.visit[du];
+                    if v.tree == tg {
+                        continue;
+                    }
+                    let present = 1.0 + pres_fac * h.occupancy() as f32;
                     let delay = graph.edge_delay[e as usize] * opts.delay_scale;
-                    let cost = (1.0 - crit) * congestion + crit * delay;
-                    let ng = g + cost;
-                    if st.stamp[du] != search_gen || ng < st.best[du] {
-                        st.stamp[du] = search_gen;
-                        st.best[du] = ng;
-                        st.via[du] = e;
-                        heap.push(QueueEntry { f: ng + est(du), g: ng, node: d });
+                    let ng = g + (1.0 - crit) * h.cost * present + crit * delay;
+                    if v.stamp != search_gen || ng < v.best {
+                        (v.stamp, v.best, v.via) = (search_gen, ng, e);
+                        heap.push(QueueEntry { f: ng + est(h), g: ng, node: d });
                     }
                 }
             }
@@ -718,6 +1098,9 @@ fn route_net(
                 break;
             }
             // Retry with a larger box before giving up.
+            if clip.is_some() {
+                return Ok(false);
+            }
             if margin > 1000 {
                 return Err(RouteError::Unroutable { net: net_id as usize, sink });
             }
@@ -726,21 +1109,21 @@ fn route_net(
         // Trace back to the tree.
         let mut path = Vec::new();
         let mut cur = sink;
-        while st.in_tree[cur as usize] != tg {
-            let e = st.via[cur as usize];
+        while sc.visit[cur as usize].tree != tg {
+            let e = sc.visit[cur as usize].via;
             path.push(e);
             cur = st.edge_src[e as usize];
         }
         for &e in path.iter().rev() {
             let d = graph.edge_dst[e as usize];
-            st.tree_delay[d as usize] =
-                st.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
-            st.in_tree[d as usize] = tg;
+            sc.tree_delay[d as usize] =
+                sc.tree_delay[st.edge_src[e as usize] as usize] + graph.edge_delay[e as usize];
+            sc.visit[d as usize].tree = tg;
             tree_nodes.push(d);
             out.edges.push(e);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1059,7 +1442,8 @@ mod tests {
         };
         let src: Vec<u32> =
             (0..5u32).flat_map(|k| (o[k as usize]..o[k as usize + 1]).map(move |_| k)).collect();
-        assert_eq!(confined_nodes(&g, &src), [false, false, true, true, true]);
+        let (preds, pred_edges) = predecessors(&g);
+        assert_eq!(confined_nodes(&g, &src, &preds, &pred_edges), [false, false, true, true, true]);
     }
 
     #[test]

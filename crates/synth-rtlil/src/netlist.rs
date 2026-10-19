@@ -206,7 +206,9 @@ pub fn to_netlist(design: &Design, lib: &dyn PrimitiveLibrary) -> Result<Netlist
         }
     }
 
-    for c in &top.cells {
+    // Yosys records the flattened hierarchy in `$scopeinfo` cells, which
+    // have no ports and no function.
+    for c in top.cells.iter().filter(|c| c.kind != "$scopeinfo") {
         let blackbox = design.module(&c.kind).filter(|m| m.is_blackbox());
         if blackbox.is_none() && design.module(&c.kind).is_some() {
             return Err(format!(

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Independent Artix-7 primitive validation. Requires Yosys and Icarus.
 
-XILINX_UNISIM must contain RAMB18E1.v from tools/fetch_xc7_models.sh.
+XILINX_UNISIM must contain the vendor models from tools/fetch_xc7_models.sh
+(RAMB18E1, RAM32M, RAM64M, SRLC32E, MUXF7 and MUXF8); they replace Yosys's.
 SYNTH and YOSYS_DATDIR override the synth binary and Yosys model directory.
 All artifacts are retained in the required --out directory.
 """
@@ -42,10 +43,17 @@ def main():
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     cells = DATA / "xilinx/cells_sim.v"
-    unisim = Path(os.environ["XILINX_UNISIM"]) / "RAMB18E1.v"
-    # Replace Yosys's black-box RAM declaration with the independent vendor model.
+    vendor = ["RAMB18E1", "RAM32M", "RAM64M", "SRLC32E", "MUXF7", "MUXF8"]
+    # Replace Yosys's models (a black box for RAMB18E1) with the independent
+    # vendor models, concatenated into one file.
+    unisim = out / "unisim.v"
+    unisim.write_text("".join((Path(os.environ["XILINX_UNISIM"]) / f"{m}.v").read_text() + "\n"
+                              for m in vendor))
     models = out / "cells.v"
-    models.write_text(re.sub(r"module RAMB18E1\s*\(.*?endmodule", "", cells.read_text(), flags=re.S))
+    text = cells.read_text()
+    for m in vendor:
+        text = re.sub(rf"module {m}\s*\(.*?endmodule", "", text, flags=re.S)
+    models.write_text(text)
     glbl = out / "glbl.v"
     glbl.write_text("`timescale 1ps/1ps\nmodule glbl; reg GSR = 0; initial begin #1 GSR=1; #100 GSR=0; end endmodule\n")
 
@@ -108,17 +116,59 @@ def main():
                 assert "PASS multiplier" in (out/f"{name}.sim.log").read_text()
                 print(f"PASS {name}",flush=True)
 
+        # Additions of a product folded into the DSP48E1 post-adder (one DSP,
+        # no carry logic), including truncation, signed operands and a
+        # 48-bit sum.
+        for a,b,c,y in [(10,10,10,10),(24,17,30,40),(24,17,48,48),(16,16,8,32)]:
+            for signed in [0,1]:
+                name=f"multiply-add-{a}-{b}-{c}-{y}-{signed}"
+                net=synth(SRC / "multiply_add.v", "multiply_add", out / name,
+                          [f"A={a}",f"B={b}",f"C={c}",f"Y={y}",f"SIGNED={signed}"])
+                text=net.read_text()
+                assert text.count("DSP48E1 ") == 1 and "CARRY4" not in text, name
+                tb=out / f"{name}.tb.v"
+                tb.write_text(f'''module tb;
+                  // Nonzero to start: Yosys's DSP48E1 model evaluates the
+                  // combinational C path only when C changes.
+                  reg [{a-1}:0] a=1; reg [{b-1}:0] b=1; reg [{c-1}:0] c=1;
+                  wire [{y-1}:0] refy,got;
+                  multiply_add #(.A({a}),.B({b}),.C({c}),.Y({y}),.SIGNED({signed})) refdut(a,b,c,refy);
+                  multiply_add_net dut(a,b,c,got);
+                  integer i;
+                  initial begin
+                    for(i=0;i<2000;i=i+1) begin
+                      case(i)
+                        0: begin a=0; b=0; c=0; end
+                        1: begin a=-1; b=-1; c=-1; end
+                        2: begin a=1<<({a}-1); b=1<<({b}-1); c=1<<({c}-1); end
+                        default: begin a={{$random,$random}}; b={{$random,$random}}; c={{$random,$random}}; end
+                      endcase
+                      #10; if(got!==refy) $fatal(1,"multiply-add case %d: %h * %h + %h: %h != %h",i,a,b,c,got,refy);
+                    end
+                    $display("PASS multiply-add"); $finish;
+                  end
+                endmodule''')
+                run(["iverilog","-g2012","-s","tb","-o",out/f"{name}.vvp",tb,SRC/"multiply_add.v",net,cells],out/f"{name}.compile.log")
+                run(["vvp",out/f"{name}.vvp"],out/f"{name}.sim.log")
+                assert "PASS multiply-add" in (out/f"{name}.sim.log").read_text()
+                print(f"PASS {name}",flush=True)
+
         # All BRAM modes, parity, replication, bank selection, offsets, masked
         # writes, falling edges, read enables, initialization and read/write collision.
         for w, d, offset, neg, mask in [(1, 1024, 0, 0, 0), (2, 512, 3, 1, 0),
                 (4, 256, 0, 0, 0), (9, 128, 3, 1, 0), (18, 128, 0, 0, 0),
                 (18, 1100, 5, 0, 0), (35, 128, 0, 1, 0), (4, 256, 0, 0, 1),
                 (24, 512, 0, 0, 0), (32, 128, 3, 1, 0), (36, 512, 0, 0, 0),
-                (36, 1100, 5, 1, 0), (37, 512, 0, 0, 0), (36, 128, 0, 0, 1)]:
+                (36, 1100, 5, 1, 0), (37, 512, 0, 0, 0), (36, 128, 0, 0, 1),
+                # Distributed RAM: 32-word RAM32M halves, 64-word RAM64M,
+                # partial depths, per-bit enable groups and port D sharing.
+                (1, 16, 0, 0, 0), (7, 32, 3, 1, 0), (13, 40, 0, 0, 0),
+                (6, 64, 5, 0, 0), (5, 24, 0, 1, 1), (9, 64, 0, 0, 1)]:
             name = f"memory-{w}-{d}-{offset}-{neg}-{mask}"
             params = [f"W={w}", f"D={d}", f"OFFSET={offset}", f"NEG={neg}", f"MASK={mask}"]
             net = synth(SRC / "memory.v", "memory", out / name, params)
-            assert "RAMB18E1" in net.read_text(), name
+            primitive = "RAMB18E1" if d > 64 else "RAM32M" if d <= 32 else "RAM64M"
+            assert primitive in net.read_text(), name
             if w >= 24 and not mask:
                 assert '.RAM_MODE("SDP")' in net.read_text(), name
             tb = out / f"{name}.tb.v"

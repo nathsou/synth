@@ -105,6 +105,7 @@ def main():
     p.add_argument("--design", action="append", help="select a routed case by name; repeat to select several")
     p.add_argument("--euler", action="store_true", help="also implement the Euler 31 and 97 solvers")
     p.add_argument("--full-luts", action="store_true", help="randomize every LUT in the fabric")
+    p.add_argument("--yosys", action="store_true", help="also place and route Yosys-mapped netlists")
     a = p.parse_args()
     for key in ["db", "xray", "xray_tools", "synth", "out"]:
         setattr(a, key, getattr(a, key).resolve())
@@ -134,7 +135,16 @@ def main():
         ("ram", "module top(input clk,we,input [8:0] addr,input [7:0] din,output reg [7:0] q=8'h93); reg [7:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^8'hA5; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",8),("q",8)] for i in range(n)], ["clk"]),
         ("ram_sdp", "module top(input clk,we,input [8:0] addr,input [36:0] din,output reg [36:0] q=37'h179abcde01); reg [36:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^37'h12a5b3c6d7; always @(negedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",37),("q",37)] for i in range(n)], ["clk"]),
         ("ram_sdp_banked", "module top(input clk,we,input [10:0] addr,input [35:0] din,output reg [35:0] q=36'h79abcde01); reg [35:0] mem[0:1099]; integer i; initial for(i=0;i<1100;i=i+1) mem[i]=i^36'h2a5b3c6d7; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",11),("din",36),("q",36)] for i in range(n)], ["clk"]),
+        ("lutram", "module top(input clk,we,input [4:0] wa,ra,input [5:0] wa6,ra6,input [3:0] d,output reg [3:0] q,output [3:0] q6); reg [3:0] m32[0:31]; reg [3:0] m64[0:63]; integer i; initial for(i=0;i<64;i=i+1) begin m64[i]=i^4'h9; if(i<32) m32[i]=i^4'h5; end always @(posedge clk) begin if(we) m32[wa]<=d; q<=m32[ra]; if(we) m64[wa6]<=~d; end assign q6=m64[ra6]; endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("wa",5),("ra",5),("wa6",6),("ra6",6),("d",4),("q",4),("q6",4)] for i in range(n)], ["clk"]),
+        ("srl", "module top(input clk,ce,d,e,output y,z,w); reg [4:0] a=5'b10110; reg [39:0] b=0; reg [2:0] c=3'b101; always @(posedge clk) begin a<={a[3:0],d}; if(ce) b<={b[38:0],e}; end always @(negedge clk) c<={c[1:0],d^e}; assign y=a[4]; assign z=b[39]; assign w=c[2]; endmodule", ["clk","ce","d","e","y","z","w"], ["clk"]),
     ]
+    # A Yosys-mapped netlist (MUXF7/MUXF8 and SRL16E) through native PnR.
+    yosys_cases = [
+        ("yosys_wide", "module top(input clk,input [3:0] s,input [15:0] d,input [7:0] a,output reg y,output z,output r); reg [255:0] rom=256'h0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0; reg [4:0] sh=0; always @(posedge clk) begin y<=d[s]; sh<={sh[3:0],d[0]}; end assign z=rom[a]; assign r=sh[4]; endmodule", ["clk","y","z","r"]+[f"{p}[{i}]" for p,n in [("s",4),("d",16),("a",8)] for i in range(n)], ["clk"]),
+        # Registered DSP48E1 inputs and output, plus a constant post-add.
+        ("yosys_dsp", "module top(input clk,input [11:0] a,b,output reg [23:0] y); reg [11:0] ra=0,rb=0; always @(posedge clk) begin ra<=a; rb<=b; y<=ra*rb+24'd7; end endmodule", ["clk"]+[f"{p}[{i}]" for p,n in [("a",12),("b",12),("y",24)] for i in range(n)], ["clk"]),
+    ]
+    cases += [c + (True,) for c in yosys_cases] if a.yosys else []
     if a.euler:
         for n, width in [(31, 17), (97, 34)]:
             source = (ROOT / f"tests/designs/euler/p0{n}.v").read_text().replace(f"module euler{n}", "module top")
@@ -147,15 +157,28 @@ def main():
     for part in a.part or PARTS:
         out = a.out / part
         out.mkdir(exist_ok=True)
-        for name, source, ports, clocks in cases:
+        for name, source, ports, clocks, *mapped in cases:
             start = time.monotonic()
             prefix = out / name
             v, xdc, fasm, bit = [prefix.with_suffix(s) for s in [".v", ".xdc", ".fasm", ".bit"]]
             v.write_text(source + "\n")
             xdc.write_text(constraints(a, part, ports, clocks, name == "single_io"))
-            cmd = [a.synth,"build",v,"--family","artix7","--top","top","--db",a.db,
-                   "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
+            if mapped:
+                il = prefix.with_suffix(".il")
+                run(["yosys", "-Q", "-p", f'read_verilog "{v}"; synth_xilinx -family xc7 -flatten '
+                     f'-top top -noiopad -noclkbuf; write_rtlil "{il}"'], prefix.with_suffix(".yosys.log"))
+                cmd = [a.synth,"pnr",il,"--family","artix7","--db",a.db,
+                       "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
+            else:
+                cmd = [a.synth,"build",v,"--family","artix7","--top","top","--db",a.db,
+                       "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
             run(cmd + ["--timing-allow-fail"], prefix.with_suffix(".log"))
+            features = fasm.read_text()
+            for required in {"lutram": ["LUT.RAM", "LUT.SMALL", "FFMUX.O5"], "srl": ["LUT.SRL", "CLKINV"],
+                             "yosys_wide": ["OUTMUX.F8", "LUT.SRL"]}.get(name, []):
+                assert required in features, f"{name}: no {required}"
+            if name == "yosys_dsp":
+                assert "DSP48.DSP_" in features and "AREG_0" not in features, f"{name}: no registered DSP"
             if name.startswith("ram_sdp"):
                 assert "SDP_READ_WIDTH_36" in fasm.read_text()
                 assert "SDP_WRITE_WIDTH_36" in fasm.read_text()

@@ -456,6 +456,7 @@ pub(crate) fn route_incremental(
         blocked_edges: &blocked_edges,
         progress: Some(&mut progress),
         retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
+        ..Default::default()
     };
     let previous = checkpoint.map(|c| c.routes()).unwrap_or_default();
     let initial: Vec<_> = requests

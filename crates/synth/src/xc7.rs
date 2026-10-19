@@ -20,6 +20,23 @@ impl synth_rtlil::PrimitiveLibrary for Library {
                 "C" | "D" | "CE" | "R" | "S" | "CLR" | "PRE" => Some(Input),
                 _ => None,
             },
+            "INV" | "MUXF7" | "MUXF8" => match port {
+                "O" => Some(Output),
+                "I" | "I0" | "I1" | "S" => Some(Input),
+                _ => None,
+            },
+            "SRL16E" | "SRLC32E" => match port {
+                "Q" | "Q15" | "Q31" => Some(Output),
+                "A" | "A0" | "A1" | "A2" | "A3" | "CE" | "CLK" | "D" => Some(Input),
+                _ => None,
+            },
+            "RAM32M" | "RAM64M" => match port {
+                p if p.starts_with("DO") => Some(Output),
+                p if p.starts_with("ADDR") || p.starts_with("DI") || p == "WE" || p == "WCLK" => {
+                    Some(Input)
+                }
+                _ => None,
+            },
             "CARRY4" => match port {
                 "O" | "CO" => Some(Output),
                 "S" | "DI" | "CI" | "CYINIT" => Some(Input),
@@ -51,6 +68,22 @@ impl synth_rtlil::PrimitiveLibrary for Library {
         }
     }
 }
+/// Prints native packing statistics: slices (and those needing a SLICEM),
+/// LUTs including those added by packing, and carry blocks.
+pub fn pack_stats(nl: &synth_netlist::Netlist) -> Result<(), String> {
+    let mut nl = nl.clone();
+    let packed = arch_xc7::pack::pack(&mut nl)?;
+    let count = |f: &dyn Fn(&str) -> bool| nl.live_cells().filter(|&c| f(nl.cell_kind(c))).count();
+    let luts = count(&|k| arch_xc7::pack::is_lut(k));
+    let carries = count(&|k| k == "CARRY4");
+    let slicem = packed.slices.iter().filter(|s| s.needs_m(&nl)).count();
+    eprintln!(
+        "info: packed {{\"slices\":{},\"slicem\":{slicem},\"lut\":{luts},\"carry4\":{carries}}}",
+        packed.slices.len()
+    );
+    Ok(())
+}
+
 pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
     for opt in [
         "--pcf",

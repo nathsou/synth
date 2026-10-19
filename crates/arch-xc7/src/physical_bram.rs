@@ -67,11 +67,11 @@ pub fn inputs(nl: &Netlist, c: CellId, p: &Packed) -> Result<Vec<(String, NetId)
     for pin in ["ADDRATIEHIGH0", "ADDRATIEHIGH1", "ADDRBTIEHIGH0", "ADDRBTIEHIGH1"] {
         pins.push((pin.into(), one));
     }
-    for (reg, clk, enable) in
-        [("REGCLKARDRCLK", "CLKARDCLK", "DOA_REG"), ("REGCLKB", "CLKBWRCLK", "DOB_REG")]
-    {
-        if param(nl, c, enable, 0) != 0 {
-            pins.push((reg.into(), nl.pin_net(c, clk).ok_or("registered BRAM missing clock")?));
+    // Output register clocks follow their port clocks, as the vendor tools
+    // tie them, whether or not the register is used.
+    for (reg, clk) in [("REGCLKARDRCLK", "CLKARDCLK"), ("REGCLKB", "CLKBWRCLK")] {
+        if let Some(n) = nl.pin_net(c, clk).filter(|&n| nl.nets[n].constant.is_none()) {
+            pins.push((reg.into(), n));
         }
     }
     Ok(pins)
@@ -136,10 +136,8 @@ pub fn features(
             add(format!("ZINV_{pin}"));
         }
     }
-    for (reg, clk, enable) in
-        [("REGCLKARDRCLK", "CLKARDCLK", "DOA_REG"), ("REGCLKB", "CLKBWRCLK", "DOB_REG")]
-    {
-        if param(nl, c, enable, 0) != 0 && param(nl, c, &format!("IS_{clk}_INVERTED"), 0) == 0 {
+    for (reg, clk) in [("REGCLKARDRCLK", "CLKARDCLK"), ("REGCLKB", "CLKBWRCLK")] {
+        if param(nl, c, &format!("IS_{clk}_INVERTED"), 0) == 0 {
             add(format!("ZINV_{reg}"));
         }
     }
