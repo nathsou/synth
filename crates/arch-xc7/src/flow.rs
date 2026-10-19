@@ -11,6 +11,7 @@ use std::{
     path::Path,
     time::Instant,
 };
+use synth_core::FxHashMap;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
 #[derive(Clone, Debug)]
@@ -42,29 +43,98 @@ pub fn implement(
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let placement = place::place(&db, &nl, &p, xdc, opts.seed, opts.effort)?;
-    log.push(format!("placed: HPWL {:.0}", placement.hpwl));
+    log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     let mut features = cell_features(&db, &nl, &p, &placement, xdc)?;
-    let (requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;
+    let (mut requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;
+    // Timing-driven routing: criticalities from delays predicted by the
+    // placement, then from the routes as they converge.
+    let timer = crate::sta::Timer::new(root, &nl, &p)?;
+    let located = |c: CellId| location(&db, &p, &placement, c);
+    let predicted = |c: CellId, n: NetId| -> f64 {
+        let Some(d) = nl.nets[n].driver else { return 0.0 };
+        match (located(d.cell), located(c)) {
+            (Some((a, sa)), Some((b, sb))) if a == b => {
+                if sa == sb {
+                    0.0
+                } else {
+                    150.0
+                }
+            }
+            (Some(((ax, ay), _)), Some(((bx, by), _))) => {
+                crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
+            }
+            _ => 0.0,
+        }
+    };
+    let estimate = timer.analyze(&predicted);
+    let criticality = |a: &crate::sta::Analysis, i: usize, sink: u32| -> f32 {
+        let Some(net) = request_nets[i] else { return 0.0 };
+        owners
+            .get(&sink)
+            .into_iter()
+            .flatten()
+            .filter(|&&(_, _, n)| n == net)
+            .map(|&(c, _, n)| a.criticality(c, n))
+            .fold(0.0, f32::max)
+    };
+    for (i, r) in requests.iter_mut().enumerate() {
+        r.criticality = r.sinks.iter().map(|&k| criticality(&estimate, i, k)).collect();
+    }
+    for clock in &estimate.clocks {
+        log.push(format!(
+            "placed timing estimate: clock {}: {:.3} ns",
+            nl.str(nl.nets[clock.net].name),
+            clock.period / 1000.0
+        ));
+    }
     let graph = RoutingGraph::new(&db)?;
-    log.push(format!("routing {} physical nets on {} edges", requests.len(), graph.dst.len()));
+    log.push(format!(
+        "routing {} physical nets on {} edges ({:.1}s)",
+        requests.len(),
+        graph.dst.len(),
+        start.elapsed().as_secs_f64()
+    ));
     for line in &log {
         eprintln!("info: {line}");
     }
     let route_opts = synth_route::RouteOptions {
-        astar_cost_per_tile: 0.1,
-        astar_delay_per_tile: 10.0,
+        // Wires span up to 18 tiles: a lookahead by wire class bounds the
+        // remaining cost far better than a cost per tile.
+        lookahead_radius: 30,
         bbox_margin: 15,
         max_iterations: 100,
         stall_iterations: 30,
+        retime_every: 4,
+        timing_rounds: 2,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
         eprintln!(
-            "info: route iteration {iteration}: {routed} nets, {} congested nodes",
-            overused.len()
+            "info: route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
+            overused.len(),
+            start.elapsed().as_secs_f64()
         );
     };
-    let hooks = synth_route::RouteHooks { progress: Some(&mut progress), ..Default::default() };
+    let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
+        let wires =
+            crate::sta::routed_wires(&db, &graph, &requests, &request_nets, routes, &owners);
+        // Connections not routed yet keep their predicted delays.
+        let a =
+            timer.analyze(&|c, n| wires.get(&(c, n)).copied().unwrap_or_else(|| predicted(c, n)));
+        let criticality = requests
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
+            .collect();
+        let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
+        synth_route::Retimed { criticality, score }
+    };
+    let hooks = synth_route::RouteHooks {
+        progress: Some(&mut progress),
+        retime: Some(&mut retime),
+        node_class: &graph.class,
+        ..Default::default()
+    };
     let (routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
         .map_err(|e| match &e {
             synth_route::RouteError::Congested { nodes, nets, .. } => {
@@ -100,17 +170,8 @@ pub fn implement(
         features.len(),
         start.elapsed().as_secs_f64()
     ));
-    let timing = crate::sta::analyze(
-        root,
-        &db,
-        &nl,
-        &p,
-        &graph,
-        &requests,
-        &request_nets,
-        &routes,
-        &owners,
-    )?;
+    let wires = crate::sta::routed_wires(&db, &graph, &requests, &request_nets, &routes, &owners);
+    let timing = timer.analyze(&|c, n| wires.get(&(c, n)).copied().unwrap_or(0.0)).clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
             "timing estimate counts {} uncharacterized pip types as zero delay",
@@ -151,6 +212,67 @@ pub fn implement(
     );
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
+/// The local GND_WIRE and VCC_WIRE nodes of the constant sinks that are
+/// interconnect inputs.
+fn local_constants(
+    db: &Device,
+    sinks: &BTreeMap<NetId, BTreeSet<u32>>,
+    p: &Packed,
+) -> FxHashMap<u32, (u32, u32)> {
+    let wanted: BTreeSet<u32> = sinks
+        .iter()
+        .filter(|(n, _)| p.constants.contains_key(n))
+        .flat_map(|(_, s)| s.iter().copied())
+        .collect();
+    // Interconnect mux outputs (site inputs) and their tiles' constants.
+    let mut inputs = FxHashMap::default();
+    for (ti, t) in db.tiles.iter().enumerate() {
+        if !(t.kind == "INT_L" || t.kind == "INT_R") {
+            continue;
+        }
+        let tmpl = &db.templates[t.template];
+        let (Ok(gnd), Ok(vcc)) = (db.wire(ti, "GND_WIRE"), db.wire(ti, "VCC_WIRE")) else {
+            continue;
+        };
+        for (w, name) in tmpl.wires.iter().enumerate() {
+            if ["IMUX", "BYP", "FAN", "CTRL"].iter().any(|x| name.starts_with(x)) {
+                inputs.insert(t.nodes[w], (gnd, vcc));
+            }
+        }
+    }
+    let mut out: FxHashMap<u32, (u32, u32)> =
+        wanted.iter().filter_map(|n| inputs.get(n).map(|&c| (*n, c))).collect();
+    // Block RAM and DSP pins are one pip beyond an interconnect input.
+    for t in db.tiles.iter().filter(|t| t.kind.starts_with("BRAM_") || t.kind.starts_with("DSP_")) {
+        for pip in &db.templates[t.template].pips {
+            let (src, dst) = (t.nodes[pip.src as usize], t.nodes[pip.dst as usize]);
+            if wanted.contains(&dst)
+                && !out.contains_key(&dst)
+                && let Some(&c) = inputs.get(&src)
+            {
+                out.insert(dst, c);
+            }
+        }
+    }
+    out
+}
+
+/// The tile coordinates of a placed cell and the site it is in.
+fn location(
+    db: &Device,
+    p: &Packed,
+    pl: &Placement,
+    c: CellId,
+) -> Option<((i16, i16), (usize, usize))> {
+    let site = if let Some(&(s, _)) = p.slots.get(&c) {
+        &pl.slices[s]
+    } else {
+        pl.rams.get(&c).or_else(|| pl.dsps.get(&c)).or_else(|| pl.ports.get(&c))?
+    };
+    let t = &db.tiles[site.tile];
+    Some(((t.x, t.y), (site.tile, site.index)))
+}
+
 /// Cell pins and their nets, for diagnostics.
 fn describe(nl: &Netlist, pins: &[(CellId, String, NetId)]) -> String {
     let names: Vec<_> = pins
@@ -372,10 +494,38 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
     let mut requests = Vec::new();
     let mut names = Vec::new();
     let mut nets = Vec::new();
+    // Constants come from each interconnect tile's own GND_WIRE (through its
+    // GFAN wires) or VCC_WIRE, not from one LUT across the design.
+    let local = local_constants(db, &sinks, p);
     for (n, sinks) in sinks {
         if sinks.is_empty() {
             continue;
         }
+        let sinks = if let Some(v) = p.constants.get(&n) {
+            let mut by_source: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+            let mut rest = BTreeSet::new();
+            for s in sinks {
+                match local.get(&s) {
+                    Some(&(gnd, vcc)) => {
+                        by_source.entry(if *v { vcc } else { gnd }).or_default().push(s)
+                    }
+                    None => {
+                        rest.insert(s);
+                    }
+                }
+            }
+            for (source, sinks) in by_source {
+                requests.push(synth_route::NetRequest { source, sinks, criticality: vec![] });
+                names.push(format!("{}:local", nl.str(nl.nets[n].name)));
+                nets.push(None);
+            }
+            if rest.is_empty() {
+                continue;
+            }
+            rest
+        } else {
+            sinks
+        };
         let src = source(db, nl, p, pl, n)?;
         if let Some(buf) = pl.clocks.get(&n) {
             requests.push(synth_route::NetRequest {

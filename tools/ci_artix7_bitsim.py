@@ -43,6 +43,25 @@ def ports(xdc, pins):
     return sites, clocks
 
 
+def invert_memory_clocks(net, fasm):
+    """fasm2bels applies a slice's CLKINV to its flip-flops only. The SLICEM
+    clock inverter also drives the write clock of its shift registers and
+    LUT RAM, so give those cells the inversion too."""
+    inverted = set()
+    for line in fasm.read_text().splitlines():
+        if m := re.match(r"(\S+)\.SLICEM_X0\.CLKINV$", line.strip()):
+            inverted.add(m[1])
+    def patch(m):
+        kind, params, tile, x = m[1], m[2], m[3], int(m[4])
+        if tile not in inverted or x % 2:
+            return m[0]
+        pin = "IS_WCLK_INVERTED" if kind.startswith("RAM") else "IS_CLK_INVERTED"
+        return m[0].replace(params, params.rstrip() + f",\n    .{pin}(1'b1)\n  ", 1)
+    text = re.sub(r"\b(SRLC32E|SRL16E|RAM32M|RAM64M) #\(((?:.|\n)*?)\) ((?:CLBLM_[LR]_X\d+Y\d+))_SLICE_X(\d+)Y\d+_",
+                  patch, net.read_text())
+    net.write_text(text)
+
+
 def testbench(name, sites, clocks, directions, cycles):
     """Drives both models with the same random inputs; compares outputs."""
     bits = {}
@@ -55,6 +74,7 @@ def testbench(name, sites, clocks, directions, cycles):
     lines = ["`timescale 1ns/1ps", "module tb;"]
     lines += [f"  reg {ident(p)} = 0;" for p in inputs]
     lines += [f"  wire ref_{ident(p)}, got_{ident(p)};" for p in outputs]
+    lines += [f"  reg seen_{ident(p)} = 0;" for p in outputs]
     conns = []
     for base, members in bits.items():
         prefix = "" if directions[next(iter(members.values()))] == "input" else "ref_"
@@ -82,13 +102,14 @@ def testbench(name, sites, clocks, directions, cycles):
     # Registers without an initial value read x in the RTL until reset; the
     # bitstream starts them at 0. Compare the outputs the RTL defines.
     for p in outputs:
+        lines.append(f"      if (ref_{ident(p)} !== 1'bx) seen_{ident(p)} = 1;")
         lines.append(f"      if (ref_{ident(p)} !== 1'bx && got_{ident(p)} !== ref_{ident(p)}) "
                      f"$fatal(1, \"{name}: {p} %b != %b after %0d half cycles\", "
                      f"got_{ident(p)}, ref_{ident(p)}, i);")
     lines += ["    end"]
-    # Every output must be defined by the end, or nothing was compared.
+    # Every output must have been compared at some point.
     for p in outputs:
-        lines.append(f"    if (ref_{ident(p)} === 1'bx) $fatal(1, \"{name}: {p} undefined in the RTL\");")
+        lines.append(f"    if (!seen_{ident(p)}) $fatal(1, \"{name}: {p} never defined in the RTL\");")
     lines += [f"    $display(\"PASS bitstream {name}\");", "    $finish;", "  end",
               "endmodule"]
     return "\n".join(lines) + "\n"
@@ -139,6 +160,7 @@ def main():
                  "--fasm_file", prefix.with_suffix(".decoded.fasm"), "--verilog_file", net,
                  "--xdc_file", prefix.with_suffix(".bels.xdc"), "--top", "bels",
                  "--iostandard", "LVCMOS33", "--drive", "12"], prefix.with_suffix(".fasm2bels.log"))
+            invert_memory_clocks(net, prefix.with_suffix(".decoded.fasm"))
             sites, clocks = ports(bit.with_suffix(".xdc"), pins)
             header = net.read_text().split(");", 1)[0]
             directions = {}

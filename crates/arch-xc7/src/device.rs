@@ -408,7 +408,10 @@ impl Template {
                         let mut words = line.split_whitespace();
                         let Some(feature) = words.next() else { continue };
                         if prefix == "ppips" {
-                            if words.next() == Some("always") {
+                            // `always` pips need no configuration; `default`
+                            // ones (VCC_WIRE into an interconnect mux) are what
+                            // a mux with nothing selected drives.
+                            if matches!(words.next(), Some("always" | "default")) {
                                 fixed.insert(feature.to_string());
                             }
                         } else {
@@ -446,7 +449,7 @@ impl Template {
                 directions.push((dst, src, "dst_to_src"));
             }
             for (src, dst, timing) in directions {
-                if !crate::routing::general_routing(kind, src) {
+                if !crate::routing::general_routing(kind, src, dst) {
                     continue;
                 }
                 let feature = format!("{kind}.{dst}.{src}");
