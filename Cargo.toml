@@ -22,6 +22,7 @@ synth-netlist = { path = "crates/synth-netlist" }
 synth-rtl = { path = "crates/synth-rtl" }
 synth-rtlil = { path = "crates/synth-rtlil" }
 synth-route = { path = "crates/synth-route" }
+synth-sim = { path = "crates/synth-sim" }
 synth-verilog = { path = "crates/synth-verilog" }
 synth-weft = { path = "crates/synth-weft" }
 
