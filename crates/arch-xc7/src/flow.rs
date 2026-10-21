@@ -113,14 +113,16 @@ pub fn implement(
         arc_bounding_boxes: true,
         max_iterations: 100,
         stall_iterations: 30,
-        // Criticalities follow the routes every other iteration; rerouting
-        // critical nets again after a legal routing gains about 1% for
-        // nearly twice the time, so routing stops at the first.
+        // Criticalities follow the routes every other iteration.
         retime_every: 2,
         // Critical connections weigh delay almost alone against congestion:
         // the 0.9 default left them on slower detours (about 8% Fmax on the
-        // Euler designs, timed by Vivado), and nets still converge.
+        // Euler designs, by the calibrated estimate), and nets still converge.
         max_criticality: 0.99,
+        // Once routing is legal, critical nets are routed again three times,
+        // keeping the best timed routing: 1-6% Fmax for up to 1.6 times the
+        // routing time (more rounds gained no more).
+        timing_rounds: 3,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
