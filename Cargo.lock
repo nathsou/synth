@@ -25,6 +25,7 @@ dependencies = [
  "synth-playground",
  "synth-rtl",
  "synth-rtlil",
+ "synth-sim",
  "synth-verilog",
  "synth-weft",
 ]

@@ -69,6 +69,28 @@ tools/build_playground.sh              # or a static site, the flow in WebAssemb
 
 See [docs/PLAYGROUND.md](docs/PLAYGROUND.md).
 
+## Simulation
+
+`synth sim` simulates Verilog (four-state, as Icarus does) or Weft
+(two-state) without other tools: it compiles the elaborated design into a
+program that runs only the logic each change reaches. It drives the clock,
+sets inputs at given cycles, stops on a condition, prints signals, decodes a
+serial line and writes VCD:
+
+```sh
+target/release/synth sim tests/designs/euler/p031.v --top euler31 \
+  --set start=1 --set rst=1 --at 2:rst=0 --until done --print answer --vcd p031.vcd
+target/release/synth sim soc.v picorv32.v --top top --cycles 200000 --uart tx:8
+```
+
+For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
+`<top>.c`) to compile with a testbench of your own, like a Verilator model.
+`--attach` places external memories (a ROM on the design's address and data
+ports) inside the model. On the NES of the Weft examples, the C model runs
+1.3 times as fast as Verilator; the interpreter, a third as fast. Rust code
+drives simulations through the `synth-sim` crate. See
+[ADR 0008](docs/decisions/0008-simulator.md).
+
 ## Carry mapping
 
 `--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum

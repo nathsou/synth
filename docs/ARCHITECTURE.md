@@ -38,8 +38,9 @@ phased plan for getting there is in [ROADMAP.md](ROADMAP.md).
   encryption.
 - Vendor IP generators (MIG, CoreGen). Users instantiate primitives directly.
 - A GUI. Reports are text, JSON and later HTML. A floorplan viewer may come later.
-- Simulation as a product feature. An internal simulator exists for verification
-  (§13) and may be exposed later as `synth sim`.
+- Simulation beyond what verification needs: `synth sim` (ADR 0008) runs designs
+  with simple stimulus, VCD output and C models, but there are no testbench
+  language constructs.
 
 ---
 

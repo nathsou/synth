@@ -24,6 +24,7 @@ pub mod compile;
 pub mod emit_c;
 pub mod exec;
 pub mod program;
+pub mod vcd;
 
 use synth_core::{FxHashMap, Logic, LogicVec};
 use synth_rtl::Module;
