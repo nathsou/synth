@@ -21,6 +21,7 @@
 
 pub mod attach;
 pub mod compile;
+pub mod emit_c;
 pub mod exec;
 pub mod program;
 
@@ -142,6 +143,32 @@ impl Sim {
     /// The value plane of the state (for diagnostics).
     pub fn state_words(&self) -> &[u64] {
         &self.st.val
+    }
+
+    /// Checks that the state is settled: running every instruction again
+    /// changes nothing. Returns the instructions whose outputs would change
+    /// (for testing the change propagation).
+    pub fn unsettled(&self) -> Vec<usize> {
+        let mut st = self.st.clone();
+        if self.prog.four_state {
+            exec::run::<true>(&self.prog.aux, &self.prog.ops, &mut st);
+        } else {
+            exec::run::<false>(&self.prog.aux, &self.prog.ops, &mut st);
+        }
+        let mut bad = Vec::new();
+        for (i, ins) in self.prog.ops.iter().enumerate() {
+            if ins.k == program::K::Loop {
+                continue;
+            }
+            let n = self.prog.out[i].n as usize;
+            let d = ins.d as usize;
+            let differs = st.val[d..d + n] != self.st.val[d..d + n]
+                || self.prog.four_state && st.unk[d..d + n] != self.st.unk[d..d + n];
+            if differs {
+                bad.push(i);
+            }
+        }
+        bad
     }
 
     /// Combinational units run so far.

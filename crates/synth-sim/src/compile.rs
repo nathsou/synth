@@ -678,6 +678,8 @@ impl Builder<'_> {
         let en = en.map(|(e, _)| self.ctl(e));
         let srst = match &d.srst {
             Some((c, _)) if self.ctl_const(*c) == Some(false) => None,
+            // Only acts when enabled, which it never is.
+            Some(_) if en_never && d.en_over_srst => None,
             Some((c, v)) => {
                 let v = self.constant(&v.resize(w as usize, false));
                 Some((self.ctl(*c), v.off))
@@ -999,7 +1001,11 @@ impl Builder<'_> {
 
         let m = self.m;
         let mut signals = Vec::new();
+        let mut ports = Vec::new();
         for (wi, w) in m.wires.iter_enumerated() {
+            if let Some((dir, pos)) = w.port {
+                ports.push((signals.len(), dir, pos));
+            }
             let base = self.wire_base[wi.index()];
             let locs: Vec<Loc> = (0..w.width as usize)
                 .map(|i| self.loc[base + i].unwrap_or(Loc::Const(Logic::X)))
@@ -1026,6 +1032,7 @@ impl Builder<'_> {
             clocks: self.clocks,
             word_kind: self.kind,
             signals,
+            ports,
             warnings: self.warnings,
         }
     }

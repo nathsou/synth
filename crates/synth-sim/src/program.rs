@@ -343,5 +343,7 @@ pub struct Program {
     pub word_kind: Vec<SlotKind>,
     /// Named signals: (name, bit locations, least significant first).
     pub signals: Vec<(String, Vec<Loc>)>,
+    /// Module ports: index into `signals`, direction, position.
+    pub ports: Vec<(usize, synth_rtl::PortDir, u32)>,
     pub warnings: Vec<String>,
 }
