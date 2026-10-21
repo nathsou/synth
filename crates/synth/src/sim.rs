@@ -392,6 +392,9 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
     let hold = a.value("--hold").map(|c| parse_value(&c)).transpose()?.unwrap_or(20).max(1);
     let seed = a.value("--seed").map(|c| parse_value(&c)).transpose()?.unwrap_or(1);
     let quiet = a.flag("--quiet");
+    // Inputs held at a value instead of random ones.
+    let held: Vec<(String, u64)> =
+        a.values("--set").iter().map(|s| assignment(s)).collect::<Result<_, _>>()?;
     a.finish()?;
     let mut r = Sim::new(&reference, &Options { four_state: true, prune: false })?;
     let mut n = Sim::new(&other, &Options { four_state: false, prune: false })?;
@@ -425,7 +428,14 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
             r.poke_vec(rs, v);
             n.poke_vec(ns, v);
         };
-    // Inputs start at 0, resets active.
+    // Inputs start at 0 (or their --set value), resets active.
+    inputs.retain(|(name, rs, ns)| {
+        let Some((_, v)) = held.iter().find(|(n, _)| n == name) else { return true };
+        let v = LogicVec::from_u64(*v, rs.width().max(1)).resize(rs.width(), false);
+        r.poke_vec(rs, &v);
+        n.poke_vec(ns, &v);
+        false
+    });
     for (name, rs, ns) in &inputs {
         let w = rs.width();
         let v =

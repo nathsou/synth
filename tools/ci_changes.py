@@ -26,11 +26,11 @@ import sys
 GLOBAL = ('Cargo.toml', 'Cargo.lock', '.github/workflows/ci.yml', 'tools/ci_changes.py')
 
 # Crates and files each simulation suite exercises.
-FRONTEND_CRATES = {'synth-core', 'synth-verilog', 'synth-elab', 'synth-rtl', 'synth-logic', 'synth-netlist', 'synth'}
+FRONTEND_CRATES = {'synth-core', 'synth-verilog', 'synth-elab', 'synth-rtl', 'synth-logic', 'synth-netlist', 'synth-sim', 'synth'}
 FRONTEND_FILES = ('crates/arch-ice40/src/synth.rs', 'crates/arch-ice40/src/cells.rs', 'crates/arch-ice40/src/lib.rs',
-                  'tools/ci_rtlsim.sh', 'tools/rtlsim.py', 'tools/ci_euler.sh', 'tests/designs/')
+                  'tools/ci_rtlsim.sh', 'tools/rtlsim.py', 'tools/ci_euler.sh', 'tools/ci_sim.sh', 'tests/designs/')
 PNR_CRATES = FRONTEND_CRATES | {'synth-rtlil', 'synth-route', 'arch-ice40'}
-PNR_FILES = ('tools/ci_bitsim.sh', 'tools/ci_incremental.sh', 'tools/bitsim.py', 'tests/designs/')
+PNR_FILES = ('tools/ci_bitsim.sh', 'tools/ci_incremental.sh', 'tools/bitsim.py', 'tools/ci_sim.sh', 'tests/designs/')
 
 PLAYGROUND_FILES = ('editors/', 'tools/build_playground.sh')
 

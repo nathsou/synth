@@ -91,6 +91,19 @@ ports) inside the model. On the NES of the Weft examples, the C model runs
 drives simulations through the `synth-sim` crate. See
 [ADR 0008](docs/decisions/0008-simulator.md).
 
+The same simulator checks the flow: `--level synth` simulates the iCE40
+netlist synthesis makes of a design and `--level bitstream` what its
+bitstream implements, decoded back to cells (ports named after the PCF);
+`--compare synth` or `--compare bitstream` runs one against the RTL under
+random inputs, comparing every output bit the RTL defines:
+
+```sh
+target/release/synth sim soc.v picorv32.v --top top --compare bitstream \
+  --device hx8k --package cb132 --pcf alchitry_cu.pcf --cycles 200000
+```
+
+`tools/ci_sim.sh` runs these checks on the test designs and boards in CI.
+
 ## Carry mapping
 
 `--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum
