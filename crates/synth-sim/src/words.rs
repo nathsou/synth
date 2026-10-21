@@ -9,9 +9,8 @@
 //! after where its inputs sit in groups already merged, so that the next
 //! level reads whole words.
 //!
-//! Registers are bit-blasted too (one flip-flop per bit, or per flag, each
-//! with the same clock and controls): [`merge_flops`] puts those back
-//! together.
+//! Registers are bit-blasted too (one flip-flop per bit, each with the same
+//! clock and controls): [`merge_flops`] puts those back together.
 
 use synth_core::{FxHashMap, LogicVec};
 use synth_rtl::{CellId, CellKind, Clock, Control, Dff, Module, Sig, SigBit};
@@ -213,11 +212,12 @@ pub fn merge_bit_muxes(m: &mut Module) -> usize {
 /// Flip-flops narrower than this are merged.
 const NARROW: usize = 8;
 
-/// Merges narrow flip-flops with the same clock and controls into words of
-/// up to 64 bits, in the order of their outputs' wires (so that a register
-/// split into bits is one again); returns the number merged away.
+/// Merges narrow flip-flops of the same wire (a register split into bits)
+/// with the same clock and controls into words of up to 64 bits; returns
+/// the number merged away. (Unrelated flags merged too would make each
+/// one's readers depend on all of them.)
 pub fn merge_flops(m: &mut Module) -> usize {
-    type Key = (Clock, Option<Control>, Option<Control>, Option<Control>, bool);
+    type Key = (Clock, Option<Control>, Option<Control>, Option<Control>, bool, u64);
     let mut groups: FxHashMap<Key, Vec<CellId>> = FxHashMap::default();
     let mut order: Vec<Key> = Vec::new();
     for ci in m.live_cells() {
@@ -231,6 +231,10 @@ pub fn merge_flops(m: &mut Module) -> usize {
             d.srst.as_ref().map(|(c, _)| *c),
             d.arst.as_ref().map(|(c, _)| *c),
             d.en_over_srst && d.en.is_some() && d.srst.is_some(),
+            match d.q.0[0] {
+                SigBit::Wire(w, _) => w.index() as u64,
+                SigBit::Const(_) => u64::MAX,
+            },
         );
         let g = groups.entry(key).or_default();
         if g.is_empty() {

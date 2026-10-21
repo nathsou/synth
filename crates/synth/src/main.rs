@@ -66,7 +66,8 @@ SIM OPTIONS:
               [--vcd <out.vcd>] [--uart <name>[:<clocks per bit>]]
               [--load <memory>=<file.hex>]... [--two-state | --four-state]
               [--attach <name>:<addr>:<data>:<depth>[:<clock>:<enable>:<wdata>]]...
-              [--emit-c <dir>] [--level <rtl|synth|bitstream>] [--quiet]
+              [--emit-c <dir>] [--level <rtl|synth|bitstream>] [--optimize]
+              [--stats] [--quiet]
     synth sim <files...> --compare <synth|bitstream> [--clock <name>]...
               [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
               [--seed <n>]
@@ -79,7 +80,11 @@ SIM OPTIONS:
               Verilog four-state. --uart decodes an 8N1 output line.
               --attach drives the input <data> with the word at <addr> of a
               new memory (written on the clock's rising edge when <enable>).
-              --emit-c writes a two-state C model (<top>.h, <top>.c) instead.
+              --emit-c writes a two-state C model (<top>.h, <top>.c) instead,
+              optimized as --optimize does. --optimize runs synthesis's RTL
+              optimizations first and merges bit-level multiplexers and
+              flip-flops into words: faster, but internal signals may be
+              gone or renamed. --stats prints what the program runs.
               --level synth simulates the iCE40 netlist synthesis makes of
               the design, --level bitstream what its bitstream implements
               (built, or read from --bitstream), decoded back to cells; ports

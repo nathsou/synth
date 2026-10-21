@@ -169,10 +169,8 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
         !weft && level == "rtl"
     };
     if let Some(dir) = a.value("--emit-c") {
-        let sim = Sim::new(
-            &m,
-            &Options { four_state: false, prune: false, optimize: a.flag("--optimize") },
-        )?;
+        // The model shows only ports and memories: always optimized.
+        let sim = Sim::new(&m, &Options { four_state: false, prune: false, optimize: true })?;
         let model = emit_c::emit(sim.program(), &m.name)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
         let h = format!("{dir}/{}.h", model.prefix);

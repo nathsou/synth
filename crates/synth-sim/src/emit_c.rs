@@ -326,7 +326,32 @@ impl Emitter<'_> {
                         words[j as usize].push(self.w(ins.c + j));
                     }
                 }
-                for part in &p.aux.parts[a as usize..(a + b) as usize] {
+                let parts = &p.aux.parts[a as usize..(a + b) as usize];
+                let mut i = 0;
+                while i < parts.len() {
+                    let part = &parts[i];
+                    // A bit repeated (a sign or mask extension): one negation.
+                    let mut n = 1;
+                    while part.len == 1
+                        && parts.get(i + n).is_some_and(|q| {
+                            (q.src, q.dst, q.lo, q.len) == (part.src, part.dst, part.lo, 1)
+                                && q.pos as usize == part.pos as usize + n
+                        })
+                    {
+                        n += 1;
+                    }
+                    i += n;
+                    if n > 1 {
+                        let mut e = format!("(0 - ({} >> {} & 1))", self.w(part.src), part.lo);
+                        if part.pos as usize + n != 64 {
+                            e = format!("({e} & {})", hex(mask(n as u32)));
+                        }
+                        if part.pos != 0 {
+                            e = format!("({e} << {})", part.pos);
+                        }
+                        words[part.dst as usize].push(e);
+                        continue;
+                    }
                     let mut e = self.w(part.src);
                     if part.lo != 0 {
                         e = format!("({e} >> {})", part.lo);
