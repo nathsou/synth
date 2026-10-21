@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import subprocess
 import sys
 import time
@@ -84,7 +85,9 @@ def constraints(a, part, ports, clocks=(), single_io=False):
         pins = [p for p in pins if "_SING_" in p["tile"]]
     chosen = {}
     for clock in clocks:
-        pin = next(p for p in pins if "MRCC" in p["pin_function"] and p["pin"] not in chosen.values())
+        # A single-ended clock enters a clock-capable pair on its P side.
+        pin = next(p for p in pins if re.search(r"_L\d+P_.*MRCC", p["pin_function"])
+                   and p["pin"] not in chosen.values())
         chosen[clock] = pin["pin"]
     for port in ports:
         if port not in chosen:
