@@ -51,7 +51,8 @@ fn check(
     rng: &mut Rng,
 ) {
     for four in [true, false] {
-        let mut sim = Sim::new(m, &Options { four_state: four, prune: false }).unwrap();
+        let mut sim =
+            Sim::new(m, &Options { four_state: four, prune: false, optimize: false }).unwrap();
         let sigs: Vec<_> = ins.iter().map(|(n, _)| sim.signal(n).unwrap()).collect();
         let y = sim.signal("y").unwrap();
         for _ in 0..200 {

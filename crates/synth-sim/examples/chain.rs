@@ -23,7 +23,8 @@ fn main() {
     m.wires[y].port = Some((PortDir::Output, 1));
     m.connect(m.wire_sig(y), prev);
     for four in [false, true] {
-        let mut sim = Sim::new(&m, &Options { four_state: four, prune: false }).unwrap();
+        let mut sim =
+            Sim::new(&m, &Options { four_state: four, prune: false, optimize: false }).unwrap();
         let (sa, sy) = (sim.signal("a").unwrap(), sim.signal("y").unwrap());
         let iters = 20_000;
         let t = Instant::now();

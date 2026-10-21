@@ -90,7 +90,36 @@ impl Gen {
     fn comb_cell(&mut self) {
         let w = self.width();
         let y = self.wire(w);
-        let kind = match self.below(12) {
+        let kind = match self.below(13) {
+            12 => {
+                // Bit-level multiplexers sharing a select (as process
+                // lowering builds them), for `words::merge_bit_muxes`.
+                let n = 1 + self.below(4);
+                let sel = if n == 1 { Sig::bit(self.bit()) } else { self.sig(n) };
+                for i in 0..w {
+                    let bit = y.slice(i, 1);
+                    let kind = if n == 1 {
+                        CellKind::Mux {
+                            a: self.sig(1),
+                            b: self.sig(1),
+                            s: sel.0[0],
+                            y: bit,
+                            ternary: false,
+                        }
+                    } else {
+                        CellKind::Pmux {
+                            default: self.sig(1),
+                            cases: (0..n).map(|_| self.sig(1)).collect(),
+                            s: sel.clone(),
+                            y: bit,
+                        }
+                    };
+                    let c = self.m.cells.len();
+                    self.m.add_cell(format!("c{c}"), kind);
+                }
+                self.avail.push(y);
+                return;
+            }
             0 => {
                 let op = [
                     UnaryOp::Not,
@@ -658,7 +687,7 @@ fn wire_id(m: &Module, name: &str) -> WireId {
 fn compare(seed: u64, four: bool, cycles: usize) -> (Gen, Vec<Vec<u64>>, Vec<Vec<u64>>) {
     let g = design(seed);
     let m = &g.m;
-    let mut sim = Sim::new(m, &Options { four_state: four, prune: false })
+    let mut sim = Sim::new(m, &Options { four_state: four, prune: false, optimize: false })
         .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
     let mut r = Ref::new(m, !four);
     let mut rng = Rng::new(seed ^ 0x5eed);
@@ -793,6 +822,40 @@ fn random_designs_two_state() {
     }
 }
 
+/// The RTL optimizations (`Options::optimize`) keep the outputs.
+#[test]
+fn random_designs_optimized() {
+    for seed in 0..300 {
+        let (g, stimuli, results) = compare(seed, false, 20);
+        // The stimuli record inputs up to 64 bits wide.
+        if g.inputs.iter().any(|(_, w)| *w > 64) {
+            continue;
+        }
+        let mut sim =
+            Sim::new(&g.m, &Options { four_state: false, prune: false, optimize: true }).unwrap();
+        let clk = sim.signal("clk").unwrap();
+        sim.poke(&clk, 0);
+        sim.eval_quiet();
+        let ins: Vec<_> = g.inputs.iter().map(|(n, _)| sim.signal(n).unwrap()).collect();
+        let outs: Vec<_> = g.outputs.iter().map(|n| sim.signal(n).unwrap()).collect();
+        let mut got = Vec::new();
+        for stim in &stimuli {
+            for (s, &v) in ins.iter().zip(stim) {
+                sim.poke(s, v);
+            }
+            sim.eval();
+            for level in [1, 0] {
+                sim.poke(&clk, level);
+                sim.eval();
+                got.push(
+                    outs.iter().map(|s| sim.peek_vec(s).to_u64().unwrap_or(0)).collect::<Vec<_>>(),
+                );
+            }
+        }
+        assert_eq!(got, results, "seed {seed}: optimized design differs");
+    }
+}
+
 /// The C backend agrees with the interpreter (when a C compiler is found).
 #[test]
 fn random_designs_in_c() {
@@ -811,7 +874,9 @@ fn random_designs_in_c() {
         {
             continue;
         }
-        let sim = Sim::new(&g.m, &Options { four_state: false, prune: false }).unwrap();
+        // Odd seeds through the RTL optimizations.
+        let optimize = seed % 2 == 1;
+        let sim = Sim::new(&g.m, &Options { four_state: false, prune: false, optimize }).unwrap();
         let model = synth_sim::emit_c::emit(sim.program(), "top").unwrap();
         std::fs::write(dir.join("top.h"), &model.header).unwrap();
         std::fs::write(dir.join("top.c"), &model.source).unwrap();

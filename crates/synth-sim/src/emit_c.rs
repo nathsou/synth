@@ -2,14 +2,17 @@
 //! user's C compiler for long simulations (ADR 0008).
 //!
 //! The model is a struct holding the state, with `<p>_init` and `<p>_eval`
-//! and an accessor per port, in the manner of a Verilator model. Inputs
-//! are written through setters, which note which input changed; `eval` then
-//! runs the logic each changed input reaches, fires the clock edges that
-//! result and runs the logic each fired domain reaches, until no clock
-//! changes. Each source (an input, a clock domain, the memories written
-//! from outside) has its own function holding, in evaluation order, the
-//! instructions it reaches: running several of them in sequence leaves
-//! every value as a single evaluation in order would.
+//! and an accessor per port, in the manner of a Verilator model.
+//!
+//! The combinational logic is cut into partitions, in the manner of
+//! ESSENT: each value read by exactly one instruction (and nothing else) is
+//! computed in a C local by the partition of its reader, so a partition is
+//! a tree of instructions whose root alone writes the state. A multiplexer
+//! computes only the input it selects, which turns the trees of the
+//! processes' assignments back into branches. Each partition has a dirty
+//! bit: it runs only after one of its inputs changed, and marks the
+//! partitions reading its output when that changes. Inputs, state updates
+//! and memory writes mark the partitions reading them.
 
 use std::fmt::Write as _;
 
@@ -51,89 +54,10 @@ fn mem_type(w: u32) -> (&'static str, u32) {
     }
 }
 
-/// Instructions reached from each source, in program order.
-struct Cones {
-    inputs: Vec<(u32, Vec<u32>)>,
-    domains: Vec<Vec<u32>>,
-    host: Vec<u32>,
-}
-
 /// Units reading the slot holding `word`.
 fn readers(p: &Program, word: u32) -> &[u32] {
     let s = p.slot_of[word as usize] as usize;
     &p.rd[p.rd_start[s] as usize..p.rd_start[s + 1] as usize]
-}
-
-/// The units reached from `start` (units), in order.
-fn reach(p: &Program, start: impl IntoIterator<Item = u32>) -> Vec<u32> {
-    let n = p.ops.len();
-    let mut seen = vec![false; n];
-    let mut stack: Vec<u32> = start.into_iter().filter(|&u| (u as usize) < n).collect();
-    while let Some(u) = stack.pop() {
-        if std::mem::replace(&mut seen[u as usize], true) {
-            continue;
-        }
-        let ins = &p.ops[u as usize];
-        let mut push = |w: u32| {
-            for &r in readers(p, w) {
-                if (r as usize) < n && !seen[r as usize] {
-                    stack.push(r);
-                }
-            }
-        };
-        match ins.k {
-            K::Loop => {
-                for &o in &p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize] {
-                    push(o);
-                }
-            }
-            K::Decode => {
-                for &(_, d, _) in &p.aux.decoders[ins.x as usize].entries {
-                    push(d);
-                }
-            }
-            _ => push(ins.d),
-        }
-    }
-    (0..n as u32).filter(|&u| seen[u as usize]).collect()
-}
-
-/// The input slots the model can write: whole input ports.
-fn input_ports(p: &Program) -> Vec<u32> {
-    let mut slots = Vec::new();
-    for &(si, dir, _) in &p.ports {
-        let locs = &p.signals[si].1;
-        if dir != PortDir::Output
-            && !locs.is_empty()
-            && locs.len() <= 64
-            && let Some(Loc::Bit { word, bit: 0 }) = locs.first()
-            && p.word_kind[*word as usize] == SlotKind::Input
-            && p.slot_of[*word as usize] == *word
-            && !slots.contains(word)
-        {
-            slots.push(*word);
-        }
-    }
-    slots
-}
-
-fn cones(p: &Program) -> Cones {
-    let inputs =
-        input_ports(p).into_iter().map(|s| (s, reach(p, readers(p, s).iter().copied()))).collect();
-    let mut domains = Vec::new();
-    for d in &p.domains {
-        let mut start = Vec::new();
-        for ins in d.commit.iter().chain(&d.gated) {
-            start.extend_from_slice(readers(p, ins.d));
-        }
-        for ins in &d.write {
-            let mem = p.aux.writes[ins.x as usize].mem as usize;
-            start.extend_from_slice(&p.mem_readers[mem]);
-        }
-        domains.push(reach(p, start));
-    }
-    let host = reach(p, p.mem_readers.iter().flatten().copied());
-    Cones { inputs, domains, host }
 }
 
 /// The slots a unit writes.
@@ -149,159 +73,217 @@ fn unit_writes(p: &Program, u: u32) -> Vec<u32> {
     }
 }
 
-/// Reorders `units` (in evaluation order) so that units with the same mask
-/// follow each other where dependencies allow, keeping every unit after
-/// those it reads.
-fn cluster(p: &Program, units: &[u32], mask: &[u64]) -> Vec<u32> {
-    let pos: std::collections::HashMap<u32, usize> =
-        units.iter().enumerate().map(|(i, &u)| (u, i)).collect();
-    let n = units.len();
-    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut indeg = vec![0u32; n];
-    for (i, &u) in units.iter().enumerate() {
-        let mut seen = Vec::new();
-        for w in unit_writes(p, u) {
-            for r in readers(p, w) {
-                if let Some(&j) = pos.get(r)
-                    && j != i
-                    && !seen.contains(&j)
-                {
-                    seen.push(j);
-                    succ[i].push(j);
-                    indeg[j] += 1;
-                }
+/// Slots read by the instructions of clock domains.
+fn seq_reads(p: &Program, ins: &Ins, out: &mut Vec<u32>) {
+    let s = |w: u32| p.slot_of[w as usize];
+    match ins.k {
+        K::Copy => out.push(s(ins.a)),
+        K::FfEn => out.extend([s(ins.a), s(ins.b), s(ins.c)]),
+        K::Ff => {
+            let f = &p.aux.flops[ins.x as usize];
+            out.extend([s(f.d), s(f.q)]);
+            out.extend(f.en.map(|c| s(c.word)));
+            out.extend(f.srst.map(|(c, _)| s(c.word)));
+            out.extend(f.arst.map(|(c, _)| s(c.word)));
+        }
+        K::MemWr => {
+            let w = &p.aux.writes[ins.x as usize];
+            out.extend([w.addr.off, w.data.off, w.en.off]);
+        }
+        K::MemRdSync => {
+            let r = &p.aux.sync_reads[ins.x as usize];
+            out.extend([r.addr.off, r.q]);
+            out.extend(r.en.map(|c| s(c.word)));
+            for &wi in &r.transparent {
+                let w = &p.aux.writes[wi as usize];
+                out.extend([w.addr.off, w.data.off, w.en.off]);
             }
         }
+        _ => {}
     }
-    // Ready units by mask, in order.
-    let mut ready: std::collections::BTreeMap<u64, std::collections::BTreeSet<usize>> =
-        Default::default();
-    for i in 0..n {
-        if indeg[i] == 0 {
-            ready.entry(mask[units[i] as usize]).or_default().insert(i);
-        }
-    }
-    let mut out = Vec::with_capacity(n);
-    let mut cur: Option<u64> = None;
-    while out.len() < n {
-        let mk = match cur {
-            Some(m) if ready.get(&m).is_some_and(|s| !s.is_empty()) => m,
-            _ => {
-                // The mask whose earliest ready unit comes first.
-                *ready
-                    .iter()
-                    .filter(|(_, s)| !s.is_empty())
-                    .min_by_key(|(_, s)| *s.iter().next().unwrap())
-                    .unwrap()
-                    .0
-            }
-        };
-        let set = ready.get_mut(&mk).unwrap();
-        let i = *set.iter().next().unwrap();
-        set.remove(&i);
-        cur = Some(mk);
-        out.push(units[i]);
-        for &j in &succ[i] {
-            indeg[j] -= 1;
-            if indeg[j] == 0 {
-                ready.entry(mask[units[j] as usize]).or_default().insert(j);
-            }
-        }
-    }
-    out
 }
 
-/// What a domain's edge changes, in at most 64 groups, and which groups
-/// each instruction of its cone depends on. An edge sets the bits of the
-/// groups it changed; the cone then runs only what depends on them.
-struct Groups {
-    /// Group of each commit and gated update, then of each memory write.
-    commit: Vec<u32>,
-    write: Vec<u32>,
-    /// Per unit (instruction index): the groups it depends on.
-    mask: Vec<u64>,
+/// Instructions whose single-word result can live in a C local.
+fn simple(k: K) -> bool {
+    !matches!(
+        k,
+        K::Loop
+            | K::Decode
+            | K::Wide
+            | K::Latch
+            | K::Arst
+            | K::FfEn
+            | K::Ff
+            | K::MemWr
+            | K::MemRdSync
+    )
 }
 
-fn bitset(n: usize, units: &[u32]) -> Vec<u64> {
-    let mut b = vec![0u64; n.div_ceil(64)];
-    for &u in units {
-        b[u as usize / 64] |= 1 << (u % 64);
-    }
-    b
+/// The partitions of the logic.
+struct Plan {
+    /// Per word: computed in a C local of its partition.
+    local: Vec<bool>,
+    /// Partitions in evaluation order: their units, ascending, root last.
+    parts: Vec<Vec<u32>>,
+    /// Per unit: its partition (`NONE` for members of loops).
+    part_of: Vec<u32>,
+    /// Per unit: the units whose local results it reads.
+    children: Vec<Vec<u32>>,
 }
 
-fn groups(p: &Program, d: &Domain) -> Groups {
+fn plan(p: &Program) -> Plan {
     let n = p.ops.len();
-    // Sources: each state update and each memory write, with what it reaches.
-    let mut reach_of: Vec<Vec<u64>> = Vec::new();
-    for ins in d.commit.iter().chain(&d.gated) {
-        reach_of.push(bitset(n, &reach(p, readers(p, ins.d).iter().copied())));
-    }
-    for ins in &d.write {
-        let mem = p.aux.writes[ins.x as usize].mem as usize;
-        reach_of.push(bitset(n, &reach(p, p.mem_readers[mem].iter().copied())));
-    }
-    // Merge the closest groups (fewest units reached by one but not the
-    // other) until at most 64 remain.
-    let mut members: Vec<Vec<usize>> = (0..reach_of.len()).map(|i| vec![i]).collect();
-    let mut sets = reach_of;
-    let dist =
-        |a: &[u64], b: &[u64]| -> u32 { a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum() };
-    while sets.len() > 64 {
-        let mut best = (u32::MAX, 0, 1);
-        for i in 0..sets.len() {
-            for j in i + 1..sets.len() {
-                let dd = dist(&sets[i], &sets[j]);
-                if dd < best.0 {
-                    best = (dd, i, j);
-                }
-            }
-        }
-        let (_, i, j) = best;
-        let sj = sets.swap_remove(j);
-        let mj = members.swap_remove(j);
-        for (a, b) in sets[i].iter_mut().zip(sj) {
-            *a |= b;
-        }
-        members[i].extend(mj);
-    }
-    let nsrc = d.commit.len() + d.gated.len() + d.write.len();
-    let mut group_of = vec![0u32; nsrc];
-    let mut mask = vec![0u64; n];
-    for (g, (ms, set)) in members.iter().zip(&sets).enumerate() {
-        for &m in ms {
-            group_of[m] = g as u32;
-        }
-        for u in 0..n {
-            if set[u / 64] >> (u % 64) & 1 != 0 {
-                mask[u] |= 1 << g;
+    let words = p.init_val.len();
+    let mut member = vec![false; n];
+    for (i, ins) in p.ops.iter().enumerate() {
+        if ins.k == K::Loop {
+            for m in &mut member[i + 1..=i + ins.a as usize] {
+                *m = true;
             }
         }
     }
-    let nc = d.commit.len() + d.gated.len();
-    Groups { commit: group_of[..nc].to_vec(), write: group_of[nc..].to_vec(), mask }
+    // What each slot must be: shared state unless a single simple
+    // instruction reads it and a simple instruction writes one word of it.
+    let mut keep = vec![false; words];
+    let mut writer = vec![NONE; words];
+    for u in 0..n as u32 {
+        if member[u as usize] {
+            continue;
+        }
+        let ins = &p.ops[u as usize];
+        for w in unit_writes(p, u) {
+            writer[w as usize] = u;
+            if !simple(ins.k) || p.out[u as usize].n != 1 {
+                keep[w as usize] = true;
+            }
+        }
+    }
+    let mut seq = Vec::new();
+    for d in &p.domains {
+        for ins in d.sample.iter().chain(&d.write).chain(&d.commit).chain(&d.gated) {
+            seq_reads(p, ins, &mut seq);
+        }
+    }
+    for s in seq {
+        keep[p.slot_of[s as usize] as usize] = true;
+    }
+    for c in &p.clocks {
+        keep[p.slot_of[c.word as usize] as usize] = true;
+    }
+    for &(si, _, _) in &p.ports {
+        for l in &p.signals[si].1 {
+            if let Loc::Bit { word, .. } = l {
+                keep[p.slot_of[*word as usize] as usize] = true;
+            }
+        }
+    }
+    let mut local = vec![false; words];
+    let mut reader = vec![NONE; words];
+    for s in 0..words {
+        if p.slot_of[s] as usize != s || keep[s] || writer[s] == NONE {
+            continue;
+        }
+        if p.word_kind[s] != SlotKind::Comb {
+            continue;
+        }
+        let rs = &p.rd[p.rd_start[s] as usize..p.rd_start[s + 1] as usize];
+        if rs.len() != 1 || rs[0] as usize >= n {
+            continue;
+        }
+        let r = rs[0];
+        if !simple(p.ops[r as usize].k) || p.ops[r as usize].k == K::Shiftx {
+            continue;
+        }
+        local[s] = true;
+        reader[s] = r;
+    }
+    // Partitions: a unit joins its reader's when its result is local.
+    let mut part_of = vec![NONE; n];
+    let mut roots = Vec::new();
+    for u in (0..n as u32).rev() {
+        if member[u as usize] {
+            continue;
+        }
+        let ins = &p.ops[u as usize];
+        let joins = ins.k != K::Loop && ins.k != K::Decode && local[ins.d as usize];
+        if joins {
+            part_of[u as usize] = part_of[reader[ins.d as usize] as usize];
+        } else {
+            part_of[u as usize] = roots.len() as u32;
+            roots.push(u);
+        }
+    }
+    // Number partitions in evaluation order (by root).
+    let np = roots.len() as u32;
+    let mut parts = vec![Vec::new(); np as usize];
+    for u in 0..n as u32 {
+        if part_of[u as usize] != NONE {
+            part_of[u as usize] = np - 1 - part_of[u as usize];
+            parts[part_of[u as usize] as usize].push(u);
+        }
+    }
+    let mut children = vec![Vec::new(); n];
+    for (s, &r) in reader.iter().enumerate() {
+        if local[s] {
+            children[r as usize].push(writer[s]);
+        }
+    }
+    for c in &mut children {
+        c.sort_unstable();
+        c.dedup();
+    }
+    Plan { local, parts, part_of, children }
+}
+
+/// Statements setting the dirty bits of `parts`.
+fn marks(parts: impl IntoIterator<Item = u32>, dirty: &str) -> Vec<String> {
+    let mut words: std::collections::BTreeMap<u32, u64> = Default::default();
+    for q in parts {
+        *words.entry(q / 64).or_default() |= 1 << (q % 64);
+    }
+    words.into_iter().map(|(w, m)| format!("{dirty}[{w}] |= {};", hex(m))).collect()
 }
 
 struct Emitter<'p> {
     p: &'p Program,
+    plan: &'p Plan,
     prefix: String,
     out: String,
+    indent: usize,
     /// Temporaries for loops.
     tmp: usize,
-    /// Set by a memory write when it writes: (domain, group).
-    on_write: Option<(usize, u32)>,
-}
-
-/// `v[i]` for a word.
-fn v(i: u32) -> String {
-    format!("v[{i}]")
+    /// Set by a memory write when it writes.
+    on_write: Vec<String>,
 }
 
 impl Emitter<'_> {
     fn line(&mut self, s: &str) {
-        self.out.push_str("    ");
+        for _ in 0..self.indent {
+            self.out.push_str("    ");
+        }
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    /// A word of the state, or the local holding it. (Fields of some
+    /// instructions that are not words are named too, and never used.)
+    fn w(&self, i: u32) -> String {
+        if self.plan.local.get(i as usize).copied().unwrap_or(false) {
+            format!("t{i}")
+        } else {
+            format!("v[{i}]")
+        }
+    }
+
+    /// Partitions reading the slot holding `word`.
+    fn reader_parts(&self, word: u32) -> Vec<u32> {
+        let n = self.p.ops.len();
+        readers(self.p, word)
+            .iter()
+            .filter(|&&r| (r as usize) < n)
+            .map(|&r| self.plan.part_of[r as usize])
+            .filter(|&q| q != NONE)
+            .collect()
     }
 
     fn copy(&mut self, d: u32, a: u32, w: u32) {
@@ -309,22 +291,22 @@ impl Emitter<'_> {
             return;
         }
         for j in 0..nwords(w) {
-            self.line(&format!("{} = {};", v(d + j), v(a + j)));
+            let line = format!("{} = {};", self.w(d + j), self.w(a + j));
+            self.line(&line);
         }
     }
 
-    fn ctl(c_word: u32, x: u64) -> String {
+    fn ctl(&self, c_word: u32, x: u64) -> String {
         let bit = x & 63;
-        let pol = x >> 8 & 1;
-        if pol == 1 {
-            format!("({} >> {bit} & 1)", v(c_word))
+        if x >> 8 & 1 == 1 {
+            format!("({} >> {bit} & 1)", self.w(c_word))
         } else {
-            format!("!({} >> {bit} & 1)", v(c_word))
+            format!("!({} >> {bit} & 1)", self.w(c_word))
         }
     }
 
-    fn ctl_of(c: Ctl) -> String {
-        Self::ctl(c.word, c.bit as u64 | (c.pol as u64) << 8)
+    fn ctl_of(&self, c: Ctl) -> String {
+        self.ctl(c.word, c.bit as u64 | (c.pol as u64) << 8)
     }
 
     /// Emits one instruction (not a loop).
@@ -332,7 +314,8 @@ impl Emitter<'_> {
         let p = self.p;
         let (d, a, b, w) = (ins.d, ins.a, ins.b, ins.w);
         let m = hex(mask(w));
-        let bin = |e: &str| format!("{} = {e};", v(d));
+        let (vd, va, vb) = (self.w(d), self.w(a), self.w(b));
+        let bin = |e: &str| format!("{vd} = {e};");
         match ins.k {
             K::Copy => self.copy(d, a, w),
             K::Gather => {
@@ -340,11 +323,11 @@ impl Emitter<'_> {
                 let mut words: Vec<Vec<String>> = vec![Vec::new(); n as usize];
                 if ins.c != NONE {
                     for j in 0..n {
-                        words[j as usize].push(v(ins.c + j));
+                        words[j as usize].push(self.w(ins.c + j));
                     }
                 }
                 for part in &p.aux.parts[a as usize..(a + b) as usize] {
-                    let mut e = v(part.src);
+                    let mut e = self.w(part.src);
                     if part.lo != 0 {
                         e = format!("({e} >> {})", part.lo);
                     }
@@ -358,48 +341,47 @@ impl Emitter<'_> {
                 }
                 for (j, ws) in words.into_iter().enumerate() {
                     let e = if ws.is_empty() { "0".to_string() } else { ws.join(" | ") };
-                    self.line(&format!("{} = {e};", v(d + j as u32)));
+                    let line = format!("{} = {e};", self.w(d + j as u32));
+                    self.line(&line);
                 }
             }
             K::Extract => {
                 let e = if ins.x == 0 {
-                    format!("{} & {m}", v(a))
+                    format!("{va} & {m}")
                 } else {
-                    format!("{} >> {} & {m}", v(a), ins.x)
+                    format!("{va} >> {} & {m}", ins.x)
                 };
                 self.line(&bin(&e));
             }
-            K::Not => self.line(&bin(&format!("~{} & {m}", v(a)))),
-            K::Neg => self.line(&bin(&format!("(0 - {}) & {m}", v(a)))),
-            K::RedAnd => self.line(&bin(&format!("{} == {m}", v(a)))),
-            K::RedOr => self.line(&bin(&format!("{} != 0", v(a)))),
-            K::RedXor => self.line(&bin(&format!("(uint64_t)__builtin_parityll({})", v(a)))),
-            K::RedXnor => self.line(&bin(&format!("(uint64_t)!__builtin_parityll({})", v(a)))),
-            K::LogicNot => self.line(&bin(&format!("{} == 0", v(a)))),
-            K::And => self.line(&bin(&format!("{} & {}", v(a), v(b)))),
-            K::Or => self.line(&bin(&format!("{} | {}", v(a), v(b)))),
-            K::Xor => self.line(&bin(&format!("{} ^ {}", v(a), v(b)))),
-            K::Xnor => self.line(&bin(&format!("~({} ^ {}) & {m}", v(a), v(b)))),
-            K::Add => self.line(&bin(&format!("({} + {}) & {m}", v(a), v(b)))),
-            K::Sub => self.line(&bin(&format!("({} - {}) & {m}", v(a), v(b)))),
-            K::Mul => self.line(&bin(&format!("({} * {}) & {m}", v(a), v(b)))),
-            K::DivU => self.line(&bin(&format!("{1} ? {0} / {1} : 0", v(a), v(b)))),
-            K::ModU => self.line(&bin(&format!("{1} ? {0} % {1} : 0", v(a), v(b)))),
-            K::DivS => self.line(&bin(&format!("sim_divs({}, {}, {w})", v(a), v(b)))),
-            K::ModS => self.line(&bin(&format!("sim_mods({}, {}, {w})", v(a), v(b)))),
-            K::Shl => self.line(&bin(&format!("{1} >= {w} ? 0 : {0} << {1} & {m}", v(a), v(b)))),
-            K::Shr => self.line(&bin(&format!("{1} >= {w} ? 0 : {0} >> {1}", v(a), v(b)))),
+            K::Not => self.line(&bin(&format!("~{va} & {m}"))),
+            K::Neg => self.line(&bin(&format!("(0 - {va}) & {m}"))),
+            K::RedAnd => self.line(&bin(&format!("{va} == {m}"))),
+            K::RedOr => self.line(&bin(&format!("{va} != 0"))),
+            K::RedXor => self.line(&bin(&format!("(uint64_t)__builtin_parityll({va})"))),
+            K::RedXnor => self.line(&bin(&format!("(uint64_t)!__builtin_parityll({va})"))),
+            K::LogicNot => self.line(&bin(&format!("{va} == 0"))),
+            K::And => self.line(&bin(&format!("{va} & {vb}"))),
+            K::Or => self.line(&bin(&format!("{va} | {vb}"))),
+            K::Xor => self.line(&bin(&format!("{va} ^ {vb}"))),
+            K::Xnor => self.line(&bin(&format!("~({va} ^ {vb}) & {m}"))),
+            K::Add => self.line(&bin(&format!("({va} + {vb}) & {m}"))),
+            K::Sub => self.line(&bin(&format!("({va} - {vb}) & {m}"))),
+            K::Mul => self.line(&bin(&format!("({va} * {vb}) & {m}"))),
+            K::DivU => self.line(&bin(&format!("{vb} ? {va} / {vb} : 0"))),
+            K::ModU => self.line(&bin(&format!("{vb} ? {va} % {vb} : 0"))),
+            K::DivS => self.line(&bin(&format!("sim_divs({va}, {vb}, {w})"))),
+            K::ModS => self.line(&bin(&format!("sim_mods({va}, {vb}, {w})"))),
+            K::Shl => self.line(&bin(&format!("{vb} >= {w} ? 0 : {va} << {vb} & {m}"))),
+            K::Shr => self.line(&bin(&format!("{vb} >= {w} ? 0 : {va} >> {vb}"))),
             K::Sshr => self.line(&bin(&format!(
-                "(uint64_t)(sim_sx({}, {w}) >> ({1} < 63 ? {1} : 63)) & {m}",
-                v(a),
-                v(b)
+                "(uint64_t)(sim_sx({va}, {w}) >> ({vb} < 63 ? {vb} : 63)) & {m}"
             ))),
-            K::Eq | K::Eqx => self.line(&bin(&format!("{} == {}", v(a), v(b)))),
-            K::Ne | K::Nex => self.line(&bin(&format!("{} != {}", v(a), v(b)))),
-            K::LtU => self.line(&bin(&format!("{} < {}", v(a), v(b)))),
-            K::LeU => self.line(&bin(&format!("{} <= {}", v(a), v(b)))),
-            K::GtU => self.line(&bin(&format!("{} > {}", v(a), v(b)))),
-            K::GeU => self.line(&bin(&format!("{} >= {}", v(a), v(b)))),
+            K::Eq | K::Eqx => self.line(&bin(&format!("{va} == {vb}"))),
+            K::Ne | K::Nex => self.line(&bin(&format!("{va} != {vb}"))),
+            K::LtU => self.line(&bin(&format!("{va} < {vb}"))),
+            K::LeU => self.line(&bin(&format!("{va} <= {vb}"))),
+            K::GtU => self.line(&bin(&format!("{va} > {vb}"))),
+            K::GeU => self.line(&bin(&format!("{va} >= {vb}"))),
             K::LtS | K::LeS | K::GtS | K::GeS => {
                 let op = match ins.k {
                     K::LtS => "<",
@@ -407,14 +389,14 @@ impl Emitter<'_> {
                     K::GtS => ">",
                     _ => ">=",
                 };
-                self.line(&bin(&format!("sim_sx({}, {w}) {op} sim_sx({}, {w})", v(a), v(b))));
+                self.line(&bin(&format!("sim_sx({va}, {w}) {op} sim_sx({vb}, {w})")));
             }
-            K::LAnd => self.line(&bin(&format!("{} != 0 && {} != 0", v(a), v(b)))),
-            K::LOr => self.line(&bin(&format!("{} != 0 || {} != 0", v(a), v(b)))),
+            K::LAnd => self.line(&bin(&format!("{va} != 0 && {vb} != 0"))),
+            K::LOr => self.line(&bin(&format!("{va} != 0 || {vb} != 0"))),
             K::Mux => {
-                let s = format!("({} >> {} & 1)", v(ins.c), ins.x & 63);
+                let s = format!("({} >> {} & 1)", self.w(ins.c), ins.x & 63);
                 if nwords(w) == 1 {
-                    self.line(&bin(&format!("{s} ? {} : {}", v(b), v(a))));
+                    self.line(&bin(&format!("{s} ? {vb} : {va}")));
                 } else {
                     self.line(&format!("if ({s}) {{"));
                     self.copy(d, b, w);
@@ -425,18 +407,19 @@ impl Emitter<'_> {
             }
             K::Pmux => {
                 let sw = ins.c;
-                let cases: Vec<u32> =
-                    p.aux.lists[ins.x as usize..ins.x as usize + sw as usize].to_vec();
                 if sw > 64 {
                     return Err("one-hot multiplexers with more than 64 cases".into());
                 }
+                let cases: Vec<u32> =
+                    p.aux.lists[ins.x as usize..ins.x as usize + sw as usize].to_vec();
                 let n = nwords(w);
-                self.line(&format!("{{ uint64_t s = {} & {};", v(b), hex(mask(sw))));
+                self.line(&format!("{{ uint64_t s = {vb} & {};", hex(mask(sw))));
                 self.line("if (s == 0) {");
                 self.copy(d, a, w);
                 self.line("} else if (s & (s - 1)) {");
                 for j in 0..n {
-                    self.line(&format!("{} = 0;", v(d + j)));
+                    let line = format!("{} = 0;", self.w(d + j));
+                    self.line(&line);
                 }
                 self.line("} else switch (__builtin_ctzll(s)) {");
                 for (i, &c) in cases.iter().enumerate() {
@@ -449,26 +432,29 @@ impl Emitter<'_> {
             K::Shiftx => {
                 let info = &p.aux.shiftx[ins.c as usize];
                 let idx = if info.b_signed {
-                    format!("(int64_t)sim_sx({}, {})", v(info.b.off), info.b.w)
+                    format!("(int64_t)sim_sx({}, {})", self.w(info.b.off), info.b.w)
                 } else {
-                    format!("(int64_t){}", v(info.b.off))
+                    format!("(int64_t){}", self.w(info.b.off))
                 };
-                self.line(&bin(&format!(
-                    "sim_extract(&{}, {}, {}, {idx} + ({}), {w})",
-                    v(info.a.off),
+                let e = format!(
+                    "sim_extract(&v[{}], {}, {}, {idx} + ({}), {w})",
+                    info.a.off,
                     info.a.words(),
                     info.a.w,
                     info.offset
-                )));
+                );
+                self.line(&bin(&e));
             }
             K::MemRd => self.mem_read(ins.c, a, d, w),
             K::Latch | K::Arst => {
-                self.line(&format!("if ({}) {{", Self::ctl(ins.c, ins.x)));
+                let c = self.ctl(ins.c, ins.x);
+                self.line(&format!("if ({c}) {{"));
                 self.copy(d, a, w);
                 self.line("}");
             }
             K::FfEn => {
-                self.line(&format!("if ({}) {{", Self::ctl(ins.c, ins.x)));
+                let c = self.ctl(ins.c, ins.x);
+                self.line(&format!("if ({c}) {{"));
                 self.copy(d, a, w);
                 if d != b {
                     self.line("} else {");
@@ -478,7 +464,7 @@ impl Emitter<'_> {
             }
             K::Ff => {
                 let f = p.aux.flops[ins.x as usize].clone();
-                let en = f.en.map_or("1".to_string(), Self::ctl_of);
+                let en = f.en.map_or("1".to_string(), |c| self.ctl_of(c));
                 let mut first = true;
                 let mut branch = |e: &mut Self, cond: String, src: u32| {
                     let kw = if first { "if" } else { "} else if" };
@@ -487,13 +473,14 @@ impl Emitter<'_> {
                     e.copy(f.dst, src, f.w);
                 };
                 if let Some((c, val)) = f.arst {
-                    branch(self, Self::ctl_of(c), val);
+                    let cond = self.ctl_of(c);
+                    branch(self, cond, val);
                 }
                 if let Some((c, val)) = f.srst {
                     let cond = if f.en_over_srst {
-                        format!("{} && {en}", Self::ctl_of(c))
+                        format!("{} && {en}", self.ctl_of(c))
                     } else {
-                        Self::ctl_of(c)
+                        self.ctl_of(c)
                     };
                     branch(self, cond, val);
                 }
@@ -511,13 +498,13 @@ impl Emitter<'_> {
                 let mi = wr.mem;
                 self.line(&format!(
                     "{{ uint64_t i = {} - ({}); if (i < {}) {{",
-                    v(wr.addr.off),
+                    self.w(wr.addr.off),
                     mem.offset,
                     mem.depth
                 ));
                 for j in 0..nw {
-                    let e = v(wr.en.off + j);
-                    let dv = v(wr.data.off + j);
+                    let e = self.w(wr.en.off + j);
+                    let dv = self.w(wr.data.off + j);
                     let el = if nw == 1 {
                         format!("m->mem{mi}[i]")
                     } else {
@@ -525,43 +512,52 @@ impl Emitter<'_> {
                     };
                     self.line(&format!("{el} = ({ty})(({el} & ~{e}) | ({dv} & {e}));"));
                 }
-                if let Some((dom, g)) = self.on_write {
-                    self.line(&format!("m->changed[{dom}] |= {};", hex(1u64 << g)));
+                for l in self.on_write.clone() {
+                    self.line(&l);
                 }
                 self.line("} }");
             }
             K::MemRdSync => {
                 let r = p.aux.sync_reads[ins.x as usize].clone();
                 let mem_w = p.aux.mems[r.mem as usize].width;
-                if let Some(en) = r.en {
-                    self.line(&format!("if ({}) {{", Self::ctl_of(en)));
-                } else {
-                    self.line("{");
+                match r.en {
+                    Some(en) => {
+                        let c = self.ctl_of(en);
+                        self.line(&format!("if ({c}) {{"));
+                    }
+                    None => self.line("{"),
                 }
                 self.mem_read(r.mem, r.addr.off, r.dst, mem_w);
                 for &wi in &r.transparent {
                     let wr = p.aux.writes[wi as usize].clone();
-                    self.line(&format!("if ({} == {}) {{", v(wr.addr.off), v(r.addr.off)));
+                    self.line(&format!(
+                        "if ({} == {}) {{",
+                        self.w(wr.addr.off),
+                        self.w(r.addr.off)
+                    ));
                     for j in 0..nwords(mem_w) {
-                        let e = v(wr.en.off + j);
-                        self.line(&format!(
+                        let e = self.w(wr.en.off + j);
+                        let line = format!(
                             "{0} = ({0} & ~{e}) | ({1} & {e});",
-                            v(r.dst + j),
-                            v(wr.data.off + j)
-                        ));
+                            self.w(r.dst + j),
+                            self.w(wr.data.off + j)
+                        );
+                        self.line(&line);
                     }
                     self.line("}");
                 }
-                self.line("} else {");
-                self.copy(r.dst, r.q, mem_w);
+                if r.en.is_some() {
+                    self.line("} else {");
+                    self.copy(r.dst, r.q, mem_w);
+                }
                 self.line("}");
             }
             K::Decode => {
                 let dec = &p.aux.decoders[ins.x as usize];
-                let x = v(a);
                 for &(key, dd, ne) in &dec.entries {
                     let op = if ne { "!=" } else { "==" };
-                    self.line(&format!("{} = {x} {op} {};", v(dd), hex(key)));
+                    let line = format!("{} = {va} {op} {};", self.w(dd), hex(key));
+                    self.line(&line);
                 }
             }
             K::Wide => self.wide(ins)?,
@@ -575,20 +571,23 @@ impl Emitter<'_> {
         let (_, nw) = mem_type(mem.width);
         self.line(&format!(
             "{{ uint64_t i = {} - ({}); if (i < {}) {{",
-            v(addr),
+            self.w(addr),
             mem.offset,
             mem.depth
         ));
         if nw == 1 && mem.width <= 64 {
-            self.line(&format!("{} = m->mem{mi}[i];", v(d)));
+            let line = format!("{} = m->mem{mi}[i];", self.w(d));
+            self.line(&line);
         } else {
             for j in 0..nw {
-                self.line(&format!("{} = m->mem{mi}[i * {nw} + {j}];", v(d + j)));
+                let line = format!("{} = m->mem{mi}[i * {nw} + {j}];", self.w(d + j));
+                self.line(&line);
             }
         }
         self.line("} else {");
         for j in 0..nwords(w) {
-            self.line(&format!("{} = 0;", v(d + j)));
+            let line = format!("{} = 0;", self.w(d + j));
+            self.line(&line);
         }
         self.line("} }");
     }
@@ -598,7 +597,7 @@ impl Emitter<'_> {
         let wi = self.p.aux.wide[ins.x as usize].clone();
         let (d, a, b) = (wi.d, wi.a, wi.b);
         let args = |f: &str| {
-            format!("{f}(&{}, {}, &{}, {}, &{}, {});", v(d.off), d.w, v(a.off), a.w, v(b.off), b.w)
+            format!("{f}(&v[{}], {}, &v[{}], {}, &v[{}], {});", d.off, d.w, a.off, a.w, b.off, b.w)
         };
         let call = match &wi.op {
             WideOp::Unary(op) => {
@@ -645,66 +644,150 @@ impl Emitter<'_> {
                 args(f)
             }
             WideOp::Shiftx { b_signed, offset } => format!(
-                "sim_wshiftx(&{}, {}, &{}, {}, &{}, {}, {}, {offset});",
-                v(d.off),
-                d.w,
-                v(a.off),
-                a.w,
-                v(b.off),
-                b.w,
-                *b_signed as u32
+                "sim_wshiftx(&v[{}], {}, &v[{}], {}, &v[{}], {}, {}, {offset});",
+                d.off, d.w, a.off, a.w, b.off, b.w, *b_signed as u32
             ),
         };
         self.line(&call);
         Ok(())
     }
 
-    /// Emits the units of a domain's cone, each run of units depending on
-    /// the same groups under one test of what changed.
-    fn gated_units(&mut self, units: &[u32], dom: usize, mask: &[u64]) -> Result<(), String> {
-        self.line(&format!("uint64_t c = m->changed[{dom}];"));
-        self.line(&format!("m->changed[{dom}] = 0;"));
-        let mut i = 0;
-        while i < units.len() {
-            let mk = mask[units[i] as usize];
-            let mut j = i;
-            while j < units.len() && mask[units[j] as usize] == mk {
-                j += 1;
+    /// Emits unit `u` of a partition after the units computing its local
+    /// operands; a multiplexer computes only the operand it selects.
+    fn tree(&mut self, u: u32) -> Result<(), String> {
+        let p = self.p;
+        let ins = p.ops[u as usize];
+        let children = self.plan.children[u as usize].clone();
+        if ins.k == K::Mux && nwords(ins.w) == 1 && ins.a != ins.b {
+            let (sel, a, b) = (p.slot_of[ins.c as usize], ins.a, ins.b);
+            let of = |slot: u32| {
+                children
+                    .iter()
+                    .copied()
+                    .filter(|&c| p.ops[c as usize].d == slot)
+                    .collect::<Vec<_>>()
+            };
+            let (cs, ca, cb) = (of(sel), of(a), of(b));
+            if !ca.is_empty() || !cb.is_empty() {
+                for c in cs {
+                    self.tree(c)?;
+                }
+                let s = format!("({} >> {} & 1)", self.w(ins.c), ins.x & 63);
+                let (vd, va, vb) = (self.w(ins.d), self.w(a), self.w(b));
+                self.line(&format!("if ({s}) {{"));
+                self.indent += 1;
+                for c in cb {
+                    self.tree(c)?;
+                }
+                self.line(&format!("{vd} = {vb};"));
+                self.indent -= 1;
+                self.line("} else {");
+                self.indent += 1;
+                for c in ca {
+                    self.tree(c)?;
+                }
+                self.line(&format!("{vd} = {va};"));
+                self.indent -= 1;
+                self.line("}");
+                return Ok(());
             }
-            self.line(&format!("if (c & {}) {{", hex(mk)));
-            self.units(&units[i..j])?;
-            self.line("}");
-            i = j;
         }
+        for c in children {
+            self.tree(c)?;
+        }
+        self.ins(&ins)
+    }
+
+    /// Emits a loop unit: its instructions repeated until they settle.
+    fn looped(&mut self, u: u32) -> Result<(), String> {
+        let p = self.p;
+        let ins = p.ops[u as usize];
+        let outs: Vec<u32> = p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec();
+        let t = self.tmp;
+        self.tmp += 1;
+        self.line(&format!("{{ uint64_t l{t}[{}]; int it{t};", outs.len()));
+        self.line(&format!("for (it{t} = 0; it{t} < 256; it{t}++) {{"));
+        for (k, &o) in outs.iter().enumerate() {
+            let line = format!("l{t}[{k}] = {};", self.w(o));
+            self.line(&line);
+        }
+        for k in 0..ins.a {
+            let body = p.ops[(u + 1 + k) as usize];
+            self.ins(&body)?;
+        }
+        let same: Vec<String> =
+            outs.iter().enumerate().map(|(k, &o)| format!("l{t}[{k}] == {}", self.w(o))).collect();
+        self.line(&format!("if ({}) break;", same.join(" && ")));
+        self.line("} }");
         Ok(())
     }
 
-    /// Emits the units `units` (combinational, in order).
-    fn units(&mut self, units: &[u32]) -> Result<(), String> {
+    /// Emits the partitions: each runs when its bit is set and marks the
+    /// partitions reading what it changed.
+    fn settle(&mut self) -> Result<(), String> {
         let p = self.p;
-        for &u in units {
-            let ins = p.ops[u as usize];
-            if ins.k != K::Loop {
-                self.ins(&ins)?;
-                continue;
+        let plan = self.plan;
+        let pre = self.prefix.clone();
+        writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
+        self.indent = 1;
+        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
+        for (k, units) in plan.parts.iter().enumerate() {
+            let k = k as u32;
+            if k.is_multiple_of(64) {
+                if k > 0 {
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                self.line(&format!("if (D[{}]) {{", k / 64));
+                self.indent += 1;
             }
-            let outs: Vec<u32> = p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec();
-            let t = self.tmp;
-            self.tmp += 1;
-            self.line(&format!("{{ uint64_t t{t}[{}]; int it{t};", outs.len()));
-            self.line(&format!("for (it{t} = 0; it{t} < 256; it{t}++) {{"));
-            for (k, &o) in outs.iter().enumerate() {
-                self.line(&format!("t{t}[{k}] = {};", v(o)));
+            let root = *units.last().unwrap();
+            let ins = p.ops[root as usize];
+            self.line(&format!("if (D[{}] & {}) {{", k / 64, hex(1u64 << (k % 64))));
+            self.indent += 1;
+            self.line(&format!("D[{}] &= ~{};", k / 64, hex(1u64 << (k % 64))));
+            // Locals of the partition.
+            let locals: Vec<String> = units
+                .iter()
+                .filter(|&&u| {
+                    p.ops[u as usize].k != K::Loop && plan.local[p.ops[u as usize].d as usize]
+                })
+                .map(|&u| format!("t{}", p.ops[u as usize].d))
+                .collect();
+            if !locals.is_empty() {
+                self.line(&format!("uint64_t {};", locals.join(", ")));
             }
-            for k in 0..ins.a {
-                let body = p.ops[(u + 1 + k) as usize];
-                self.ins(&body)?;
+            // What it writes to the state, before.
+            let outs: Vec<u32> = match ins.k {
+                K::Loop => p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec(),
+                K::Decode => p.aux.decoders[ins.x as usize].entries.iter().map(|e| e.1).collect(),
+                _ => (0..p.out[root as usize].n).map(|j| ins.d + j).collect(),
+            };
+            for (j, &o) in outs.iter().enumerate() {
+                self.line(&format!("uint64_t o{j} = v[{o}];"));
             }
-            let same: Vec<String> =
-                outs.iter().enumerate().map(|(k, &o)| format!("t{t}[{k}] == {}", v(o))).collect();
-            self.line(&format!("if ({}) break;", same.join(" && ")));
-            self.line("} }");
+            if ins.k == K::Loop {
+                self.looped(root)?;
+            } else {
+                self.tree(root)?;
+            }
+            for (j, &o) in outs.iter().enumerate() {
+                let parts: Vec<u32> =
+                    self.reader_parts(o).into_iter().filter(|&q| q != k).collect();
+                let ms = marks(parts, "D");
+                if !ms.is_empty() {
+                    self.line(&format!("if (o{j} != v[{o}]) {{ {} }}", ms.join(" ")));
+                }
+            }
+            self.indent -= 1;
+            self.line("}");
         }
+        if !plan.parts.is_empty() {
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent = 0;
+        self.out.push_str("}\n\n");
         Ok(())
     }
 
@@ -715,8 +798,10 @@ impl Emitter<'_> {
     ) -> Result<(), String> {
         let pre = self.prefix.clone();
         writeln!(self.out, "static void {name}({pre}_t *m) {{").unwrap();
-        self.line("uint64_t *v = m->v; (void)v;");
+        self.indent = 1;
+        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v; (void)D;");
         body(self)?;
+        self.indent = 0;
         self.out.push_str("}\n\n");
         Ok(())
     }
@@ -725,16 +810,36 @@ impl Emitter<'_> {
 /// The helpers every model uses.
 const PRELUDE: &str = include_str!("prelude.c");
 
+fn table(out: &mut String, name: &str, ty: &str, values: &[String]) {
+    writeln!(out, "static const {ty} {name}[{}] = {{", values.len().max(1)).unwrap();
+    for c in values.chunks(12) {
+        writeln!(out, "    {},", c.join(", ")).unwrap();
+    }
+    if values.is_empty() {
+        out.push_str("    0\n");
+    }
+    out.push_str("};\n");
+}
+
 /// Emits a two-state program as a C model named `prefix`.
 pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     if p.four_state {
         return Err("the C backend simulates two-state programs only".into());
     }
     let prefix = ident(prefix);
-    let cones = cones(p);
     let pre = &prefix;
-    let ninputs = cones.inputs.len();
-    let (iw, dw) = (ninputs.div_ceil(64).max(1), p.domains.len().div_ceil(64).max(1));
+    let plan = plan(p);
+    let np = plan.parts.len();
+    let dirty_words = np.div_ceil(64).max(1);
+    let e = Emitter {
+        p,
+        plan: &plan,
+        prefix: prefix.clone(),
+        out: String::new(),
+        indent: 0,
+        tmp: 0,
+        on_write: Vec::new(),
+    };
 
     // Header: the model struct and its interface.
     let mut h = String::new();
@@ -754,13 +859,8 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         .unwrap();
     }
     writeln!(h, "    uint8_t clk[{}];", p.clocks.len().max(1)).unwrap();
-    writeln!(h, "    uint64_t changed_inputs[{iw}];\n    uint8_t memories_written;").unwrap();
-    writeln!(
-        h,
-        "    uint64_t changed[{}]; /* groups changed by each domain's last edge */",
-        p.domains.len().max(1)
-    )
-    .unwrap();
+    writeln!(h, "    /* Partitions of the logic to run. */\n    uint64_t dirty[{dirty_words}];")
+        .unwrap();
     writeln!(h, "}} {pre}_t;\n").unwrap();
     writeln!(h, "/* Sets the initial state and settles it. */\nvoid {pre}_init({pre}_t *m);")
         .unwrap();
@@ -769,9 +869,14 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         "/* Settles after inputs changed and runs the clock edges that result. */\nvoid {pre}_eval({pre}_t *m);"
     )
     .unwrap();
+    let host = marks(
+        p.mem_readers.iter().flatten().map(|&u| plan.part_of[u as usize]).filter(|&q| q != NONE),
+        "m->dirty",
+    );
     writeln!(
         h,
-        "/* Call after writing memories directly (m->memN), before eval. */\nstatic inline void {pre}_memories_written({pre}_t *m) {{ m->memories_written = 1; }}\n"
+        "/* Call after writing memories directly (m->memN), before eval. */\nstatic inline void {pre}_memories_written({pre}_t *m) {{ {} }}\n",
+        host.join(" ")
     )
     .unwrap();
     for (i, mem) in p.aux.mems.iter().enumerate() {
@@ -779,8 +884,6 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     }
     let mut ports = p.ports.clone();
     ports.sort_by_key(|x| x.2);
-    let input_bit = |slot: u32| cones.inputs.iter().position(|(s, _)| *s == slot);
-    let _ = dw;
     for (si, dir, _) in &ports {
         let (name, locs) = &p.signals[*si];
         let id = ident(name);
@@ -827,14 +930,14 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         if *dir != PortDir::Output
             && let Some(Loc::Bit { word, bit: 0 }) = locs.first()
             && p.word_kind[*word as usize] == SlotKind::Input
-            && let Some(bit) = input_bit(*word)
+            && p.slot_of[*word as usize] == *word
         {
+            let ms = marks(e.reader_parts(*word), "m->dirty");
             writeln!(
                 h,
-                "static inline void {pre}_set_{id}({pre}_t *m, uint64_t x) {{ x &= {}; if (m->v[{word}] != x) {{ m->v[{word}] = x; m->changed_inputs[{}] |= {}; }} }}",
+                "static inline void {pre}_set_{id}({pre}_t *m, uint64_t x) {{ x &= {}; if (m->v[{word}] != x) {{ m->v[{word}] = x; {} }} }}",
                 hex(mask(w as u32)),
-                bit / 64,
-                hex(1u64 << (bit % 64))
+                ms.join(" ")
             )
             .unwrap();
         }
@@ -842,7 +945,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     writeln!(h, "\n#endif").unwrap();
 
     // Implementation.
-    let mut e = Emitter { p, prefix: prefix.clone(), out: String::new(), tmp: 0, on_write: None };
+    let mut e = e;
     writeln!(e.out, "/* Generated by synth (synth-sim C backend). */").unwrap();
     writeln!(e.out, "#include \"{pre}.h\"\n#include <string.h>\n").unwrap();
     e.out.push_str(PRELUDE);
@@ -850,96 +953,72 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     // Initial values.
     let nz: Vec<(usize, u64)> =
         p.init_val.iter().enumerate().filter(|(_, x)| **x != 0).map(|(i, x)| (i, *x)).collect();
-    writeln!(e.out, "static const uint32_t init_at[{}] = {{", nz.len().max(1)).unwrap();
-    for c in nz.chunks(16) {
-        let s: Vec<String> = c.iter().map(|(i, _)| i.to_string()).collect();
-        writeln!(e.out, "    {},", s.join(", ")).unwrap();
-    }
-    if nz.is_empty() {
-        e.out.push_str("    0\n");
-    }
-    writeln!(e.out, "}};\nstatic const uint64_t init_val[{}] = {{", nz.len().max(1)).unwrap();
-    for c in nz.chunks(8) {
-        let s: Vec<String> = c.iter().map(|(_, x)| hex(*x)).collect();
-        writeln!(e.out, "    {},", s.join(", ")).unwrap();
-    }
-    if nz.is_empty() {
-        e.out.push_str("    0\n");
-    }
-    e.out.push_str("};\n\n");
+    table(
+        &mut e.out,
+        "init_at",
+        "uint32_t",
+        &nz.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>(),
+    );
+    table(&mut e.out, "init_val", "uint64_t", &nz.iter().map(|(_, x)| hex(*x)).collect::<Vec<_>>());
     for (i, mem) in p.aux.mems.iter().enumerate() {
-        let n = nwords(mem.width) as usize;
-        let (_, nw) = mem_type(mem.width);
-        let words = &p.mem_init_val[mem.base..mem.base + mem.depth as usize * n];
+        let words =
+            &p.mem_init_val[mem.base..mem.base + mem.depth as usize * nwords(mem.width) as usize];
         let nz: Vec<(usize, u64)> =
             words.iter().enumerate().filter(|(_, x)| **x != 0).map(|(i, x)| (i, *x)).collect();
         if nz.is_empty() {
             continue;
         }
-        // Words of the memory buffer map to elements one to one when the
-        // element is a 64-bit word or narrower.
-        let _ = nw;
-        writeln!(e.out, "static const uint32_t mem{i}_at[{}] = {{", nz.len()).unwrap();
-        for c in nz.chunks(16) {
-            let s: Vec<String> = c.iter().map(|(i, _)| i.to_string()).collect();
-            writeln!(e.out, "    {},", s.join(", ")).unwrap();
-        }
-        writeln!(e.out, "}};\nstatic const uint64_t mem{i}_val[{}] = {{", nz.len()).unwrap();
-        for c in nz.chunks(8) {
-            let s: Vec<String> = c.iter().map(|(_, x)| hex(*x)).collect();
-            writeln!(e.out, "    {},", s.join(", ")).unwrap();
-        }
-        e.out.push_str("};\n\n");
+        table(
+            &mut e.out,
+            &format!("mem{i}_at"),
+            "uint32_t",
+            &nz.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>(),
+        );
+        table(
+            &mut e.out,
+            &format!("mem{i}_val"),
+            "uint64_t",
+            &nz.iter().map(|(_, x)| hex(*x)).collect::<Vec<_>>(),
+        );
     }
+    e.out.push('\n');
 
     // Logic.
-    let mut member = vec![false; p.ops.len()];
-    for (i, ins) in p.ops.iter().enumerate() {
-        if ins.k == K::Loop {
-            for m in &mut member[i + 1..=i + ins.a as usize] {
-                *m = true;
-            }
-        }
-    }
-    let all: Vec<u32> = (0..p.ops.len() as u32).filter(|&u| !member[u as usize]).collect();
-    e.function("settle_all", |e| e.units(&all))?;
-    for (k, (_, units)) in cones.inputs.iter().enumerate() {
-        e.function(&format!("settle_input{k}"), |e| e.units(units))?;
-    }
-    let groups: Vec<Groups> = p.domains.iter().map(|d| groups(p, d)).collect();
-    for (k, units) in cones.domains.iter().enumerate() {
-        let mask = &groups[k].mask;
-        let units = cluster(p, units, mask);
-        e.function(&format!("settle_domain{k}"), |e| e.gated_units(&units, k, mask))?;
-    }
-    e.function("settle_host", |e| e.units(&cones.host))?;
+    e.settle()?;
     for (k, d) in p.domains.iter().enumerate() {
         let d = d.clone();
-        let g = &groups[k];
         e.function(&format!("sample{k}"), |e| d.sample.iter().try_for_each(|i| e.ins(i)))?;
         e.function(&format!("write{k}"), |e| {
-            for (i, ins) in d.write.iter().enumerate() {
-                e.on_write = Some((k, g.write[i]));
+            for ins in &d.write {
+                let mem = p.aux.writes[ins.x as usize].mem as usize;
+                e.on_write = marks(
+                    p.mem_readers[mem]
+                        .iter()
+                        .map(|&u| plan.part_of[u as usize])
+                        .filter(|&q| q != NONE),
+                    "D",
+                );
                 e.ins(ins)?;
             }
-            e.on_write = None;
+            e.on_write.clear();
             Ok(())
         })?;
         e.function(&format!("commit{k}"), |e| {
-            for (i, ins) in d.commit.iter().chain(&d.gated).enumerate() {
+            for ins in d.commit.iter().chain(&d.gated) {
                 let n = nwords(ins.w);
+                let ms = marks(e.reader_parts(ins.d), "D");
+                if ms.is_empty() {
+                    e.ins(ins)?;
+                    continue;
+                }
                 e.line("{");
                 for j in 0..n {
-                    e.line(&format!("uint64_t o{j} = {};", v(ins.d + j)));
+                    e.line(&format!("uint64_t o{j} = v[{}];", ins.d + j));
                 }
                 e.ins(ins)?;
                 let diff: Vec<String> =
-                    (0..n).map(|j| format!("o{j} != {}", v(ins.d + j))).collect();
-                e.line(&format!(
-                    "if ({}) m->changed[{k}] |= {};",
-                    diff.join(" || "),
-                    hex(1u64 << g.commit[i])
-                ));
+                    (0..n).map(|j| format!("o{j} != v[{}]", ins.d + j)).collect();
+                e.line(&format!("if ({}) {{ {} }}", diff.join(" || "), ms.join(" ")));
                 e.line("}");
             }
             Ok(())
@@ -966,32 +1045,18 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
             .unwrap();
         }
     }
-    writeln!(e.out, "    settle_all(m);").unwrap();
+    writeln!(e.out, "    memset(m->dirty, 0xff, sizeof m->dirty);\n    settle(m);").unwrap();
     for (k, c) in p.clocks.iter().enumerate() {
         writeln!(e.out, "    m->clk[{k}] = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
     }
-    writeln!(e.out, "    memset(m->changed_inputs, 0, sizeof m->changed_inputs);\n    m->memories_written = 0;\n}}\n").unwrap();
+    writeln!(e.out, "}}\n").unwrap();
 
+    let dw = p.domains.len().div_ceil(64).max(1);
     writeln!(e.out, "void {pre}_eval({pre}_t *m) {{").unwrap();
     writeln!(e.out, "    int round;").unwrap();
     writeln!(e.out, "    for (round = 0; round < 10000; round++) {{").unwrap();
-    writeln!(e.out, "        uint64_t fired[{dw}] = {{0}}, in[{iw}], any = 0;").unwrap();
-    writeln!(e.out, "        memcpy(in, m->changed_inputs, sizeof in);").unwrap();
-    writeln!(e.out, "        memset(m->changed_inputs, 0, sizeof in);").unwrap();
-    for k in 0..ninputs {
-        writeln!(
-            e.out,
-            "        if (in[{}] & {}) settle_input{k}(m);",
-            k / 64,
-            hex(1u64 << (k % 64))
-        )
-        .unwrap();
-    }
-    writeln!(
-        e.out,
-        "        if (m->memories_written) {{ m->memories_written = 0; settle_host(m); }}"
-    )
-    .unwrap();
+    writeln!(e.out, "        uint64_t fired[{dw}] = {{0}}, any = 0;").unwrap();
+    writeln!(e.out, "        settle(m);").unwrap();
     for (k, c) in p.clocks.iter().enumerate() {
         writeln!(e.out, "        {{ uint8_t c = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
         writeln!(e.out, "          if (c != m->clk[{k}]) {{ m->clk[{k}] = c;").unwrap();
@@ -1016,7 +1081,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         writeln!(e.out, "        }} }}").unwrap();
     }
     writeln!(e.out, "        if (!any) return;").unwrap();
-    for phase in ["sample", "write", "commit", "settle_domain"] {
+    for phase in ["sample", "write", "commit"] {
         for k in 0..p.domains.len() {
             writeln!(
                 e.out,

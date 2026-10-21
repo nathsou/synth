@@ -26,6 +26,7 @@ pub mod exec;
 pub mod netlist;
 pub mod program;
 pub mod vcd;
+pub mod words;
 
 use synth_core::{FxHashMap, Logic, LogicVec};
 use synth_rtl::Module;

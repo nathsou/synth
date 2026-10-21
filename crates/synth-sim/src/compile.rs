@@ -28,12 +28,44 @@ pub struct Options {
     /// Removes logic that reaches no output port, memory or instance
     /// (`synth_rtl::opt::remove_dead`); such signals then read as unknown.
     pub prune: bool,
+    /// Runs the RTL optimizations of synthesis first (narrower arithmetic,
+    /// merged duplicates, flip-flop enables and resets instead of feedback
+    /// multiplexers, merged memory write ports), and merges bit-level
+    /// multiplexers into words ([`crate::words`]). Not registered reads
+    /// into synchronous ports: that changes initial values. Ports
+    /// behave the same in two-state simulation; internal signals may be
+    /// gone or renamed, and unknown values may propagate differently.
+    pub optimize: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { four_state: true, prune: false }
+        Options { four_state: true, prune: false, optimize: false }
     }
+}
+
+/// The RTL passes of [`Options::optimize`].
+fn optimize(m: &mut Module) -> Result<(), String> {
+    use synth_rtl::{dff, mem, opt};
+    opt::clean(m)?;
+    for _ in 0..8 {
+        if opt::reduce_widths(m) == 0 {
+            break;
+        }
+        opt::clean(m)?;
+    }
+    opt::merge_identical(m);
+    opt::clean(m)?;
+    dff::extract_controls(m);
+    if mem::remove_feedback_writes(m) > 0 {
+        opt::clean(m)?;
+    }
+    mem::merge_write_ports(m);
+    opt::clean(m)?;
+    crate::words::merge_bit_muxes(m);
+    opt::clean(m)?;
+    opt::merge_identical(m);
+    opt::clean(m)
 }
 
 struct Node {
@@ -90,6 +122,9 @@ struct Builder<'m> {
 /// Compiles `m` (which is cleaned up first, on a copy).
 pub fn compile(m: &Module, opts: &Options) -> Result<Program, String> {
     let mut m = m.clone();
+    if opts.optimize {
+        optimize(&mut m)?;
+    }
     synth_rtl::opt::resolve_connections(&mut m)?;
     if opts.prune {
         synth_rtl::opt::remove_dead(&mut m);
@@ -743,13 +778,17 @@ impl Builder<'_> {
             dm.sample.push(ins);
             dm.commit.push(Ins::new(K::Copy, w, q.off, dst, 0));
         } else {
-            // Its next value depends only on these (its own output aside):
-            // it needs updating only after one of them changes.
+            // Its next value depends only on these: it needs updating only
+            // after one of them changes. Its own output aside, unless its
+            // synchronous reset reads it (a reset that releases itself
+            // makes one more update): data and enable reading it give the
+            // same value again.
+            let srst_self = srst.is_some_and(|(c, _)| self.slot_of[c.word as usize] == q.off);
             let idx = dm.gated.len() as u32;
             dm.gated.push(ins);
             let reads: Vec<u32> = reads
                 .into_iter()
-                .filter(|&r| r != q.off && self.kind[r as usize] != SlotKind::Const)
+                .filter(|&r| (srst_self || r != q.off) && self.kind[r as usize] != SlotKind::Const)
                 .collect();
             self.gated_reads.push((dom, idx, reads));
             self.gated_q.push((q.off, dom, idx));

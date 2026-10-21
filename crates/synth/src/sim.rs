@@ -128,7 +128,7 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--level",
         ],
-        &["--four-state", "--two-state", "--trace", "--quiet"],
+        &["--four-state", "--two-state", "--trace", "--quiet", "--optimize", "--stats"],
     )?;
     let weft = crate::input_files(&a).iter().any(|p| crate::is_weft(p));
     let mut m = crate::load_rtl(&mut a)?;
@@ -169,7 +169,10 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
         !weft && level == "rtl"
     };
     if let Some(dir) = a.value("--emit-c") {
-        let sim = Sim::new(&m, &Options { four_state: false, prune: false })?;
+        let sim = Sim::new(
+            &m,
+            &Options { four_state: false, prune: false, optimize: a.flag("--optimize") },
+        )?;
         let model = emit_c::emit(sim.program(), &m.name)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
         let h = format!("{dir}/{}.h", model.prefix);
@@ -181,7 +184,8 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     }
     let quiet = a.flag("--quiet");
     let t0 = Instant::now();
-    let mut sim = Sim::new(&m, &Options { four_state: four, prune: false })?;
+    let optimize = a.flag("--optimize");
+    let mut sim = Sim::new(&m, &Options { four_state: four, prune: false, optimize })?;
     for w in sim.warnings() {
         eprintln!("warning: {w}");
     }
@@ -251,6 +255,7 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
         .map(|n| Ok((n.clone(), signal(&sim, n)?)))
         .collect::<Result<_, String>>()?;
     let trace = a.flag("--trace");
+    let a_stats = a.flag("--stats");
     let mut uart = match a.value("--uart") {
         Some(spec) => {
             let (n, cpb) = match spec.split_once(':') {
@@ -365,6 +370,23 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             if stopped { ", stopped by --until" } else { "" }
         );
     }
+    if a_stats {
+        let p = sim.program();
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for o in &p.ops {
+            *kinds.entry(format!("{:?}", o.k)).or_default() += 1;
+        }
+        let mut seq = 0;
+        for d in &p.domains {
+            seq += d.sample.len() + d.write.len() + d.commit.len() + d.gated.len();
+        }
+        eprintln!("info: instructions: {kinds:?}; {seq} in clock domains");
+        eprintln!(
+            "info: {:.1} combinational units run per cycle, {} edges",
+            sim.units_run() as f64 / cycle.max(1) as f64,
+            sim.edges
+        );
+    }
     if sim.unstable_loops() > 0 {
         eprintln!("warning: {} combinational loops did not settle", sim.unstable_loops());
     }
@@ -396,8 +418,8 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
     let held: Vec<(String, u64)> =
         a.values("--set").iter().map(|s| assignment(s)).collect::<Result<_, _>>()?;
     a.finish()?;
-    let mut r = Sim::new(&reference, &Options { four_state: true, prune: false })?;
-    let mut n = Sim::new(&other, &Options { four_state: false, prune: false })?;
+    let mut r = Sim::new(&reference, &Options { four_state: true, prune: false, optimize: false })?;
+    let mut n = Sim::new(&other, &Options { four_state: false, prune: false, optimize: false })?;
     for w in n.warnings() {
         eprintln!("warning: {w}");
     }
