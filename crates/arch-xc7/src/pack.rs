@@ -774,10 +774,10 @@ fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), Str
         .collect();
     let fit = |nl: &Netlist, p: &Packed, s: usize, a: &Atom| -> Option<Fit> {
         let x = &p.slices[s];
-        if let Some(ff) = a.ff {
-            if !x.accepts(&controls(nl, ff).ok()?) {
-                return None;
-            }
+        if let Some(ff) = a.ff
+            && !x.accepts(&controls(nl, ff).ok()?)
+        {
+            return None;
         }
         match (a.lut, a.ff) {
             (Some(_), Some(_)) => {

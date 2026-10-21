@@ -392,184 +392,180 @@ pub fn place(
     let span =
         slice_xy.iter().chain(hard_xy.iter().flatten()).fold(1, |m, &(x, y)| m.max(x).max(y));
     let objects = macros.len() + hard.len();
-    let mut step = |m: usize,
-                    window: i32,
-                    temperature: f64,
-                    rng: &mut Rng|
-     -> Option<(f64, bool)> {
-        let accept = |delta: f64, rng: &mut Rng| {
-            delta <= 0.0 || temperature.is_infinite() || rng.unit() < (-delta / temperature).exp()
-        };
-        if m >= macros.len() {
-            // A hard block moves to another site of its kind in the window,
-            // swapping with the block there.
-            let h = m - macros.len();
-            let k = hard[h].1;
-            let (cx, cy) = hard_xy[k][hard_loc[h].get()];
-            // Hard block columns are sparse: the window spans at least a few.
-            let w = window.max(10);
-            let near: Vec<usize> = (0..kinds[k].len())
-                .filter(|&t| {
-                    let (x, y) = hard_xy[k][t];
-                    t != hard_loc[h].get() && (x - cx).abs() <= w && (y - cy).abs() <= w
-                })
-                .collect();
-            if near.is_empty() {
-                return None;
-            }
-            let target = near[rng.below(near.len())];
-            let other = hard_occupied[k][target];
-            let mut changed = hard_affected[h].clone();
-            if let Some(o) = other {
-                changed.extend(hard_affected[o].iter().copied());
-            }
-            let old: f64 = changed.iter().map(|&i| cost(i)).sum();
-            let from = hard_loc[h].get();
-            hard_loc[h].set(target);
-            if let Some(o) = other {
-                hard_loc[o].set(from);
-            }
-            let new: f64 = changed.iter().map(|&i| cost(i)).sum();
-            let accepted = accept(new - old, rng);
-            if accepted {
-                hard_occupied[k][target] = Some(h);
-                hard_occupied[k][from] = other;
-            } else {
-                hard_loc[h].set(from);
-                if let Some(o) = other {
-                    hard_loc[o].set(target);
-                }
-            }
-            return Some((new - old, accepted));
-        }
-        let key = (macros[m].len(), macro_m[m]);
-        let (cx, cy) = slice_xy[macro_sites[m][0]];
-        // Offsets land on tiles without a site for this shape
-        // (interconnect columns, the device edge): try a few.
-        let d = 2 * window as usize + 1;
-        // Offsets that land on a macro's slices are retried: a single
-        // slice cannot take a chain's site, and a chain only swaps with
-        // a chain of its own length below.
-        let mut found = None;
-        for _ in 0..TARGET_RETRIES {
-            let Some(at) = (0..16).find_map(|_| {
-                let (dx, dy) = (rng.below(d) as i32 - window, rng.below(d) as i32 - window);
-                nearby[&key].get(&(cx + dx, cy + dy))
-            }) else {
-                continue;
+    let mut step =
+        |m: usize, window: i32, temperature: f64, rng: &mut Rng| -> Option<(f64, bool)> {
+            let accept = |delta: f64, rng: &mut Rng| {
+                delta <= 0.0
+                    || temperature.is_infinite()
+                    || rng.unit() < (-delta / temperature).exp()
             };
-            let target = &choices[&key][at[rng.below(at.len())]];
-            if *target == macro_sites[m] {
-                continue;
+            if m >= macros.len() {
+                // A hard block moves to another site of its kind in the window,
+                // swapping with the block there.
+                let h = m - macros.len();
+                let k = hard[h].1;
+                let (cx, cy) = hard_xy[k][hard_loc[h].get()];
+                // Hard block columns are sparse: the window spans at least a few.
+                let w = window.max(10);
+                let near: Vec<usize> = (0..kinds[k].len())
+                    .filter(|&t| {
+                        let (x, y) = hard_xy[k][t];
+                        t != hard_loc[h].get() && (x - cx).abs() <= w && (y - cy).abs() <= w
+                    })
+                    .collect();
+                if near.is_empty() {
+                    return None;
+                }
+                let target = near[rng.below(near.len())];
+                let other = hard_occupied[k][target];
+                let mut changed = hard_affected[h].clone();
+                if let Some(o) = other {
+                    changed.extend(hard_affected[o].iter().copied());
+                }
+                let old: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let from = hard_loc[h].get();
+                hard_loc[h].set(target);
+                if let Some(o) = other {
+                    hard_loc[o].set(from);
+                }
+                let new: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let accepted = accept(new - old, rng);
+                if accepted {
+                    hard_occupied[k][target] = Some(h);
+                    hard_occupied[k][from] = other;
+                } else {
+                    hard_loc[h].set(from);
+                    if let Some(o) = other {
+                        hard_loc[o].set(target);
+                    }
+                }
+                return Some((new - old, accepted));
             }
-            let owners: BTreeSet<usize> =
-                target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
-            let chain = owners.iter().copied().find(|&o| macros[o].len() != 1);
-            if let Some(o) = chain {
-                let swap = macros[m].len() > 1
-                    && owners.len() == 1
-                    && macros[o].len() == macros[m].len()
-                    && macro_m[o] == macro_m[m]
-                    && macro_sites[o] == *target
-                    && macro_sites[m].iter().all(|&s| occupied[s] == Some(m));
-                if !swap {
+            let key = (macros[m].len(), macro_m[m]);
+            let (cx, cy) = slice_xy[macro_sites[m][0]];
+            // Offsets land on tiles without a site for this shape
+            // (interconnect columns, the device edge): try a few.
+            let d = 2 * window as usize + 1;
+            // Offsets that land on a macro's slices are retried: a single
+            // slice cannot take a chain's site, and a chain only swaps with
+            // a chain of its own length below.
+            let mut found = None;
+            for _ in 0..TARGET_RETRIES {
+                let Some(at) = (0..16).find_map(|_| {
+                    let (dx, dy) = (rng.below(d) as i32 - window, rng.below(d) as i32 - window);
+                    nearby[&key].get(&(cx + dx, cy + dy))
+                }) else {
+                    continue;
+                };
+                let target = &choices[&key][at[rng.below(at.len())]];
+                if *target == macro_sites[m] {
                     continue;
                 }
+                let owners: BTreeSet<usize> =
+                    target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
+                let chain = owners.iter().copied().find(|&o| macros[o].len() != 1);
+                if let Some(o) = chain {
+                    let swap = macros[m].len() > 1
+                        && owners.len() == 1
+                        && macros[o].len() == macros[m].len()
+                        && macro_m[o] == macro_m[m]
+                        && macro_sites[o] == *target
+                        && macro_sites[m].iter().all(|&s| occupied[s] == Some(m));
+                    if !swap {
+                        continue;
+                    }
+                }
+                found = Some((target, owners, chain));
+                break;
             }
-            found = Some((target, owners, chain));
-            break;
-        }
-        let Some((target, owners, chain)) = found else { return None };
-        if let Some(o) = chain {
-            // Two chains of one length exchange their sites.
-            let changed: BTreeSet<_> = [m, o]
+            let (target, owners, chain) = found?;
+            if let Some(o) = chain {
+                // Two chains of one length exchange their sites.
+                let changed: BTreeSet<_> = [m, o]
+                    .iter()
+                    .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
+                    .collect();
+                let old: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let (mine, theirs) = (macro_sites[m].clone(), macro_sites[o].clone());
+                for (&s, &t) in macros[m].iter().zip(&theirs) {
+                    loc[s].set(t);
+                }
+                for (&s, &t) in macros[o].iter().zip(&mine) {
+                    loc[s].set(t);
+                }
+                let new: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let accepted = accept(new - old, rng);
+                if accepted {
+                    macro_sites[m] = theirs;
+                    macro_sites[o] = mine;
+                    for &m in &[m, o] {
+                        for &s in &macro_sites[m] {
+                            occupied[s] = Some(m);
+                        }
+                    }
+                } else {
+                    for (&s, &t) in macros[m].iter().zip(&mine) {
+                        loc[s].set(t);
+                    }
+                    for (&s, &t) in macros[o].iter().zip(&theirs) {
+                        loc[s].set(t);
+                    }
+                }
+                return Some((new - old, accepted));
+            }
+            // Single slices in the way move into the sites the macro leaves
+            // (VPR's macro moves), a slice needing a SLICEM only onto one.
+            let free: Vec<usize> =
+                macro_sites[m].iter().copied().filter(|s| !target.contains(s)).collect();
+            let mut displaced: Vec<(usize, usize)> = Vec::new();
+            let mut taken = vec![false; free.len()];
+            let mut order: Vec<usize> = owners.into_iter().collect();
+            order.sort_by_key(|&o| !macro_m[o]);
+            for o in order {
+                let k = (0..free.len()).find(|&k| !taken[k] && (!macro_m[o] || is_m[free[k]]))?;
+                taken[k] = true;
+                displaced.push((o, free[k]));
+            }
+            let moved: Vec<usize> =
+                std::iter::once(m).chain(displaced.iter().map(|&(o, _)| o)).collect();
+            let changed: BTreeSet<_> = moved
                 .iter()
                 .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
                 .collect();
             let old: f64 = changed.iter().map(|&i| cost(i)).sum();
-            let (mine, theirs) = (macro_sites[m].clone(), macro_sites[o].clone());
-            for (&s, &t) in macros[m].iter().zip(&theirs) {
+            let saved: Vec<_> = moved.iter().map(|&m| macro_sites[m].clone()).collect();
+            for (&s, &t) in macros[m].iter().zip(target) {
                 loc[s].set(t);
             }
-            for (&s, &t) in macros[o].iter().zip(&mine) {
-                loc[s].set(t);
+            for &(o, site) in &displaced {
+                loc[macros[o][0]].set(site);
             }
             let new: f64 = changed.iter().map(|&i| cost(i)).sum();
             let accepted = accept(new - old, rng);
             if accepted {
-                macro_sites[m] = theirs;
-                macro_sites[o] = mine;
-                for &m in &[m, o] {
+                for v in &saved {
+                    for &s in v {
+                        occupied[s] = None;
+                    }
+                }
+                macro_sites[m] = target.clone();
+                for &(o, site) in &displaced {
+                    macro_sites[o] = vec![site];
+                }
+                for &m in &moved {
                     for &s in &macro_sites[m] {
                         occupied[s] = Some(m);
                     }
                 }
             } else {
-                for (&s, &t) in macros[m].iter().zip(&mine) {
-                    loc[s].set(t);
-                }
-                for (&s, &t) in macros[o].iter().zip(&theirs) {
-                    loc[s].set(t);
-                }
-            }
-            return Some((new - old, accepted));
-        }
-        // Single slices in the way move into the sites the macro leaves
-        // (VPR's macro moves), a slice needing a SLICEM only onto one.
-        let free: Vec<usize> =
-            macro_sites[m].iter().copied().filter(|s| !target.contains(s)).collect();
-        let mut displaced: Vec<(usize, usize)> = Vec::new();
-        let mut taken = vec![false; free.len()];
-        let mut order: Vec<usize> = owners.into_iter().collect();
-        order.sort_by_key(|&o| !macro_m[o]);
-        for o in order {
-            let Some(k) = (0..free.len()).find(|&k| !taken[k] && (!macro_m[o] || is_m[free[k]]))
-            else {
-                return None;
-            };
-            taken[k] = true;
-            displaced.push((o, free[k]));
-        }
-        let moved: Vec<usize> =
-            std::iter::once(m).chain(displaced.iter().map(|&(o, _)| o)).collect();
-        let changed: BTreeSet<_> = moved
-            .iter()
-            .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
-            .collect();
-        let old: f64 = changed.iter().map(|&i| cost(i)).sum();
-        let saved: Vec<_> = moved.iter().map(|&m| macro_sites[m].clone()).collect();
-        for (&s, &t) in macros[m].iter().zip(target) {
-            loc[s].set(t);
-        }
-        for &(o, site) in &displaced {
-            loc[macros[o][0]].set(site);
-        }
-        let new: f64 = changed.iter().map(|&i| cost(i)).sum();
-        let accepted = accept(new - old, rng);
-        if accepted {
-            for v in &saved {
-                for &s in v {
-                    occupied[s] = None;
+                for (&m, v) in moved.iter().zip(saved) {
+                    for (&cluster, s) in macros[m].iter().zip(v) {
+                        loc[cluster].set(s);
+                    }
                 }
             }
-            macro_sites[m] = target.clone();
-            for &(o, site) in &displaced {
-                macro_sites[o] = vec![site];
-            }
-            for &m in &moved {
-                for &s in &macro_sites[m] {
-                    occupied[s] = Some(m);
-                }
-            }
-        } else {
-            for (&m, v) in moved.iter().zip(saved) {
-                for (&cluster, s) in macros[m].iter().zip(v) {
-                    loc[cluster].set(s);
-                }
-            }
-        }
-        Some((new - old, accepted))
-    };
+            Some((new - old, accepted))
+        };
     let snapshot = || {
         let (mut rams, mut dsps) = (BTreeMap::new(), BTreeMap::new());
         for (h, &(c, k)) in hard.iter().enumerate() {
