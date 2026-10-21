@@ -19,6 +19,7 @@
 //! println!("{:?}", sim.peek(&out));
 //! ```
 
+pub mod attach;
 pub mod compile;
 pub mod exec;
 pub mod program;
@@ -26,9 +27,10 @@ pub mod program;
 use synth_core::{FxHashMap, Logic, LogicVec};
 use synth_rtl::Module;
 
+pub use attach::{WritePort, attach_memory};
 pub use compile::Options;
 use exec::State;
-use program::{HOST, Ins, Loc, Program, SlotKind};
+use program::{Loc, Program, SlotKind};
 
 /// A named signal, resolved to its bits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,12 +73,28 @@ pub struct Sim {
     prog: Program,
     st: State,
     prev: Vec<Logic>,
-    pending: u64,
-    cache: Vec<(u64, Vec<Ins>)>,
+    /// Units to run at the next settle, one bit per instruction.
+    dirty: Vec<u64>,
     fired: Vec<u32>,
     names: FxHashMap<String, usize>,
     /// Clock edges processed (each fired domain counts once).
     pub edges: u64,
+}
+
+/// Runs the edges of the fired domains: every sample, then every memory
+/// write, then every state update.
+fn fire<const F: bool>(p: &Program, fired: &[u32], st: &mut State, dirty: &mut [u64]) {
+    for &d in fired {
+        exec::run::<F>(&p.aux, &p.domains[d as usize].sample, st);
+    }
+    for &d in fired {
+        exec::write::<F>(p, &p.domains[d as usize].write, st, dirty);
+    }
+    for &d in fired {
+        let dom = &p.domains[d as usize];
+        exec::commit::<F>(p, &dom.commit, st, dirty);
+        exec::commit_gated::<F>(p, dom, st, dirty);
+    }
 }
 
 /// Rounds of clock edges in one [`Sim::eval`] before it gives up.
@@ -95,17 +113,18 @@ impl Sim {
         for (i, (n, _)) in prog.signals.iter().enumerate() {
             names.entry(n.clone()).or_insert(i);
         }
-        let mut sim = Sim {
-            st,
-            prev: Vec::new(),
-            pending: 0,
-            cache: Vec::new(),
-            fired: Vec::new(),
-            names,
-            edges: 0,
-            prog,
-        };
-        sim.run_all();
+        let mut dirty = vec![0u64; (prog.units as usize).div_ceil(64)];
+        for i in 0..prog.ops.len() {
+            dirty[i / 64] |= 1 << (i % 64);
+        }
+        for d in &prog.domains {
+            for i in 0..d.gated.len() {
+                let u = d.base as usize + i;
+                dirty[u / 64] |= 1 << (u % 64);
+            }
+        }
+        let mut sim = Sim { st, prev: Vec::new(), dirty, fired: Vec::new(), names, edges: 0, prog };
+        sim.settle();
         sim.prev = sim.prog.clocks.iter().map(|c| sim.bit(c.word, c.bit)).collect();
         sim
     }
@@ -120,17 +139,19 @@ impl Sim {
         &self.prog.warnings
     }
 
+    /// The value plane of the state (for diagnostics).
+    pub fn state_words(&self) -> &[u64] {
+        &self.st.val
+    }
+
+    /// Combinational units run so far.
+    pub fn units_run(&self) -> u64 {
+        self.st.units_run
+    }
+
     /// Combinational loops that did not settle so far.
     pub fn unstable_loops(&self) -> u64 {
         self.st.unstable
-    }
-
-    fn run_all(&mut self) {
-        if self.prog.four_state {
-            exec::run::<true>(&self.prog.aux, &self.prog.ops, &mut self.st);
-        } else {
-            exec::run::<false>(&self.prog.aux, &self.prog.ops, &mut self.st);
-        }
     }
 
     fn bit(&self, word: u32, bit: u8) -> Logic {
@@ -144,42 +165,30 @@ impl Sim {
         }
     }
 
-    /// Settles the logic reached by the sources in `mask`.
-    fn settle(&mut self, mask: u64) {
-        let i = match self.cache.iter().position(|(m, _)| *m == mask) {
-            Some(i) => i,
-            None => {
-                let ops: Vec<Ins> = self
-                    .prog
-                    .ops
-                    .iter()
-                    .zip(&self.prog.op_masks)
-                    .filter(|(_, m)| **m & mask != 0)
-                    .map(|(o, _)| *o)
-                    .collect();
-                if self.cache.len() >= 64 {
-                    self.cache.remove(0);
-                }
-                self.cache.push((mask, ops));
-                self.cache.len() - 1
-            }
-        };
-        let ops = &self.cache[i].1;
+    /// Runs what changes reached.
+    fn settle(&mut self) {
         if self.prog.four_state {
-            exec::run::<true>(&self.prog.aux, ops, &mut self.st);
+            exec::settle::<true>(&self.prog, &mut self.st, &mut self.dirty);
         } else {
-            exec::run::<false>(&self.prog.aux, ops, &mut self.st);
+            exec::settle::<false>(&self.prog, &mut self.st, &mut self.dirty);
+        }
+    }
+
+    /// Marks the readers of the slot holding `word` for the next settle.
+    fn touch(&mut self, word: u32) {
+        let slot = self.prog.slot_of[word as usize];
+        exec::mark(&self.prog, &mut self.dirty, slot, u32::MAX);
+        let u = self.prog.state_unit[slot as usize];
+        if u != program::NONE {
+            self.dirty[(u >> 6) as usize] |= 1 << (u & 63);
         }
     }
 
     /// Settles the design after inputs changed, then fires the clock edges
     /// that result, repeatedly, until no clock changes.
     pub fn eval(&mut self) {
-        let mut mask = std::mem::take(&mut self.pending);
         for _ in 0..MAX_ROUNDS {
-            if mask != 0 {
-                self.settle(mask);
-            }
+            self.settle();
             self.fired.clear();
             for ci in 0..self.prog.clocks.len() {
                 let c = &self.prog.clocks[ci];
@@ -205,27 +214,12 @@ impl Sim {
             if self.fired.is_empty() {
                 return;
             }
-            mask = 0;
             let fired = std::mem::take(&mut self.fired);
-            let aux = &self.prog.aux;
-            let four = self.prog.four_state;
-            for phase in 0..3 {
-                for &d in &fired {
-                    let dom = &self.prog.domains[d as usize];
-                    let ops = match phase {
-                        0 => &dom.sample,
-                        1 => &dom.write,
-                        _ => &dom.commit,
-                    };
-                    if four {
-                        exec::run::<true>(aux, ops, &mut self.st);
-                    } else {
-                        exec::run::<false>(aux, ops, &mut self.st);
-                    }
-                    if phase == 0 {
-                        mask |= dom.bit;
-                    }
-                }
+            let (p, st, dirty) = (&self.prog, &mut self.st, &mut self.dirty);
+            if p.four_state {
+                fire::<true>(p, &fired, st, dirty);
+            } else {
+                fire::<false>(p, &fired, st, dirty);
             }
             self.edges += fired.len() as u64;
             self.fired = fired;
@@ -237,10 +231,7 @@ impl Sim {
     /// values as the starting point, without firing any edge: for setting
     /// up initial values (such as clocks leaving `x`).
     pub fn eval_quiet(&mut self) {
-        let mask = std::mem::take(&mut self.pending);
-        if mask != 0 {
-            self.settle(mask);
-        }
+        self.settle();
         self.prev = self.prog.clocks.iter().map(|c| self.bit(c.word, c.bit)).collect();
     }
 
@@ -298,7 +289,7 @@ impl Sim {
             } else {
                 self.st.val[o] = val & !unk;
             }
-            self.pending |= self.prog.word_src[o];
+            self.touch(word);
             return Ok(());
         }
         for (k, l) in s.locs.iter().enumerate() {
@@ -316,7 +307,7 @@ impl Sim {
             if four {
                 self.st.unk[o] = self.st.unk[o] & !(1 << bit) | unk << bit;
             }
-            self.pending |= self.prog.word_src[o];
+            self.touch(word);
         }
         Ok(())
     }
@@ -338,7 +329,7 @@ impl Sim {
             if self.prog.four_state {
                 self.st.unk[o] = 0;
             }
-            self.pending |= self.prog.word_src[o];
+            self.touch(word);
             return;
         }
         let w = s.width();
@@ -451,7 +442,9 @@ impl Sim {
                 self.st.mval[o + j] = val & !unk;
             }
         }
-        self.pending |= HOST;
+        for &r in &self.prog.mem_readers[m.0 as usize] {
+            self.dirty[(r >> 6) as usize] |= 1 << (r & 63);
+        }
     }
 
     /// Fills a memory with words of up to 64 bits from address `start`.

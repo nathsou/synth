@@ -50,6 +50,8 @@ pub enum K {
     Copy,
     /// `d = c (a constant, or 0 when NONE) | parts[a..a + b]`, `w` bits.
     Gather,
+    /// `d = a >> x`, `w` bits (at most 64).
+    Extract,
     Not,
     Neg,
     RedAnd,
@@ -109,6 +111,9 @@ pub enum K {
     Loop,
     /// Any operation on wide values: `wide[x]`.
     Wide,
+    /// Comparisons of `a` (`w` bits) with constants: `decoders[x]`, which
+    /// remembers the last value of `a` in the two words at `d`.
+    Decode,
     /// Flip-flop update with enable: `d = en ? a : b` (enable as for `Latch`).
     FfEn,
     /// Flip-flop update with resets: `flops[x]`.
@@ -135,6 +140,14 @@ impl Ins {
     pub fn new(k: K, w: u32, d: u32, a: u32, b: u32) -> Ins {
         Ins { k, w, d, a, b, c: 0, x: 0 }
     }
+}
+
+/// What an instruction writes: `n` words, read by units `rd[lo..hi]`.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Out {
+    pub n: u32,
+    pub lo: u32,
+    pub hi: u32,
 }
 
 /// A run of at most 64 bits copied by [`K::Gather`]: `len` bits from bit
@@ -181,6 +194,14 @@ pub struct WideIns {
     pub d: Val,
     pub a: Val,
     pub b: Val,
+}
+
+/// Comparisons of one value with constants: `(constant, destination, ne)`
+/// sorted by constant. When the value changes from `old` to `new`, only the
+/// comparisons with `old` or `new` change.
+#[derive(Clone, Debug)]
+pub struct Decoder {
+    pub entries: Vec<(u64, u32, bool)>,
 }
 
 /// A flip-flop with resets (see [`K::Ff`]); writes `dst` (its output or a
@@ -234,8 +255,6 @@ pub struct SyncRead {
 /// The logic of one clock edge.
 #[derive(Clone, Debug, Default)]
 pub struct Domain {
-    /// Sources set when it fires.
-    pub bit: u64,
     /// Run first, for every domain that fires: values needed after state
     /// changes (into shadows) and synchronous reads.
     pub sample: Vec<Ins>,
@@ -243,6 +262,10 @@ pub struct Domain {
     pub write: Vec<Ins>,
     /// State updates, last.
     pub commit: Vec<Ins>,
+    /// Flip-flop updates that only read combinational values, run only
+    /// when one of them changed: units `base..base + gated.len()`.
+    pub gated: Vec<Ins>,
+    pub base: u32,
 }
 
 /// A clock bit and the domains of its edges.
@@ -265,6 +288,7 @@ pub struct Aux {
     pub mems: Vec<Mem>,
     pub writes: Vec<MemWrite>,
     pub sync_reads: Vec<SyncRead>,
+    pub decoders: Vec<Decoder>,
 }
 
 /// Where a bit of a named signal lives.
@@ -295,20 +319,29 @@ pub struct Program {
     pub init_unk: Vec<u64>,
     pub mem_init_val: Vec<u64>,
     pub mem_init_unk: Vec<u64>,
-    /// Combinational instructions in evaluation order, and the sources
-    /// each depends on (the same for every member of a loop).
+    /// Combinational instructions in evaluation order, in units: one
+    /// instruction, or a [`K::Loop`] and its group.
     pub ops: Vec<Ins>,
-    pub op_masks: Vec<u64>,
+    /// Per instruction: the words it writes (from `d`) and the range of
+    /// `rd` reading them.
+    pub out: Vec<Out>,
+    /// Units: combinational ones first, then each domain's gated updates
+    /// from a multiple of 64.
+    pub units: u32,
+    /// Per word: the gated update writing its slot, or `NONE`.
+    pub state_unit: Vec<u32>,
+    /// Units reading each slot (by its first word): `rd[rd_start[s]..rd_start[s + 1]]`.
+    pub rd_start: Vec<u32>,
+    pub rd: Vec<u32>,
+    /// Units reading each memory asynchronously.
+    pub mem_readers: Vec<Vec<u32>>,
+    /// Per word: the first word of its slot.
+    pub slot_of: Vec<u32>,
     pub aux: Aux,
     pub domains: Vec<Domain>,
     pub clocks: Vec<Clock>,
-    /// Per word: the source bits set when it is written from outside.
-    pub word_src: Vec<u64>,
     pub word_kind: Vec<SlotKind>,
     /// Named signals: (name, bit locations, least significant first).
     pub signals: Vec<(String, Vec<Loc>)>,
     pub warnings: Vec<String>,
 }
-
-/// The source bit set when memories are written from outside.
-pub const HOST: u64 = 1 << 63;

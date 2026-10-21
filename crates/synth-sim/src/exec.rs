@@ -17,10 +17,13 @@ pub struct State {
     pub unk: Vec<u64>,
     pub mval: Vec<u64>,
     pub munk: Vec<u64>,
-    /// Scratch space for loop fixpoints.
+    /// Scratch space for loop fixpoints and change detection.
     scratch: Vec<u64>,
+    snap: Vec<u64>,
     /// Loops that did not settle.
     pub unstable: u64,
+    /// Units run by settles.
+    pub units_run: u64,
 }
 
 impl State {
@@ -31,9 +34,247 @@ impl State {
             mval: p.mem_init_val.clone(),
             munk: p.mem_init_unk.clone(),
             scratch: Vec::new(),
+            snap: Vec::new(),
             unstable: 0,
+            units_run: 0,
         }
     }
+}
+
+/// Marks the units reading slot `slot` (except `except`).
+#[inline(always)]
+pub fn mark(p: &Program, dirty: &mut [u64], slot: u32, except: u32) {
+    let (a, b) = (p.rd_start[slot as usize] as usize, p.rd_start[slot as usize + 1] as usize);
+    for &r in &p.rd[a..b] {
+        if r != except {
+            dirty[(r >> 6) as usize] |= 1 << (r & 63);
+        }
+    }
+}
+
+#[inline(always)]
+fn mark_range(p: &Program, dirty: &mut [u64], lo: u32, hi: u32) {
+    for &r in &p.rd[lo as usize..hi as usize] {
+        dirty[(r >> 6) as usize] |= 1 << (r & 63);
+    }
+}
+
+/// Runs the instruction at `i` and marks the readers of its output if it
+/// changed.
+#[inline(always)]
+fn step_marked<const F: bool>(p: &Program, i: usize, ins: &Ins, st: &mut State, dirty: &mut [u64]) {
+    let d = ins.d as usize;
+    let o = p.out[i];
+    if o.n == 1 {
+        let ov = st.val[d];
+        let ou = if F { st.unk[d] } else { 0 };
+        step::<F>(&p.aux, ins, st);
+        if st.val[d] != ov || F && st.unk[d] != ou {
+            mark_range(p, dirty, o.lo, o.hi);
+        }
+    } else {
+        changed_words::<F>(p, d, o.n as usize, st, dirty, |st| step::<F>(&p.aux, ins, st));
+    }
+}
+
+/// Runs a decoder: updates the comparisons whose result can have changed
+/// and marks the readers of those that did.
+fn decode<const F: bool>(p: &Program, ins: &Ins, st: &mut State, dirty: &mut [u64]) {
+    let dec = &p.aux.decoders[ins.x as usize];
+    let (x, last) = (ins.a as usize, ins.d as usize);
+    let m = mask(ins.w);
+    let nv = st.val[x];
+    let nu = if F { st.unk[x] } else { 0 };
+    let valid = st.val[last + 1] != 0;
+    let ov = st.val[last];
+    let ou = if F { st.unk[last] } else { 0 };
+    if valid && nv == ov && nu == ou {
+        return;
+    }
+    let mut set = |st: &mut State, d: u32, ne: bool, key: u64| {
+        let d = d as usize;
+        let (v, u) = if F && nu != 0 {
+            if (nv ^ key) & !nu & m != 0 { (ne as u64, 0) } else { (0, 1) }
+        } else {
+            ((key == nv) as u64 ^ ne as u64, 0)
+        };
+        if st.val[d] != v || F && st.unk[d] != u {
+            st.val[d] = v;
+            if F {
+                st.unk[d] = u;
+            }
+            mark(p, dirty, d as u32, u32::MAX);
+        }
+    };
+    if !valid || F && (nu != 0 || ou != 0) {
+        for &(key, d, ne) in &dec.entries {
+            set(st, d, ne, key);
+        }
+    } else {
+        for k in [ov, nv] {
+            let mut j = dec.entries.partition_point(|e| e.0 < k);
+            while j < dec.entries.len() && dec.entries[j].0 == k {
+                let (key, d, ne) = dec.entries[j];
+                set(st, d, ne, key);
+                j += 1;
+            }
+        }
+    }
+    st.val[last] = nv;
+    if F {
+        st.unk[last] = nu;
+    }
+    st.val[last + 1] = 1;
+}
+
+/// Runs `f`, marking the readers of the `n` words at `d` if they change.
+fn changed_words<const F: bool>(
+    p: &Program,
+    d: usize,
+    n: usize,
+    st: &mut State,
+    dirty: &mut [u64],
+    f: impl FnOnce(&mut State),
+) {
+    let mut snap = std::mem::take(&mut st.snap);
+    snap.clear();
+    snap.extend_from_slice(&st.val[d..d + n]);
+    if F {
+        snap.extend_from_slice(&st.unk[d..d + n]);
+    }
+    f(st);
+    let changed = st.val[d..d + n] != snap[..n] || F && st.unk[d..d + n] != snap[n..];
+    st.snap = snap;
+    if changed {
+        mark(p, dirty, d as u32, u32::MAX);
+    }
+}
+
+/// Runs the units marked in `dirty`, in order, marking the readers of
+/// every output that changes, until none is left.
+pub fn settle<const F: bool>(p: &Program, st: &mut State, dirty: &mut [u64]) {
+    let mut wi = 0;
+    let end = p.ops.len().div_ceil(64);
+    while wi < end {
+        let bits = dirty[wi];
+        if bits == 0 {
+            wi += 1;
+            continue;
+        }
+        dirty[wi] = bits & (bits - 1);
+        st.units_run += 1;
+        let i = wi * 64 + bits.trailing_zeros() as usize;
+        let ins = &p.ops[i];
+        if ins.k != K::Loop {
+            if ins.k == K::Decode {
+                decode::<F>(p, ins, st, dirty);
+            } else {
+                step_marked::<F>(p, i, ins, st, dirty);
+            }
+            continue;
+        }
+        let outs = &p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize];
+        let mut snap = std::mem::take(&mut st.snap);
+        snap.clear();
+        for &o in outs {
+            snap.push(st.val[o as usize]);
+            if F {
+                snap.push(st.unk[o as usize]);
+            }
+        }
+        let n = ins.a as usize;
+        run_loop::<F>(&p.aux, ins, &p.ops[i + 1..i + 1 + n], st);
+        let k = if F { 2 } else { 1 };
+        for (j, &o) in outs.iter().enumerate() {
+            let o = o as usize;
+            if snap[k * j] != st.val[o] || F && snap[k * j + 1] != st.unk[o] {
+                mark(p, dirty, p.slot_of[o], i as u32);
+            }
+        }
+        st.snap = snap;
+    }
+}
+
+/// Runs state updates, marking the readers of every state that changes.
+pub fn commit<const F: bool>(p: &Program, ops: &[Ins], st: &mut State, dirty: &mut [u64]) {
+    for ins in ops {
+        let d = ins.d as usize;
+        let n = nwords(ins.w) as usize;
+        if n == 1 {
+            let ov = st.val[d];
+            let ou = if F { st.unk[d] } else { 0 };
+            step::<F>(&p.aux, ins, st);
+            if st.val[d] != ov || F && st.unk[d] != ou {
+                mark(p, dirty, ins.d, u32::MAX);
+            }
+        } else {
+            changed_words::<F>(p, d, n, st, dirty, |st| step::<F>(&p.aux, ins, st));
+        }
+    }
+}
+
+/// Runs the gated updates of a domain marked in `dirty`.
+pub fn commit_gated<const F: bool>(p: &Program, dom: &Domain, st: &mut State, dirty: &mut [u64]) {
+    let base = dom.base as usize;
+    for wi in base / 64..(base + dom.gated.len()).div_ceil(64) {
+        let mut bits = std::mem::take(&mut dirty[wi]);
+        while bits != 0 {
+            let i = wi * 64 + bits.trailing_zeros() as usize - base;
+            bits &= bits - 1;
+            let ins = &dom.gated[i];
+            let d = ins.d as usize;
+            let n = nwords(ins.w) as usize;
+            if n == 1 {
+                let ov = st.val[d];
+                let ou = if F { st.unk[d] } else { 0 };
+                step::<F>(&p.aux, ins, st);
+                if st.val[d] != ov || F && st.unk[d] != ou {
+                    mark(p, dirty, ins.d, u32::MAX);
+                }
+            } else {
+                changed_words::<F>(p, d, n, st, dirty, |st| step::<F>(&p.aux, ins, st));
+            }
+        }
+    }
+}
+
+/// Runs memory writes, marking the asynchronous readers of written memories.
+pub fn write<const F: bool>(p: &Program, ops: &[Ins], st: &mut State, dirty: &mut [u64]) {
+    for ins in ops {
+        if mem_write::<F>(&p.aux, ins.x as u32, st) {
+            let mem = p.aux.writes[ins.x as usize].mem as usize;
+            for &r in &p.mem_readers[mem] {
+                dirty[(r >> 6) as usize] |= 1 << (r & 63);
+            }
+        }
+    }
+}
+
+/// Runs a decoder outside a settle: every comparison.
+fn decode_all<const F: bool>(aux: &Aux, ins: &Ins, st: &mut State) {
+    let dec = &aux.decoders[ins.x as usize];
+    let x = ins.a as usize;
+    let m = mask(ins.w);
+    let nv = st.val[x];
+    let nu = if F { st.unk[x] } else { 0 };
+    for &(key, d, ne) in &dec.entries {
+        let d = d as usize;
+        if F && nu != 0 {
+            let known_diff = (nv ^ key) & !nu & m != 0;
+            st.val[d] = if known_diff { ne as u64 } else { 0 };
+            st.unk[d] = !known_diff as u64;
+        } else {
+            st.val[d] = (key == nv) as u64 ^ ne as u64;
+            if F {
+                st.unk[d] = 0;
+            }
+        }
+    }
+    st.val[ins.d as usize] = nv;
+    if F {
+        st.unk[ins.d as usize] = nu;
+    }
+    st.val[ins.d as usize + 1] = 1;
 }
 
 /// Iterations before a combinational loop is declared unstable.
@@ -371,17 +612,19 @@ fn mem_read<const F: bool>(aux: &Aux, mi: u32, addr: u32, d: usize, w: u32, st: 
     }
 }
 
-fn mem_write<const F: bool>(aux: &Aux, wi: u32, st: &mut State) {
+/// Returns whether anything was written.
+fn mem_write<const F: bool>(aux: &Aux, wi: u32, st: &mut State) -> bool {
     let wr = &aux.writes[wi as usize];
     let mem = &aux.mems[wr.mem as usize];
     let a = wr.addr.off as usize;
     if F && st.unk[a] != 0 {
-        return;
+        return false;
     }
     let idx = st.val[a] as i128 - mem.offset as i128;
     if idx < 0 || idx >= mem.depth as i128 {
-        return;
+        return false;
     }
+    let mut wrote = false;
     let n = nwords(mem.width) as usize;
     let o = mem.base + idx as usize * n;
     let (en, data) = (wr.en.off as usize, wr.data.off as usize);
@@ -390,11 +633,13 @@ fn mem_write<const F: bool>(aux: &Aux, wi: u32, st: &mut State) {
         if e == 0 {
             continue;
         }
+        wrote = true;
         st.mval[o + j] = st.mval[o + j] & !e | st.val[data + j] & e;
         if F {
             st.munk[o + j] = st.munk[o + j] & !e | st.unk[data + j] & e;
         }
     }
+    wrote
 }
 
 fn sync_read<const F: bool>(aux: &Aux, x: u64, st: &mut State) {
@@ -505,6 +750,13 @@ pub fn step<const F: bool>(aux: &Aux, ins: &Ins, st: &mut State) {
     match ins.k {
         K::Copy => copy::<F>(st, ins.d as usize, ins.a as usize, nwords(w) as usize),
         K::Gather => gather::<F>(aux, ins, st),
+        K::Extract => {
+            let (d, a) = (ins.d as usize, ins.a as usize);
+            st.val[d] = st.val[a] >> ins.x & m;
+            if F {
+                st.unk[d] = st.unk[a] >> ins.x & m;
+            }
+        }
         K::Not => {
             let (d, a) = (ins.d as usize, ins.a as usize);
             if F {
@@ -635,9 +887,12 @@ pub fn step<const F: bool>(aux: &Aux, ins: &Ins, st: &mut State) {
             copy::<F>(st, ins.d as usize, src as usize, nwords(w) as usize);
         }
         K::Ff => flop::<F>(aux, ins.x, st),
-        K::MemWr => mem_write::<F>(aux, ins.x as u32, st),
+        K::MemWr => {
+            mem_write::<F>(aux, ins.x as u32, st);
+        }
         K::MemRdSync => sync_read::<F>(aux, ins.x, st),
         K::Wide => wide::<F>(aux, ins, st),
+        K::Decode => decode_all::<F>(aux, ins, st),
         K::Loop => unreachable!("loops are run by `run`"),
     }
 }

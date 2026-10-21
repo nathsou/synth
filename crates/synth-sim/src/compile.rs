@@ -5,12 +5,19 @@
 //! slot are gathered into a slot of their own (shared between identical
 //! operands). Combinational instructions are then ordered by their
 //! dependencies, with strongly connected groups repeated to a fixpoint, and
-//! each records the sources (inputs, clock domains, memories) that reach it.
+//! each slot records the instructions that read it, so that a change runs
+//! only what it reaches.
 
 use synth_core::{FxHashMap, Logic, LogicVec};
 use synth_rtl::{BinaryOp, CellKind, Control, Module, PortDir, Sig, SigBit, UnaryOp};
 
 use crate::program::*;
+
+/// The mask of word `j` of a value of `w` bits.
+fn word_mask(w: u32, j: usize) -> u64 {
+    let lo = j as u32 * 64;
+    if w >= lo + 64 { u64::MAX } else { mask(w.saturating_sub(lo)) }
+}
 
 /// Simulation options.
 #[derive(Clone, Debug)]
@@ -33,8 +40,20 @@ struct Node {
     ins: Ins,
     reads: Vec<u32>,
     writes: Vec<u32>,
-    extra: u64,
 }
+
+/// `d = (x == key) ^ ne`, waiting to join a decoder.
+struct EqConst {
+    x: Val,
+    key: u64,
+    d: u32,
+    ne: bool,
+    ins: Ins,
+}
+
+/// Comparisons of one value with fewer constants than this stay
+/// instructions of their own.
+const MIN_DECODER: usize = 4;
 
 struct Builder<'m> {
     m: &'m Module,
@@ -46,26 +65,25 @@ struct Builder<'m> {
     kind: Vec<SlotKind>,
     slot_of: Vec<u32>,
     width: Vec<u32>,
-    src: Vec<u64>,
     writer: Vec<u32>,
     wire_base: Vec<usize>,
     loc: Vec<Option<Loc>>,
     consts: FxHashMap<(u32, Vec<u64>, Vec<u64>), Val>,
     memo: FxHashMap<Vec<Loc>, Val>,
     nodes: Vec<Node>,
+    /// Comparisons with constants, grouped into decoders at the end.
+    eq_consts: Vec<EqConst>,
+    /// Gated flip-flops: (domain, index, slots read), and their outputs.
+    gated_reads: Vec<(u32, u32, Vec<u32>)>,
+    gated_q: Vec<(u32, u32, u32)>,
     aux: Aux,
     mem_val: Vec<u64>,
     mem_unk: Vec<u64>,
     domains: Vec<Domain>,
     domain_key: Vec<(u32, bool)>,
     clocks: Vec<Clock>,
-    /// State slots and the domain that writes them.
-    state_domain: Vec<(u32, u32)>,
     /// Asynchronous read nodes of each memory.
     mem_reads: Vec<Vec<usize>>,
-    /// Domains writing each memory.
-    mem_writers: Vec<Vec<u32>>,
-    inputs: Vec<u32>,
     warnings: Vec<String>,
 }
 
@@ -84,29 +102,29 @@ pub fn compile(m: &Module, opts: &Options) -> Result<Program, String> {
         kind: Vec::new(),
         slot_of: Vec::new(),
         width: Vec::new(),
-        src: Vec::new(),
         writer: Vec::new(),
         wire_base: Vec::new(),
         loc: Vec::new(),
         consts: FxHashMap::default(),
         memo: FxHashMap::default(),
         nodes: Vec::new(),
+        eq_consts: Vec::new(),
+        gated_reads: Vec::new(),
+        gated_q: Vec::new(),
         aux: Aux::default(),
         mem_val: Vec::new(),
         mem_unk: Vec::new(),
         domains: Vec::new(),
         domain_key: Vec::new(),
         clocks: Vec::new(),
-        state_domain: Vec::new(),
         mem_reads: Vec::new(),
-        mem_writers: Vec::new(),
-        inputs: Vec::new(),
         warnings: Vec::new(),
     };
     b.layout()?;
     b.cells()?;
     b.memories()?;
     b.connections();
+    b.decoders();
     Ok(b.finish())
 }
 
@@ -120,7 +138,6 @@ impl Builder<'_> {
             self.kind.push(kind);
             self.slot_of.push(off);
             self.width.push(0);
-            self.src.push(0);
             self.writer.push(NONE);
         }
         self.width[off as usize] = w;
@@ -269,6 +286,13 @@ impl Builder<'_> {
                 }
             }
         }
+        if !any_const && parts.len() == 1 && parts[0].pos == 0 && parts[0].len as u32 == d.w {
+            let p = parts[0];
+            let mut ins = Ins::new(K::Extract, d.w, d.off, p.src, 0);
+            ins.x = p.lo as u64;
+            self.node(ins, reads, vec![d.off]);
+            return;
+        }
         let c = if any_const { self.constant(&LogicVec::from_bits(&base)).off } else { NONE };
         let start = self.aux.parts.len() as u32;
         let n = parts.len() as u32;
@@ -283,7 +307,7 @@ impl Builder<'_> {
         for &w in &writes {
             self.writer[w as usize] = n as u32;
         }
-        self.nodes.push(Node { ins, reads, writes, extra: 0 });
+        self.nodes.push(Node { ins, reads, writes });
         n
     }
 
@@ -362,7 +386,6 @@ impl Builder<'_> {
             }
             let v = self.alloc(w.width, SlotKind::Input);
             self.set_init(v, &LogicVec::xs(w.width as usize));
-            self.inputs.push(v.off);
             for i in undriven {
                 self.loc[base + i] =
                     Some(Loc::Bit { word: v.off + i as u32 / 64, bit: (i % 64) as u8 });
@@ -544,6 +567,27 @@ impl Builder<'_> {
                     };
                     let mut ins = Ins::new(k, av.w, 0, av.off, bv.off);
                     ins.c = bv.w;
+                    if matches!(k, K::Eq | K::Ne) {
+                        let is_const = |v: Val| self.kind[v.off as usize] == SlotKind::Const;
+                        let (x, c) = match (is_const(av), is_const(bv)) {
+                            (false, true) => (av, Some(bv)),
+                            (true, false) => (bv, Some(av)),
+                            _ => (av, None),
+                        };
+                        if let Some(c) = c
+                            && (!self.four || self.unk[c.off as usize] == 0)
+                        {
+                            ins.d = yv.off;
+                            self.eq_consts.push(EqConst {
+                                x,
+                                key: self.val[c.off as usize],
+                                d: yv.off,
+                                ne: k == K::Ne,
+                                ins,
+                            });
+                            continue;
+                        }
+                    }
                     self.emit_to(ins, natural, yv, reads);
                 }
                 CellKind::Mux { a, b, s, y, ternary } => {
@@ -658,7 +702,6 @@ impl Builder<'_> {
         let Some(dom) = self.clock_domain(d.clk.sig, d.clk.posedge) else {
             return Ok(());
         };
-        self.state_domain.push((q.off, dom));
         // Values read at the edge must be sampled before any state changes
         // unless they are combinational (or the flip-flop's own output).
         let mut reads = vec![self.slot_of[dv.off as usize]];
@@ -698,7 +741,16 @@ impl Builder<'_> {
             dm.sample.push(ins);
             dm.commit.push(Ins::new(K::Copy, w, q.off, dst, 0));
         } else {
-            dm.commit.push(ins);
+            // Its next value depends only on these (its own output aside):
+            // it needs updating only after one of them changes.
+            let idx = dm.gated.len() as u32;
+            dm.gated.push(ins);
+            let reads: Vec<u32> = reads
+                .into_iter()
+                .filter(|&r| r != q.off && self.kind[r as usize] != SlotKind::Const)
+                .collect();
+            self.gated_reads.push((dom, idx, reads));
+            self.gated_q.push((q.off, dom, idx));
         }
         Ok(())
     }
@@ -710,8 +762,16 @@ impl Builder<'_> {
             let nw = nwords(mem.width) as usize;
             let base = self.mem_val.len();
             for i in 0..mem.depth as usize {
-                let init =
-                    mem.init.get(i).cloned().unwrap_or_else(|| LogicVec::xs(mem.width as usize));
+                let Some(init) = mem.init.get(i) else {
+                    // Unspecified: x, or 0 in 2-state.
+                    for j in 0..nw {
+                        self.mem_val.push(0);
+                        if self.four {
+                            self.mem_unk.push(word_mask(mem.width, j));
+                        }
+                    }
+                    continue;
+                };
                 let init = init.resize(mem.width as usize, false);
                 for j in 0..nw {
                     let (v, u) = (init.val_words()[j], init.unk_words()[j]);
@@ -731,7 +791,6 @@ impl Builder<'_> {
                 base,
             });
             self.mem_reads.push(Vec::new());
-            self.mem_writers.push(Vec::new());
             let mut write_ports = Vec::new();
             for wr in &mem.writes {
                 let addr = self.operand(&wr.addr);
@@ -747,7 +806,6 @@ impl Builder<'_> {
                     let mut ins = Ins::new(K::MemWr, mem.width, 0, 0, 0);
                     ins.x = wi as u64;
                     self.domains[dom as usize].write.push(ins);
-                    self.mem_writers[mi as usize].push(dom);
                 }
                 write_ports.push((wi, dom));
             }
@@ -793,7 +851,6 @@ impl Builder<'_> {
                         let dm = &mut self.domains[dom as usize];
                         dm.sample.push(ins);
                         dm.commit.push(Ins::new(K::Copy, data.w, data.off, shadow.off, 0));
-                        self.state_domain.push((data.off, dom));
                     }
                 }
             }
@@ -810,58 +867,50 @@ impl Builder<'_> {
         }
     }
 
+    /// Groups comparisons of one value with constants into decoders.
+    fn decoders(&mut self) {
+        let cands = std::mem::take(&mut self.eq_consts);
+        let mut groups: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+        let mut order = Vec::new();
+        for (i, c) in cands.iter().enumerate() {
+            let g = groups.entry(c.x.off).or_default();
+            if g.is_empty() {
+                order.push(c.x.off);
+            }
+            g.push(i);
+        }
+        for x in order {
+            let g = &groups[&x];
+            if g.len() < MIN_DECODER {
+                for &i in g {
+                    let c = &cands[i];
+                    self.node(c.ins, vec![c.x.off, c.ins.b, c.ins.a], vec![c.d]);
+                }
+                continue;
+            }
+            let mut entries: Vec<(u64, u32, bool)> =
+                g.iter().map(|&i| (cands[i].key, cands[i].d, cands[i].ne)).collect();
+            entries.sort_unstable();
+            let writes = entries.iter().map(|e| e.1).collect();
+            let xv = cands[g[0]].x;
+            let last = self.alloc(128, SlotKind::Comb);
+            let idx = self.aux.decoders.len() as u64;
+            self.aux.decoders.push(Decoder { entries });
+            let mut ins = Ins::new(K::Decode, xv.w, last.off, xv.off, 0);
+            ins.x = idx;
+            self.node(ins, vec![xv.off], writes);
+        }
+    }
+
     /// Orders the nodes, assigns sources and builds the program.
     fn finish(mut self) -> Program {
-        // Sources: one bit per domain and per input slot while they last,
-        // shared beyond that; bit 63 is the host (memory writes).
-        let nd = self.domains.len();
-        let dom_bits = nd.min(32);
-        for (i, d) in self.domains.iter_mut().enumerate() {
-            d.bit = 1 << i.min(dom_bits.saturating_sub(1));
-        }
-        let first_input = dom_bits.max(1);
-        for (k, &off) in self.inputs.iter().enumerate() {
-            let bit = 1u64 << (first_input + k).min(62);
-            for j in 0..nwords(self.width[off as usize]) {
-                self.src[(off + j) as usize] = bit;
-            }
-        }
-        for &(off, dom) in &self.state_domain {
-            let bit = self.domains[dom as usize].bit;
-            for j in 0..nwords(self.width[off as usize]) {
-                self.src[(off + j) as usize] |= bit;
-            }
-        }
-        for (mi, reads) in self.mem_reads.iter().enumerate() {
-            let mut bits = HOST;
-            for &d in &self.mem_writers[mi] {
-                bits |= self.domains[d as usize].bit;
-            }
-            for &n in reads {
-                self.nodes[n].extra |= bits;
-            }
-        }
-
         let sccs = self.sccs();
-        let mut node_mask = vec![0u64; self.nodes.len()];
         let mut ops = Vec::with_capacity(self.nodes.len());
-        let mut op_masks = Vec::with_capacity(self.nodes.len());
+        let mut out = Vec::with_capacity(self.nodes.len());
+        // The instruction that heads each node's unit (itself, or the
+        // `Loop` of its group).
+        let mut head = vec![0u32; self.nodes.len()];
         for scc in &sccs {
-            let mut mask = 0;
-            for &n in scc {
-                let node = &self.nodes[n];
-                mask |= node.extra;
-                for &r in &node.reads {
-                    mask |= self.src[r as usize];
-                    let w = self.writer[r as usize];
-                    if w != NONE && !scc.contains(&(w as usize)) {
-                        mask |= node_mask[w as usize];
-                    }
-                }
-            }
-            for &n in scc {
-                node_mask[n] = mask;
-            }
             let looped = scc.len() > 1 || {
                 let n = &self.nodes[scc[0]];
                 !matches!(n.ins.k, K::Latch | K::Arst)
@@ -880,14 +929,73 @@ impl Builder<'_> {
                 }
                 let mut ins = Ins::new(K::Loop, 0, 0, scc.len() as u32, start);
                 ins.c = count;
+                for &n in scc {
+                    head[n] = ops.len() as u32;
+                }
                 ops.push(ins);
-                op_masks.push(mask);
+                out.push(Out::default());
             }
             for &n in scc {
-                ops.push(self.nodes[n].ins);
-                op_masks.push(mask);
+                if !looped {
+                    head[n] = ops.len() as u32;
+                }
+                let ins = self.nodes[n].ins;
+                ops.push(ins);
+                out.push(Out { n: nwords(self.width[ins.d as usize]), lo: 0, hi: 0 });
             }
         }
+        // Gated flip-flops follow, each domain from a multiple of 64.
+        let mut units = (ops.len() as u32).next_multiple_of(64);
+        for d in &mut self.domains {
+            d.base = units;
+            units += (d.gated.len() as u32).next_multiple_of(64);
+        }
+        // Readers of each slot, by unit.
+        let words = self.val.len();
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
+        for (n, node) in self.nodes.iter().enumerate() {
+            for &r in &node.reads {
+                if self.kind[r as usize] != SlotKind::Const {
+                    pairs.push((r, head[n]));
+                }
+            }
+        }
+        for (dom, idx, reads) in &self.gated_reads {
+            let unit = self.domains[*dom as usize].base + idx;
+            for &r in reads {
+                pairs.push((r, unit));
+            }
+        }
+        let mut state_unit = vec![NONE; words];
+        for &(q, dom, idx) in &self.gated_q {
+            state_unit[q as usize] = self.domains[dom as usize].base + idx;
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut rd_start = vec![0u32; words + 1];
+        for &(s, _) in &pairs {
+            rd_start[s as usize + 1] += 1;
+        }
+        for i in 0..words {
+            rd_start[i + 1] += rd_start[i];
+        }
+        let rd: Vec<u32> = pairs.iter().map(|&(_, u)| u).collect();
+        for (o, ins) in out.iter_mut().zip(&ops) {
+            if ins.k != K::Loop {
+                o.lo = rd_start[ins.d as usize];
+                o.hi = rd_start[ins.d as usize + 1];
+            }
+        }
+        let mem_readers: Vec<Vec<u32>> = self
+            .mem_reads
+            .iter()
+            .map(|nodes| {
+                let mut h: Vec<u32> = nodes.iter().map(|&n| head[n]).collect();
+                h.sort_unstable();
+                h.dedup();
+                h
+            })
+            .collect();
 
         let m = self.m;
         let mut signals = Vec::new();
@@ -906,11 +1014,16 @@ impl Builder<'_> {
             mem_init_val: self.mem_val,
             mem_init_unk: if four { self.mem_unk } else { Vec::new() },
             ops,
-            op_masks,
+            out,
+            units,
+            state_unit,
+            rd_start,
+            rd,
+            mem_readers,
+            slot_of: self.slot_of,
             aux: self.aux,
             domains: self.domains,
             clocks: self.clocks,
-            word_src: self.src,
             word_kind: self.kind,
             signals,
             warnings: self.warnings,
