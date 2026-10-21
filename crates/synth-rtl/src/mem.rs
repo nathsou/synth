@@ -7,7 +7,7 @@ use crate::{BinaryOp, CellId, CellKind, Clock, Control, Dff, MemId, Module, Port
 
 /// Uses of every signal bit (cell inputs, memory ports, connections and
 /// output ports).
-fn use_counts(m: &Module) -> FxHashMap<SigBit, u32> {
+pub fn use_counts(m: &Module) -> FxHashMap<SigBit, u32> {
     let mut u: FxHashMap<SigBit, u32> = FxHashMap::default();
     let mut add = |b: SigBit| *u.entry(b).or_default() += 1;
     for c in m.cells.iter().filter(|c| c.alive) {
@@ -38,7 +38,7 @@ fn use_counts(m: &Module) -> FxHashMap<SigBit, u32> {
 }
 
 /// Flip-flop bits by their `q` (or `d`) signal bit.
-fn ff_bits(m: &Module, by_d: bool) -> FxHashMap<SigBit, (CellId, usize)> {
+pub fn ff_bits(m: &Module, by_d: bool) -> FxHashMap<SigBit, (CellId, usize)> {
     let mut map = FxHashMap::default();
     for (ci, c) in m.cells.iter_enumerated() {
         if c.alive
@@ -54,7 +54,7 @@ fn ff_bits(m: &Module, by_d: bool) -> FxHashMap<SigBit, (CellId, usize)> {
 }
 
 /// Removes bits from a flip-flop cell (splitting it).
-fn drop_ff_bits(m: &mut Module, ci: CellId, drop: &[usize]) {
+pub fn drop_ff_bits(m: &mut Module, ci: CellId, drop: &[usize]) {
     let CellKind::Dff(d) = &m.cells[ci].kind else { unreachable!() };
     let keep: Vec<usize> = (0..d.q.width()).filter(|j| !drop.contains(j)).collect();
     let pick = |s: &Sig| -> Sig { keep.iter().map(|&j| s.0[j]).collect() };

@@ -2,7 +2,8 @@
 //! multiple read ports and split width/depth to preserve write enables.
 use synth_core::{FxHashMap, Logic, LogicVec};
 use synth_rtl::{
-    Attr, BinaryOp, CellKind, Control, Dff, Instance, MemId, Memory, Module, PortDir, Sig, SigBit,
+    Attr, BinaryOp, CellId, CellKind, Clock, Control, Dff, Instance, MemId, Memory, Module,
+    PortDir, Sig, SigBit,
 };
 
 pub(crate) fn eligible(mem: &Memory) -> bool {
@@ -275,4 +276,182 @@ pub(crate) fn map(m: &mut Module, mi: MemId, read_init: &FxHashMap<SigBit, Logic
     }
     m.memories[mi].alive = false;
     count
+}
+
+/// Moves flip-flops that only register a block RAM's read data into the
+/// RAM's output register (DOA_REG, and DOB_REG for the upper half of a
+/// 36-bit SDP word), with their clock enable and synchronous reset. Every used
+/// output bit must feed exactly one such flip-flop, with one shared clock (the
+/// read clock) and set of controls, and no asynchronous reset. The RAM output
+/// latch and the register share INIT, so their power-on values must agree.
+/// Returns the number of block RAMs changed.
+pub(crate) fn absorb_output_registers(m: &mut Module) -> usize {
+    let uses = synth_rtl::mem::use_counts(m);
+    let by_d = synth_rtl::mem::ff_bits(m, true);
+    let mut drops: FxHashMap<CellId, Vec<usize>> = FxHashMap::default();
+    let mut n = 0;
+    for ci in m.live_cells().collect::<Vec<_>>() {
+        let CellKind::Instance(inst) = &m.cells[ci].kind else { continue };
+        let param = |name: &str| inst.params.iter().find(|(p, _)| p == name).map(|(_, v)| v);
+        let int = |name: &str| match param(name) {
+            Some(Attr::Const(v)) => v.to_u64(),
+            _ => None,
+        };
+        let sdp = matches!(param("RAM_MODE"), Some(Attr::Str(s)) if s == "SDP");
+        if inst.module != "RAMB18E1" || int("DOA_REG") != Some(0) || int("DOB_REG") != Some(0) {
+            continue;
+        }
+        let conn = |pin: &str| inst.conns.iter().find(|(p, _, _)| p == pin).map(|(_, _, s)| s);
+        let Some(clk) = conn("CLKARDCLK") else { continue };
+        // Each read output: its pin and bit, and its INIT/SRVAL port and bit
+        // (SDP packs both ports' data, then both ports' parity).
+        let pins: &[(&str, usize, usize)] = if sdp {
+            &[("DOADO", 0, 0), ("DOBDO", 1, 0), ("DOPADOP", 0, 16), ("DOPBDOP", 1, 16)]
+        } else {
+            &[("DOADO", 0, 0), ("DOPADOP", 0, 16)]
+        };
+        let mut outputs = Vec::new();
+        for &(pin, port, base) in pins {
+            let Some(sig) = conn(pin) else { continue };
+            for (i, &b) in sig.iter().enumerate() {
+                outputs.push((pin, i, port, base + i, b));
+            }
+        }
+        let clock = Clock { sig: clk.0[0], posedge: int("IS_CLKARDCLK_INVERTED") != Some(1) };
+        let latch_init = |name: &str| match param(name) {
+            Some(Attr::Const(v)) => v.bits().collect::<Vec<_>>(),
+            _ => vec![Logic::Zero; 18],
+        };
+        let mut init = [latch_init("INIT_A"), latch_init("INIT_B")];
+        // (output index, flip-flop cell, bit) for each used output.
+        let mut found = Vec::new();
+        let mut only_ffs = true;
+        for (k, &(_, _, _, _, b)) in outputs.iter().enumerate() {
+            match (uses.get(&b).copied().unwrap_or(0), by_d.get(&b)) {
+                (0, _) => {}
+                (1, Some(&(f, j))) => found.push((k, f, j)),
+                _ => only_ffs = false,
+            }
+        }
+        if !only_ffs || found.is_empty() {
+            continue;
+        }
+        let dff = |f: CellId| match &m.cells[f].kind {
+            CellKind::Dff(d) => d.as_ref(),
+            _ => unreachable!(),
+        };
+        let first = dff(found[0].1);
+        let same = |d: &Dff| {
+            d.clk == clock
+                && d.arst.is_none()
+                && d.en == first.en
+                && d.srst.as_ref().map(|s| s.0) == first.srst.as_ref().map(|s| s.0)
+                && (d.en_over_srst == first.en_over_srst || d.en.is_none() || d.srst.is_none())
+        };
+        if !found.iter().all(|&(_, f, _)| same(dff(f))) {
+            continue;
+        }
+        let mut srval = [vec![Logic::Zero; 18], vec![Logic::Zero; 18]];
+        let mut q: Vec<SigBit> = outputs.iter().map(|o| o.4).collect();
+        let mut agree = true;
+        for &(k, f, j) in &found {
+            let (_, _, port, bit, _) = outputs[k];
+            let d = dff(f);
+            match (d.init.get(j), init[port][bit]) {
+                (r, _) if !r.is_known() => {}
+                (r, l) if !l.is_known() => init[port][bit] = r,
+                (r, l) => agree &= r == l,
+            }
+            if let Some((_, v)) = &d.srst {
+                srval[port][bit] = if v.get(j).is_known() { v.get(j) } else { Logic::Zero };
+            }
+            q[k] = d.q.0[j];
+        }
+        if !agree {
+            continue;
+        }
+        let (en, srst, en_over_srst) =
+            (first.en, first.srst.as_ref().map(|s| s.0), first.en_over_srst);
+        let regce = match en {
+            None => SigBit::ONE,
+            Some(c) if c.pol => c.sig,
+            Some(c) => m.not1(c.sig),
+        };
+        // A register may span several block RAMs: drop its bits at the end,
+        // keeping the indices found here valid.
+        for &(_, f, j) in &found {
+            drops.entry(f).or_default().push(j);
+        }
+        let CellKind::Instance(inst) = &mut m.cells[ci].kind else { unreachable!() };
+        for (pin, _, s) in inst.conns.iter_mut() {
+            for (k, o) in outputs.iter().enumerate() {
+                if o.0 == pin.as_str() {
+                    s.0[o.1] = q[k];
+                }
+            }
+            match pin.as_str() {
+                "REGCEAREGCE" => *s = Sig::bit(regce),
+                "RSTREGARSTREG" => *s = Sig::bit(srst.map_or(SigBit::ZERO, |c| c.sig)),
+                _ => {}
+            }
+        }
+        let priority =
+            if en_over_srst && en.is_some() && srst.is_some() { "REGCE" } else { "RSTREG" };
+        let set = |inst: &mut Instance, name: &str, v: Attr| {
+            inst.params.retain(|(p, _)| p != name);
+            inst.params.push((name.into(), v));
+        };
+        let one = Attr::Const(LogicVec::from_u64(1, 32));
+        set(inst, "DOA_REG", one.clone());
+        if sdp {
+            set(inst, "DOB_REG", one);
+        }
+        for (port, ab) in ["A", "B"].iter().enumerate() {
+            set(inst, &format!("INIT_{ab}"), Attr::Const(LogicVec::from_bits(&init[port])));
+            set(inst, &format!("SRVAL_{ab}"), Attr::Const(LogicVec::from_bits(&srval[port])));
+        }
+        set(inst, "RSTREG_PRIORITY_A", Attr::Str(priority.into()));
+        let inverted = srst.is_some_and(|c| !c.pol) as u64;
+        set(inst, "IS_RSTREGARSTREG_INVERTED", Attr::Const(LogicVec::from_u64(inverted, 32)));
+        n += 1;
+    }
+    for (f, js) in drops {
+        synth_rtl::mem::drop_ff_bits(m, f, &js);
+    }
+    n
+}
+
+/// Whether a shallow memory with asynchronous reads should go to block RAM
+/// rather than LUT RAM: each read's data passes through two register stages
+/// (each bit read only by a flip-flop, whose output is again read only by a
+/// flip-flop, on one clock, with no asynchronous reset). The block RAM then
+/// absorbs both, its output latch and its output register, which LUT RAM
+/// leaves as flip-flops, and its registered output is fast.
+pub(crate) fn absorbs_read_pipeline(m: &Module, mi: MemId) -> bool {
+    let mem = &m.memories[mi];
+    if (mem.width as u64 * mem.depth as u64) < 512 || mem.writes.len() > 1 || mem.reads.is_empty() {
+        return false;
+    }
+    let uses = synth_rtl::mem::use_counts(m);
+    let by_d = synth_rtl::mem::ff_bits(m, true);
+    let stage = |b: &SigBit| -> Option<(SigBit, &Dff)> {
+        if uses.get(b).copied() != Some(1) {
+            return None;
+        }
+        let &(f, j) = by_d.get(b)?;
+        let CellKind::Dff(d) = &m.cells[f].kind else { return None };
+        d.arst.is_none().then_some((d.q.0[j], d.as_ref()))
+    };
+    // The first stage merges into the read port as merge_read_ffs does: one
+    // clock and enable, no reset.
+    mem.reads.iter().all(|rd| {
+        let mut first: Option<(Clock, Option<Control>)> = None;
+        rd.data.iter().all(|b| {
+            let Some((q, d1)) = stage(b) else { return false };
+            let Some((_, d2)) = stage(&q) else { return false };
+            d1.srst.is_none()
+                && d1.clk == d2.clk
+                && *first.get_or_insert((d1.clk, d1.en)) == (d1.clk, d1.en)
+        })
+    })
 }
