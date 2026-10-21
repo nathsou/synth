@@ -64,12 +64,13 @@ fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> 
 /// timing-driven placement.
 pub type Criticality<'a> = &'a mut dyn FnMut(&Placement) -> FxHashMap<(CellId, NetId), f32>;
 
-/// The weight of timing against wirelength in timing-driven placement:
-/// VPR's 0.5 lengthened wires enough on congested designs (Euler 48) to
-/// lose more in routing than placement gained; 0.25 helped or held on each
-/// design measured. The criticality exponent's range, raised as moves
-/// become local, is VPR's.
-pub(crate) const TIMING_TRADEOFF: f64 = 0.25;
+/// The weight of timing against wirelength in timing-driven placement, as
+/// in VPR and nextpnr. With permutable LUT inputs relieving congestion, it
+/// beats 0.25 on the Euler designs and narrows their spread over seeds;
+/// before, the longer wires cost more in routing than placement gained.
+/// The criticality exponent's range, raised as moves become local, is
+/// VPR's.
+pub(crate) const TIMING_TRADEOFF: f64 = 0.5;
 const CRITICALITY_EXPONENT: (f64, f64) = (1.0, 8.0);
 /// Temperatures between timing analyses of the placement.
 const RETIME_TEMPERATURES: usize = 4;
