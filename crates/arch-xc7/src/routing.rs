@@ -79,11 +79,49 @@ pub struct RoutingGraph {
     /// Lookahead class of each node.
     pub class: Vec<u16>,
     pub missing_timing: usize,
+    /// The first of each SLICE lane's six virtual sinks, by tile, site and
+    /// lane. Each is reached from any of the lane's LUT inputs A1-A6 (its
+    /// edge's pip is `(VIRTUAL, pin index)`), so a net routed to one picks
+    /// its LUT input: the LUT's pins are permutable, its INIT follows.
+    pub lane_sinks: FxHashMap<(u32, u32, u8), u32>,
+    /// Tile, site and lane of each lane's virtual sinks, from the first.
+    pub virtual_lanes: Vec<(u32, u32, u8)>,
+    /// The first virtual node.
+    pub first_virtual: u32,
 }
+/// The tile of a virtual edge's pip.
+pub const VIRTUAL: u32 = u32::MAX;
 impl RoutingGraph {
     pub fn new(db: &Device) -> Result<Self, String> {
-        let n = db.node_x.len();
+        let real = db.node_x.len();
+        // Each SLICE lane's LUT input nodes A1-A6.
+        let mut lanes: Vec<((u32, u32, u8), [u32; 6])> = Vec::new();
+        for (i, t) in db.tiles.iter().enumerate() {
+            for (si, site) in db.templates[t.template].sites.iter().enumerate() {
+                if !matches!(site.kind.as_str(), "SLICEL" | "SLICEM") {
+                    continue;
+                }
+                for l in 0..4u8 {
+                    let pins: Option<Vec<u32>> = (1..=6)
+                        .map(|k| {
+                            site.pins
+                                .get(&format!("{}{k}", char::from(b'A' + l)))
+                                .map(|&w| t.nodes[w as usize])
+                        })
+                        .collect();
+                    if let Some(pins) = pins {
+                        lanes.push(((i as u32, si as u32, l), pins.try_into().unwrap()));
+                    }
+                }
+            }
+        }
+        let n = real + 6 * lanes.len();
         let mut offsets = vec![0u32; n + 1];
+        for (_, pins) in &lanes {
+            for &pin in pins {
+                offsets[pin as usize + 1] += 6;
+            }
+        }
         for t in &db.tiles {
             for p in &db.templates[t.template].pips {
                 let src = t.nodes[p.src as usize];
@@ -108,6 +146,9 @@ impl RoutingGraph {
             cost: vec![1.0; n],
             class: vec![0; n],
             missing_timing: 0,
+            lane_sinks: FxHashMap::default(),
+            virtual_lanes: Vec::new(),
+            first_virtual: real as u32,
         };
         for (i, t) in db.tiles.iter().enumerate() {
             for (j, p) in db.templates[t.template].pips.iter().enumerate() {
@@ -127,10 +168,28 @@ impl RoutingGraph {
                 }
             }
         }
+        for (k, &(key, pins)) in lanes.iter().enumerate() {
+            let first = (real + 6 * k) as u32;
+            let tile = &db.tiles[key.0 as usize];
+            for _ in 0..6 {
+                graph.x.push(tile.x);
+                graph.y.push(tile.y);
+            }
+            for (pin, &src) in pins.iter().enumerate() {
+                for v in 0..6 {
+                    let e = offsets[src as usize] as usize;
+                    offsets[src as usize] += 1;
+                    graph.dst[e] = first + v;
+                    graph.pip[e] = (VIRTUAL, pin as u32);
+                }
+            }
+            graph.lane_sinks.insert(key, first);
+            graph.virtual_lanes.push(key);
+        }
         // Nodes are classed by the wire they start as, ignoring its index:
         // wires of a type (a hex wire, a logic block's input) have like
         // remaining costs to a sink at like distances.
-        let mut seen = vec![false; n];
+        let mut seen = vec![false; real];
         let mut names: FxHashMap<&str, u16> = FxHashMap::default();
         for t in &db.tiles {
             for (w, &node) in t.nodes.iter().enumerate() {
@@ -143,6 +202,8 @@ impl RoutingGraph {
                 graph.class[node as usize] = *names.entry(name).or_insert(next);
             }
         }
+        let class = u16::try_from(names.len()).map_err(|_| "too many wire classes")?;
+        graph.class[real..].fill(class);
         Ok(graph)
     }
     pub fn graph(&self) -> synth_route::Graph<'_> {
@@ -164,6 +225,9 @@ impl RoutingGraph {
         for r in routes {
             for &e in &r.edges {
                 let (t, p) = self.pip[e as usize];
+                if t == VIRTUAL {
+                    continue;
+                }
                 let tile = &db.tiles[t as usize];
                 for feature in &db.templates[tile.template].pips[p as usize].config {
                     // The single-site tile's logical Y0 uses the upper half
@@ -183,6 +247,9 @@ impl RoutingGraph {
         for r in routes {
             for &e in &r.edges {
                 let (ti, pi) = self.pip[e as usize];
+                if ti == VIRTUAL {
+                    continue;
+                }
                 let t = &db.tiles[ti as usize];
                 let p = &db.templates[t.template].pips[pi as usize];
                 used.insert((ti as usize, p.src as usize));

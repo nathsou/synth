@@ -69,7 +69,7 @@ pub type Criticality<'a> = &'a mut dyn FnMut(&Placement) -> FxHashMap<(CellId, N
 /// lose more in routing than placement gained; 0.25 helped or held on each
 /// design measured. The criticality exponent's range, raised as moves
 /// become local, is VPR's.
-const TIMING_TRADEOFF: f64 = 0.25;
+pub(crate) const TIMING_TRADEOFF: f64 = 0.25;
 const CRITICALITY_EXPONENT: (f64, f64) = (1.0, 8.0);
 /// Temperatures between timing analyses of the placement.
 const RETIME_TEMPERATURES: usize = 4;
