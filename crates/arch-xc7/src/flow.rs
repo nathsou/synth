@@ -63,6 +63,12 @@ pub fn implement(
         "detailed placement: {moves} lane moves ({:.1}s)",
         start.elapsed().as_secs_f64()
     ));
+    if let Ok(path) = std::env::var("SYNTH_XC7_PLACEMENT") {
+        std::fs::write(&path, placement_xdc(&nl, &p, &placement)).map_err(|e| e.to_string())?;
+    }
+    if let Ok(path) = std::env::var("SYNTH_XC7_MACROS") {
+        std::fs::write(&path, packing_macros(&nl, &p)).map_err(|e| e.to_string())?;
+    }
     let graph = RoutingGraph::new(&db)?;
     let (mut requests, names, request_nets, owners, blocked_edges) =
         requests(&db, &nl, &p, &placement, &graph)?;
@@ -295,13 +301,7 @@ fn predictor<'a>(
     move |c, n| {
         let Some(d) = nl.nets[n].driver else { return 0.0 };
         match (location(db, p, pl, d.cell), location(db, p, pl, c)) {
-            (Some((a, sa)), Some((b, sb))) if a == b => {
-                if sa == sb {
-                    0.0
-                } else {
-                    150.0
-                }
-            }
+            (Some((a, sa)), Some((b, sb))) if a == b && sa == sb => 0.0,
             (Some(((ax, ay), _)), Some(((bx, by), _))) => {
                 crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
             }
@@ -951,4 +951,125 @@ fn cell_features(
         }
     }
     Ok(f)
+}
+
+/// The placement as Vivado BEL and LOC constraints on the netlist's cells
+/// (a development aid: Vivado can then route and time synth's placement of
+/// its own netlist). Cells Vivado renames are skipped by the guard.
+fn placement_xdc(nl: &Netlist, p: &Packed, pl: &Placement) -> String {
+    let mut out = String::new();
+    let mut add = |c: CellId, bel: Option<String>, site: &str| {
+        let name = nl.str(nl.cells[c].name);
+        // Cells Vivado renamed or made constant drivers are skipped.
+        out.push_str(&format!("if {{[llength [get_cells -quiet {{{name}}}]]}} {{ catch {{\n"));
+        if let Some(bel) = bel {
+            out.push_str(&format!("  set_property BEL {bel} [get_cells {{{name}}}]\n"));
+        }
+        out.push_str(&format!("  set_property LOC {site} [get_cells {{{name}}}]\n}} }}\n"));
+    };
+    for (s, slice) in p.slices.iter().enumerate() {
+        let site = &pl.slices[s].name;
+        for l in 0..4 {
+            let lane = char::from(b'A' + l as u8);
+            if let Some(c) = slice.luts[l].filter(|c| !p.constant_luts.values().any(|k| k == c)) {
+                add(c, Some(format!("{lane}6LUT")), site);
+            }
+            if let Some(c) = slice.lut5[l] {
+                add(c, Some(format!("{lane}5LUT")), site);
+            }
+            if let Some(c) = slice.ffs[l] {
+                add(c, Some(format!("{lane}FF")), site);
+            }
+            if let Some(c) = slice.ffs[l + 4] {
+                add(c, Some(format!("{lane}5FF")), site);
+            }
+        }
+        if let Some(c) = slice.carry {
+            add(c, Some("CARRY4".into()), site);
+        }
+        if let Some(c) = slice.ram {
+            add(c, None, site);
+        }
+        for (i, c) in slice.f7.iter().enumerate() {
+            if let Some(c) = c {
+                add(*c, Some(format!("F7{}MUX", if i == 0 { 'A' } else { 'B' })), site);
+            }
+        }
+        if let Some(c) = slice.f8 {
+            add(c, Some("F8MUX".into()), site);
+        }
+    }
+    for (c, site) in pl.rams.iter().chain(&pl.dsps) {
+        add(*c, None, &site.name);
+    }
+    out
+}
+
+/// synth's packing as Vivado relatively placed macros (a development aid):
+/// each carry chain or single slice becomes a macro whose cells keep their
+/// BELs and rows, so Vivado's placer places synth's slices.
+fn packing_macros(nl: &Netlist, p: &Packed) -> String {
+    let mut out = String::new();
+    let chained: std::collections::BTreeSet<usize> = p.chains.iter().flatten().copied().collect();
+    let groups = p
+        .chains
+        .iter()
+        .cloned()
+        .chain((0..p.slices.len()).filter(|s| !chained.contains(s)).map(|s| vec![s]));
+    for (k, group) in groups.enumerate() {
+        let mut cells = Vec::new();
+        for (row, &s) in group.iter().enumerate() {
+            let slice = &p.slices[s];
+            if slice.ram.is_some() {
+                cells.clear();
+                break;
+            }
+            let mut add = |c: CellId, bel: &str| {
+                if !p.constant_luts.values().any(|k| *k == c) {
+                    cells.push((nl.str(nl.cells[c].name).to_string(), bel.to_string(), row));
+                }
+            };
+            for l in 0..4 {
+                let lane = char::from(b'A' + l as u8);
+                if let Some(c) = slice.luts[l] {
+                    add(c, &format!("{lane}6LUT"));
+                }
+                if let Some(c) = slice.lut5[l] {
+                    add(c, &format!("{lane}5LUT"));
+                }
+                if let Some(c) = slice.ffs[l] {
+                    add(c, &format!("{lane}FF"));
+                }
+                if let Some(c) = slice.ffs[l + 4] {
+                    add(c, &format!("{lane}5FF"));
+                }
+            }
+            if let Some(c) = slice.carry {
+                add(c, "CARRY4");
+            }
+            for (i, c) in slice.f7.iter().enumerate() {
+                if let Some(c) = c {
+                    add(*c, &format!("F7{}MUX", if i == 0 { 'A' } else { 'B' }));
+                }
+            }
+            if let Some(c) = slice.f8 {
+                add(c, "F8MUX");
+            }
+        }
+        if cells.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = cells.iter().map(|(n, _, _)| format!("{{{n}}}")).collect();
+        out.push_str(&format!("set cells [get_cells -quiet [list {}]]\n", names.join(" ")));
+        out.push_str(&format!("if {{[llength $cells] == {}}} {{\n", cells.len()));
+        for (n, bel, _) in &cells {
+            out.push_str(&format!("  set_property BEL {bel} [get_cells {{{n}}}]\n"));
+        }
+        out.push_str(&format!("  create_macro m{k}\n  update_macro m{k} [list"));
+        for (n, _, row) in &cells {
+            out.push_str(&format!(" {{{n}}} X0Y{row}"));
+        }
+        out.push_str("]\n}\n");
+    }
+    out
 }

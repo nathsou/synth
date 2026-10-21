@@ -162,7 +162,8 @@ impl RoutingGraph {
                 graph.dst[e] = dst;
                 graph.pip[e] = (i as u32, j as u32);
                 // Unknown timing gets a routing heuristic, never a reported timing arc.
-                graph.delay[e] = p.delay.unwrap_or(if p.fixed { 0.0 } else { 100.0 });
+                graph.delay[e] = p.delay.unwrap_or(if p.fixed { 0.0 } else { 100.0 })
+                    * crate::device::VENDOR_SCALE;
                 if p.delay.is_none() && !p.fixed {
                     graph.missing_timing += 1;
                 }

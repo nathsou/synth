@@ -91,6 +91,8 @@ struct Model {
     srl_clk_o: f64,
     srl_setup: f64,
     bram_clk_o: f64,
+    /// Clock to output through the optional output register.
+    bram_clk_o_reg: f64,
     bram_setup: f64,
     dsp: Dsp,
 }
@@ -276,6 +278,16 @@ impl Model {
                 .map(|(_, &(_, max))| max * 1000.0)
                 .reduce(f64::max)
                 .ok_or("no SDF timing for block RAM outputs")?,
+            // The registered outputs are the fastest clock-to-output arcs.
+            bram_clk_o_reg: a
+                .sdf
+                .iter()
+                .flat_map(|s| s.cells.values())
+                .flat_map(|c| c.propagation.iter())
+                .filter(|((f, t), _)| f.starts_with("CLK") && t.starts_with("DO"))
+                .map(|(_, &(_, max))| max * 1000.0)
+                .reduce(f64::min)
+                .ok_or("no SDF timing for block RAM outputs")?,
             bram_setup: a
                 .sdf
                 .iter()
@@ -323,38 +335,44 @@ fn net_delays(
             }
             let mut t = delay.get(&at).copied().unwrap_or(0.0);
             for &e in path.iter().rev() {
-                let (ti, pi) = graph.pip[e as usize];
-                if ti == crate::routing::VIRTUAL {
+                if graph.pip[e as usize].0 == crate::routing::VIRTUAL {
                     continue;
                 }
-                let tile = &db.tiles[ti as usize];
-                let tmpl = &db.templates[tile.template];
-                let pip = &tmpl.pips[pi as usize];
-                // The distance from the pip driving this pip's input wire.
-                let src_len = parent
-                    .get(&edge_src(graph, e))
-                    .filter(|&&d| graph.pip[d as usize].0 != crate::routing::VIRTUAL)
-                    .map(|&d| {
-                        let from = &db.tiles[graph.pip[d as usize].0 as usize];
-                        i32::from((from.x - tile.x).abs()) + i32::from((from.y - tile.y).abs())
-                    })
-                    .unwrap_or(1)
-                    .max(1) as f64;
-                let (src_r, _) = tmpl.wire_rc[pip.src as usize];
-                let (_, dst_c) = tmpl.wire_rc[pip.dst as usize];
-                // Resistance in ohms and capacitance in fF: ohm x fF / 1000 = ps.
-                let r = src_len * f64::from(src_r) + f64::from(pip.res);
-                let mut d = f64::from(pip.delay.unwrap_or(0.0)) + r * f64::from(pip.cap) / 1000.0;
-                if !pip.buffered {
-                    d += (f64::from(src_r) + f64::from(pip.res)) * f64::from(dst_c) / 1000.0;
-                }
-                t += d;
+                t += pip_delay(db, graph, &parent, e);
                 delay.insert(graph.dst[e as usize], t);
             }
             out.insert((i, sink), t);
         }
     }
     out
+}
+
+/// The delay of routing edge `e` (a real pip) within a route tree whose
+/// edge into each node is `parent`.
+fn pip_delay(db: &Device, graph: &RoutingGraph, parent: &FxHashMap<u32, u32>, e: u32) -> f64 {
+    let (ti, pi) = graph.pip[e as usize];
+    let tile = &db.tiles[ti as usize];
+    let tmpl = &db.templates[tile.template];
+    let pip = &tmpl.pips[pi as usize];
+    // The distance from the pip driving this pip's input wire.
+    let src_len = parent
+        .get(&edge_src(graph, e))
+        .filter(|&&d| graph.pip[d as usize].0 != crate::routing::VIRTUAL)
+        .map(|&d| {
+            let from = &db.tiles[graph.pip[d as usize].0 as usize];
+            i32::from((from.x - tile.x).abs()) + i32::from((from.y - tile.y).abs())
+        })
+        .unwrap_or(1)
+        .max(1) as f64;
+    let (src_r, _) = tmpl.wire_rc[pip.src as usize];
+    let (_, dst_c) = tmpl.wire_rc[pip.dst as usize];
+    // Resistance in ohms and capacitance in fF: ohm x fF / 1000 = ps.
+    let r = src_len * f64::from(src_r) + f64::from(pip.res);
+    let mut d = f64::from(pip.delay.unwrap_or(0.0)) + r * f64::from(pip.cap) / 1000.0;
+    if !pip.buffered {
+        d += (f64::from(src_r) + f64::from(pip.res)) * f64::from(dst_c) / 1000.0;
+    }
+    d * f64::from(crate::device::VENDOR_SCALE)
 }
 
 fn edge_src(graph: &RoutingGraph, e: u32) -> u32 {
@@ -486,7 +504,12 @@ impl<'a> Timer<'a> {
             } else if pack::is_ram(k) {
                 ("WCLK", "IS_WCLK_INVERTED", model.lutram_clk_o, model.lutram_setup)
             } else if k == "RAMB18E1" {
-                ("CLKARDCLK", "IS_CLKARDCLK_INVERTED", model.bram_clk_o, model.bram_setup)
+                let clk_to_out = if pack::param(nl, c, "DOA_REG", 0) != 0 {
+                    model.bram_clk_o_reg
+                } else {
+                    model.bram_clk_o
+                };
+                ("CLKARDCLK", "IS_CLKARDCLK_INVERTED", clk_to_out, model.bram_setup)
             } else {
                 continue;
             };
@@ -715,6 +738,9 @@ pub fn routed_wires(
     owners: &Owners,
 ) -> FxHashMap<(CellId, NetId), f64> {
     let routed = net_delays(db, graph, requests, routes);
+    if let Ok(path) = std::env::var("SYNTH_XC7_DELAYS") {
+        dump_delays(db, graph, requests, routes, &routed, &path);
+    }
     let mut wire: FxHashMap<(CellId, NetId), f64> = FxHashMap::default();
     for (i, req) in requests.iter().enumerate() {
         let Some(net) = request_nets[i] else { continue };
@@ -731,11 +757,81 @@ pub fn routed_wires(
     wire
 }
 
-/// nextpnr-xilinx's estimate of the routing delay between two tiles (ps),
-/// for timing before routing: vertical distance costs more than horizontal.
+/// Writes each routed connection's sink site pin (`SITE/PIN`; the LUT input
+/// a virtual sink was reached through), estimated delay and pips
+/// (`TILETYPE:SRC->DST=ps`), for comparing the routing delay model with
+/// vendor timing (a development aid).
+fn dump_delays(
+    db: &Device,
+    graph: &RoutingGraph,
+    requests: &[synth_route::NetRequest],
+    routes: &[synth_route::NetRoute],
+    routed: &FxHashMap<(usize, u32), f64>,
+    path: &str,
+) {
+    // Real sink node -> (delay, pips).
+    let mut real: FxHashMap<u32, (f64, String)> = FxHashMap::default();
+    for (i, (req, route)) in requests.iter().zip(routes).enumerate() {
+        let mut parent: FxHashMap<u32, u32> = FxHashMap::default();
+        for &e in &route.edges {
+            parent.insert(graph.dst[e as usize], e);
+        }
+        for &sink in &req.sinks {
+            let Some(&d) = routed.get(&(i, sink)) else { continue };
+            let mut pips = Vec::new();
+            let mut node = sink;
+            let mut at = sink;
+            while let Some(&e) = parent.get(&at) {
+                let (ti, pi) = graph.pip[e as usize];
+                if ti == crate::routing::VIRTUAL {
+                    node = edge_src(graph, e);
+                } else {
+                    let t = &db.tiles[ti as usize];
+                    let tmpl = &db.templates[t.template];
+                    let pip = &tmpl.pips[pi as usize];
+                    pips.push(format!(
+                        "{}:{}->{}={:.1}",
+                        tmpl.kind,
+                        tmpl.wires[pip.src as usize],
+                        tmpl.wires[pip.dst as usize],
+                        pip_delay(db, graph, &parent, e)
+                    ));
+                }
+                at = edge_src(graph, e);
+            }
+            pips.reverse();
+            let (dx, dy) = (
+                i32::from(graph.x[node as usize]) - i32::from(graph.x[req.source as usize]),
+                i32::from(graph.y[node as usize]) - i32::from(graph.y[req.source as usize]),
+            );
+            real.insert(node, (d, format!("@{dx},{dy},{} {}", req.sinks.len(), pips.join(" "))));
+        }
+    }
+    let mut lines = Vec::new();
+    for (ti, t) in db.tiles.iter().enumerate() {
+        let Ok(sites) = db.sites(ti) else { continue };
+        for (site, si) in sites {
+            for (pin, &w) in &db.templates[t.template].sites[si].pins {
+                if let Some((d, pips)) = real.get(&t.nodes[w as usize]) {
+                    lines.push(format!("{site}/{pin} {d:.1} {pips}\n"));
+                }
+            }
+        }
+    }
+    lines.sort();
+    let _ = std::fs::write(path, lines.concat());
+}
+
+/// The routing delay between two tiles before routing (ps): a piecewise
+/// linear fit of the routed connections between slices (calibrated delays,
+/// Euler 14, 43, 57 and 92), even within one tile, which routes through the
+/// interconnect. Nearby columns are about as close as one column; rows cost
+/// more until long wires take over.
 pub fn predicted_delay(dx: i32, dy: i32) -> f64 {
-    let (dx, dy) = (dx.abs(), dy.abs());
-    let base =
-        30 * dx.min(18) + 10 * (dx - 18).max(0) + 60 * dy.min(6) + 20 * (dy - 6).max(0) + 300;
-    f64::from(base) * 1.5
+    let (dx, dy) = (f64::from(dx.abs()), f64::from(dy.abs()));
+    428.0
+        + 15.7 * dx.min(8.0)
+        + 70.0 * (dx - 8.0).max(0.0)
+        + 60.0 * dy.min(5.0)
+        + 52.0 * (dy - 5.0).max(0.0)
 }
