@@ -98,16 +98,28 @@ fn reach(p: &Program, start: impl IntoIterator<Item = u32>) -> Vec<u32> {
     (0..n as u32).filter(|&u| seen[u as usize]).collect()
 }
 
-fn cones(p: &Program) -> Cones {
-    let mut inputs = Vec::new();
-    let mut w = 0;
-    while w < p.word_kind.len() {
-        let s = p.slot_of[w];
-        if s as usize == w && p.word_kind[w] == SlotKind::Input {
-            inputs.push((s, reach(p, readers(p, s).iter().copied())));
+/// The input slots the model can write: whole input ports.
+fn input_ports(p: &Program) -> Vec<u32> {
+    let mut slots = Vec::new();
+    for &(si, dir, _) in &p.ports {
+        let locs = &p.signals[si].1;
+        if dir != PortDir::Output
+            && !locs.is_empty()
+            && locs.len() <= 64
+            && let Some(Loc::Bit { word, bit: 0 }) = locs.first()
+            && p.word_kind[*word as usize] == SlotKind::Input
+            && p.slot_of[*word as usize] == *word
+            && !slots.contains(word)
+        {
+            slots.push(*word);
         }
-        w += 1;
     }
+    slots
+}
+
+fn cones(p: &Program) -> Cones {
+    let inputs =
+        input_ports(p).into_iter().map(|s| (s, reach(p, readers(p, s).iter().copied()))).collect();
     let mut domains = Vec::new();
     for d in &p.domains {
         let mut start = Vec::new();
@@ -124,12 +136,160 @@ fn cones(p: &Program) -> Cones {
     Cones { inputs, domains, host }
 }
 
+/// The slots a unit writes.
+fn unit_writes(p: &Program, u: u32) -> Vec<u32> {
+    let ins = &p.ops[u as usize];
+    match ins.k {
+        K::Loop => p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize]
+            .iter()
+            .map(|&w| p.slot_of[w as usize])
+            .collect(),
+        K::Decode => p.aux.decoders[ins.x as usize].entries.iter().map(|e| e.1).collect(),
+        _ => vec![ins.d],
+    }
+}
+
+/// Reorders `units` (in evaluation order) so that units with the same mask
+/// follow each other where dependencies allow, keeping every unit after
+/// those it reads.
+fn cluster(p: &Program, units: &[u32], mask: &[u64]) -> Vec<u32> {
+    let pos: std::collections::HashMap<u32, usize> =
+        units.iter().enumerate().map(|(i, &u)| (u, i)).collect();
+    let n = units.len();
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0u32; n];
+    for (i, &u) in units.iter().enumerate() {
+        let mut seen = Vec::new();
+        for w in unit_writes(p, u) {
+            for r in readers(p, w) {
+                if let Some(&j) = pos.get(r)
+                    && j != i
+                    && !seen.contains(&j)
+                {
+                    seen.push(j);
+                    succ[i].push(j);
+                    indeg[j] += 1;
+                }
+            }
+        }
+    }
+    // Ready units by mask, in order.
+    let mut ready: std::collections::BTreeMap<u64, std::collections::BTreeSet<usize>> =
+        Default::default();
+    for i in 0..n {
+        if indeg[i] == 0 {
+            ready.entry(mask[units[i] as usize]).or_default().insert(i);
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut cur: Option<u64> = None;
+    while out.len() < n {
+        let mk = match cur {
+            Some(m) if ready.get(&m).is_some_and(|s| !s.is_empty()) => m,
+            _ => {
+                // The mask whose earliest ready unit comes first.
+                *ready
+                    .iter()
+                    .filter(|(_, s)| !s.is_empty())
+                    .min_by_key(|(_, s)| *s.iter().next().unwrap())
+                    .unwrap()
+                    .0
+            }
+        };
+        let set = ready.get_mut(&mk).unwrap();
+        let i = *set.iter().next().unwrap();
+        set.remove(&i);
+        cur = Some(mk);
+        out.push(units[i]);
+        for &j in &succ[i] {
+            indeg[j] -= 1;
+            if indeg[j] == 0 {
+                ready.entry(mask[units[j] as usize]).or_default().insert(j);
+            }
+        }
+    }
+    out
+}
+
+/// What a domain's edge changes, in at most 64 groups, and which groups
+/// each instruction of its cone depends on. An edge sets the bits of the
+/// groups it changed; the cone then runs only what depends on them.
+struct Groups {
+    /// Group of each commit and gated update, then of each memory write.
+    commit: Vec<u32>,
+    write: Vec<u32>,
+    /// Per unit (instruction index): the groups it depends on.
+    mask: Vec<u64>,
+}
+
+fn bitset(n: usize, units: &[u32]) -> Vec<u64> {
+    let mut b = vec![0u64; n.div_ceil(64)];
+    for &u in units {
+        b[u as usize / 64] |= 1 << (u % 64);
+    }
+    b
+}
+
+fn groups(p: &Program, d: &Domain) -> Groups {
+    let n = p.ops.len();
+    // Sources: each state update and each memory write, with what it reaches.
+    let mut reach_of: Vec<Vec<u64>> = Vec::new();
+    for ins in d.commit.iter().chain(&d.gated) {
+        reach_of.push(bitset(n, &reach(p, readers(p, ins.d).iter().copied())));
+    }
+    for ins in &d.write {
+        let mem = p.aux.writes[ins.x as usize].mem as usize;
+        reach_of.push(bitset(n, &reach(p, p.mem_readers[mem].iter().copied())));
+    }
+    // Merge the closest groups (fewest units reached by one but not the
+    // other) until at most 64 remain.
+    let mut members: Vec<Vec<usize>> = (0..reach_of.len()).map(|i| vec![i]).collect();
+    let mut sets = reach_of;
+    let dist =
+        |a: &[u64], b: &[u64]| -> u32 { a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum() };
+    while sets.len() > 64 {
+        let mut best = (u32::MAX, 0, 1);
+        for i in 0..sets.len() {
+            for j in i + 1..sets.len() {
+                let dd = dist(&sets[i], &sets[j]);
+                if dd < best.0 {
+                    best = (dd, i, j);
+                }
+            }
+        }
+        let (_, i, j) = best;
+        let sj = sets.swap_remove(j);
+        let mj = members.swap_remove(j);
+        for (a, b) in sets[i].iter_mut().zip(sj) {
+            *a |= b;
+        }
+        members[i].extend(mj);
+    }
+    let nsrc = d.commit.len() + d.gated.len() + d.write.len();
+    let mut group_of = vec![0u32; nsrc];
+    let mut mask = vec![0u64; n];
+    for (g, (ms, set)) in members.iter().zip(&sets).enumerate() {
+        for &m in ms {
+            group_of[m] = g as u32;
+        }
+        for u in 0..n {
+            if set[u / 64] >> (u % 64) & 1 != 0 {
+                mask[u] |= 1 << g;
+            }
+        }
+    }
+    let nc = d.commit.len() + d.gated.len();
+    Groups { commit: group_of[..nc].to_vec(), write: group_of[nc..].to_vec(), mask }
+}
+
 struct Emitter<'p> {
     p: &'p Program,
     prefix: String,
     out: String,
     /// Temporaries for loops.
     tmp: usize,
+    /// Set by a memory write when it writes: (domain, group).
+    on_write: Option<(usize, u32)>,
 }
 
 /// `v[i]` for a word.
@@ -365,6 +525,9 @@ impl Emitter<'_> {
                     };
                     self.line(&format!("{el} = ({ty})(({el} & ~{e}) | ({dv} & {e}));"));
                 }
+                if let Some((dom, g)) = self.on_write {
+                    self.line(&format!("m->changed[{dom}] |= {};", hex(1u64 << g)));
+                }
                 self.line("} }");
             }
             K::MemRdSync => {
@@ -496,6 +659,26 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// Emits the units of a domain's cone, each run of units depending on
+    /// the same groups under one test of what changed.
+    fn gated_units(&mut self, units: &[u32], dom: usize, mask: &[u64]) -> Result<(), String> {
+        self.line(&format!("uint64_t c = m->changed[{dom}];"));
+        self.line(&format!("m->changed[{dom}] = 0;"));
+        let mut i = 0;
+        while i < units.len() {
+            let mk = mask[units[i] as usize];
+            let mut j = i;
+            while j < units.len() && mask[units[j] as usize] == mk {
+                j += 1;
+            }
+            self.line(&format!("if (c & {}) {{", hex(mk)));
+            self.units(&units[i..j])?;
+            self.line("}");
+            i = j;
+        }
+        Ok(())
+    }
+
     /// Emits the units `units` (combinational, in order).
     fn units(&mut self, units: &[u32]) -> Result<(), String> {
         let p = self.p;
@@ -551,9 +734,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     let cones = cones(p);
     let pre = &prefix;
     let ninputs = cones.inputs.len();
-    if p.domains.len() > 64 || ninputs > 64 {
-        return Err("more than 64 clock domains or inputs".into());
-    }
+    let (iw, dw) = (ninputs.div_ceil(64).max(1), p.domains.len().div_ceil(64).max(1));
 
     // Header: the model struct and its interface.
     let mut h = String::new();
@@ -573,7 +754,13 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         .unwrap();
     }
     writeln!(h, "    uint8_t clk[{}];", p.clocks.len().max(1)).unwrap();
-    writeln!(h, "    uint64_t changed_inputs;\n    uint8_t memories_written;").unwrap();
+    writeln!(h, "    uint64_t changed_inputs[{iw}];\n    uint8_t memories_written;").unwrap();
+    writeln!(
+        h,
+        "    uint64_t changed[{}]; /* groups changed by each domain's last edge */",
+        p.domains.len().max(1)
+    )
+    .unwrap();
     writeln!(h, "}} {pre}_t;\n").unwrap();
     writeln!(h, "/* Sets the initial state and settles it. */\nvoid {pre}_init({pre}_t *m);")
         .unwrap();
@@ -593,6 +780,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     let mut ports = p.ports.clone();
     ports.sort_by_key(|x| x.2);
     let input_bit = |slot: u32| cones.inputs.iter().position(|(s, _)| *s == slot);
+    let _ = dw;
     for (si, dir, _) in &ports {
         let (name, locs) = &p.signals[*si];
         let id = ident(name);
@@ -643,9 +831,10 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         {
             writeln!(
                 h,
-                "static inline void {pre}_set_{id}({pre}_t *m, uint64_t x) {{ x &= {}; if (m->v[{word}] != x) {{ m->v[{word}] = x; m->changed_inputs |= {}; }} }}",
+                "static inline void {pre}_set_{id}({pre}_t *m, uint64_t x) {{ x &= {}; if (m->v[{word}] != x) {{ m->v[{word}] = x; m->changed_inputs[{}] |= {}; }} }}",
                 hex(mask(w as u32)),
-                hex(1u64 << bit)
+                bit / 64,
+                hex(1u64 << (bit % 64))
             )
             .unwrap();
         }
@@ -653,7 +842,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     writeln!(h, "\n#endif").unwrap();
 
     // Implementation.
-    let mut e = Emitter { p, prefix: prefix.clone(), out: String::new(), tmp: 0 };
+    let mut e = Emitter { p, prefix: prefix.clone(), out: String::new(), tmp: 0, on_write: None };
     writeln!(e.out, "/* Generated by synth (synth-sim C backend). */").unwrap();
     writeln!(e.out, "#include \"{pre}.h\"\n#include <string.h>\n").unwrap();
     e.out.push_str(PRELUDE);
@@ -717,16 +906,43 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     for (k, (_, units)) in cones.inputs.iter().enumerate() {
         e.function(&format!("settle_input{k}"), |e| e.units(units))?;
     }
+    let groups: Vec<Groups> = p.domains.iter().map(|d| groups(p, d)).collect();
     for (k, units) in cones.domains.iter().enumerate() {
-        e.function(&format!("settle_domain{k}"), |e| e.units(units))?;
+        let mask = &groups[k].mask;
+        let units = cluster(p, units, mask);
+        e.function(&format!("settle_domain{k}"), |e| e.gated_units(&units, k, mask))?;
     }
     e.function("settle_host", |e| e.units(&cones.host))?;
     for (k, d) in p.domains.iter().enumerate() {
         let d = d.clone();
+        let g = &groups[k];
         e.function(&format!("sample{k}"), |e| d.sample.iter().try_for_each(|i| e.ins(i)))?;
-        e.function(&format!("write{k}"), |e| d.write.iter().try_for_each(|i| e.ins(i)))?;
+        e.function(&format!("write{k}"), |e| {
+            for (i, ins) in d.write.iter().enumerate() {
+                e.on_write = Some((k, g.write[i]));
+                e.ins(ins)?;
+            }
+            e.on_write = None;
+            Ok(())
+        })?;
         e.function(&format!("commit{k}"), |e| {
-            d.commit.iter().chain(&d.gated).try_for_each(|i| e.ins(i))
+            for (i, ins) in d.commit.iter().chain(&d.gated).enumerate() {
+                let n = nwords(ins.w);
+                e.line("{");
+                for j in 0..n {
+                    e.line(&format!("uint64_t o{j} = {};", v(ins.d + j)));
+                }
+                e.ins(ins)?;
+                let diff: Vec<String> =
+                    (0..n).map(|j| format!("o{j} != {}", v(ins.d + j))).collect();
+                e.line(&format!(
+                    "if ({}) m->changed[{k}] |= {};",
+                    diff.join(" || "),
+                    hex(1u64 << g.commit[i])
+                ));
+                e.line("}");
+            }
+            Ok(())
         })?;
     }
 
@@ -754,15 +970,22 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     for (k, c) in p.clocks.iter().enumerate() {
         writeln!(e.out, "    m->clk[{k}] = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
     }
-    writeln!(e.out, "    m->changed_inputs = 0;\n    m->memories_written = 0;\n}}\n").unwrap();
+    writeln!(e.out, "    memset(m->changed_inputs, 0, sizeof m->changed_inputs);\n    m->memories_written = 0;\n}}\n").unwrap();
 
     writeln!(e.out, "void {pre}_eval({pre}_t *m) {{").unwrap();
     writeln!(e.out, "    int round;").unwrap();
     writeln!(e.out, "    for (round = 0; round < 10000; round++) {{").unwrap();
-    writeln!(e.out, "        uint64_t fired = 0, in = m->changed_inputs;").unwrap();
-    writeln!(e.out, "        m->changed_inputs = 0;").unwrap();
+    writeln!(e.out, "        uint64_t fired[{dw}] = {{0}}, in[{iw}], any = 0;").unwrap();
+    writeln!(e.out, "        memcpy(in, m->changed_inputs, sizeof in);").unwrap();
+    writeln!(e.out, "        memset(m->changed_inputs, 0, sizeof in);").unwrap();
     for k in 0..ninputs {
-        writeln!(e.out, "        if (in & {}) settle_input{k}(m);", hex(1u64 << k)).unwrap();
+        writeln!(
+            e.out,
+            "        if (in[{}] & {}) settle_input{k}(m);",
+            k / 64,
+            hex(1u64 << (k % 64))
+        )
+        .unwrap();
     }
     writeln!(
         e.out,
@@ -773,17 +996,35 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         writeln!(e.out, "        {{ uint8_t c = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
         writeln!(e.out, "          if (c != m->clk[{k}]) {{ m->clk[{k}] = c;").unwrap();
         if let Some(d) = c.pos {
-            writeln!(e.out, "            if (c) fired |= {};", hex(1u64 << d)).unwrap();
+            writeln!(
+                e.out,
+                "            if (c) {{ fired[{}] |= {}; any = 1; }}",
+                d / 64,
+                hex(1u64 << (d % 64))
+            )
+            .unwrap();
         }
         if let Some(d) = c.neg {
-            writeln!(e.out, "            if (!c) fired |= {};", hex(1u64 << d)).unwrap();
+            writeln!(
+                e.out,
+                "            if (!c) {{ fired[{}] |= {}; any = 1; }}",
+                d / 64,
+                hex(1u64 << (d % 64))
+            )
+            .unwrap();
         }
         writeln!(e.out, "        }} }}").unwrap();
     }
-    writeln!(e.out, "        if (!fired) return;").unwrap();
+    writeln!(e.out, "        if (!any) return;").unwrap();
     for phase in ["sample", "write", "commit", "settle_domain"] {
         for k in 0..p.domains.len() {
-            writeln!(e.out, "        if (fired & {}) {phase}{k}(m);", hex(1u64 << k)).unwrap();
+            writeln!(
+                e.out,
+                "        if (fired[{}] & {}) {phase}{k}(m);",
+                k / 64,
+                hex(1u64 << (k % 64))
+            )
+            .unwrap();
         }
     }
     writeln!(e.out, "    }}\n}}").unwrap();
