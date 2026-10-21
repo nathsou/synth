@@ -298,6 +298,26 @@ fn design(seed: u64) -> Gen {
             }),
             init: g.constant(w),
         };
+        // Sometimes one flip-flop per bit, all with the same controls (as
+        // process lowering may build them), for `words::merge_flops`.
+        if w > 1 && g.below(3) == 0 {
+            let bit = |v: &LogicVec, i: usize| LogicVec::from_bits(&[v.get(i)]);
+            for i in 0..w {
+                let b = Dff {
+                    clk: dff.clk,
+                    d: dff.d.slice(i, 1),
+                    q: dff.q.slice(i, 1),
+                    en: dff.en,
+                    srst: dff.srst.as_ref().map(|(c, v)| (*c, bit(v, i))),
+                    en_over_srst: dff.en_over_srst,
+                    arst: dff.arst.as_ref().map(|(c, v)| (*c, bit(v, i))),
+                    init: bit(&dff.init, i),
+                };
+                let c = g.m.cells.len();
+                g.m.add_cell(format!("ff{c}"), CellKind::Dff(Box::new(b)));
+            }
+            continue;
+        }
         let c = g.m.cells.len();
         g.m.add_cell(format!("ff{c}"), CellKind::Dff(Box::new(dff)));
     }

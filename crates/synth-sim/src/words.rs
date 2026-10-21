@@ -8,9 +8,13 @@
 //! that no merged cell feeds another of its own group), ordering each group
 //! after where its inputs sit in groups already merged, so that the next
 //! level reads whole words.
+//!
+//! Registers are bit-blasted too (one flip-flop per bit, or per flag, each
+//! with the same clock and controls): [`merge_flops`] puts those back
+//! together.
 
-use synth_core::FxHashMap;
-use synth_rtl::{CellId, CellKind, Module, Sig, SigBit};
+use synth_core::{FxHashMap, LogicVec};
+use synth_rtl::{CellId, CellKind, Clock, Control, Dff, Module, Sig, SigBit};
 
 /// Merges one-bit `Mux` and `Pmux` cells; returns the number merged away.
 pub fn merge_bit_muxes(m: &mut Module) -> usize {
@@ -201,6 +205,94 @@ pub fn merge_bit_muxes(m: &mut Module) -> usize {
                 place.insert(b, (gi, i));
             }
             merged += chunk.len() - 1;
+        }
+    }
+    merged
+}
+
+/// Flip-flops narrower than this are merged.
+const NARROW: usize = 8;
+
+/// Merges narrow flip-flops with the same clock and controls into words of
+/// up to 64 bits, in the order of their outputs' wires (so that a register
+/// split into bits is one again); returns the number merged away.
+pub fn merge_flops(m: &mut Module) -> usize {
+    type Key = (Clock, Option<Control>, Option<Control>, Option<Control>, bool);
+    let mut groups: FxHashMap<Key, Vec<CellId>> = FxHashMap::default();
+    let mut order: Vec<Key> = Vec::new();
+    for ci in m.live_cells() {
+        let CellKind::Dff(d) = &m.cells[ci].kind else { continue };
+        if d.q.width() >= NARROW {
+            continue;
+        }
+        let key = (
+            d.clk,
+            d.en,
+            d.srst.as_ref().map(|(c, _)| *c),
+            d.arst.as_ref().map(|(c, _)| *c),
+            d.en_over_srst && d.en.is_some() && d.srst.is_some(),
+        );
+        let g = groups.entry(key).or_default();
+        if g.is_empty() {
+            order.push(key);
+        }
+        g.push(ci);
+    }
+    let pos = |b: SigBit| match b {
+        SigBit::Wire(w, i) => (w.index() as u64, i as u64),
+        SigBit::Const(_) => (u64::MAX, 0),
+    };
+    let mut merged = 0;
+    for key in order {
+        let mut cells = groups.remove(&key).unwrap();
+        if cells.len() < 2 {
+            continue;
+        }
+        cells.sort_by_key(|&c| match &m.cells[c].kind {
+            CellKind::Dff(d) => pos(d.q.0[0]),
+            _ => unreachable!(),
+        });
+        // Chunks of at most 64 bits, each flip-flop whole.
+        let mut chunks: Vec<Vec<Dff>> = vec![Vec::new()];
+        let mut width = 0;
+        for &c in &cells {
+            let CellKind::Dff(d) = &m.cells[c].kind else { unreachable!() };
+            if width + d.q.width() > 64 {
+                chunks.push(Vec::new());
+                width = 0;
+            }
+            width += d.q.width();
+            chunks.last_mut().unwrap().push(d.as_ref().clone());
+        }
+        for &c in &cells {
+            m.cells[c].alive = false;
+        }
+        let name = m.cells[cells[0]].name.clone();
+        for (k, chunk) in chunks.into_iter().enumerate() {
+            let first = &chunk[0];
+            let cat = |f: &dyn Fn(&Dff) -> LogicVec| {
+                let parts: Vec<LogicVec> =
+                    chunk.iter().map(|d| f(d).resize(d.q.width(), false)).collect();
+                LogicVec::concat(&parts.iter().collect::<Vec<_>>())
+            };
+            let dff = Dff {
+                clk: first.clk,
+                d: chunk.iter().flat_map(|d| d.d.iter().copied()).collect(),
+                q: chunk.iter().flat_map(|d| d.q.iter().copied()).collect(),
+                en: first.en,
+                srst: first
+                    .srst
+                    .as_ref()
+                    .map(|(c, _)| (*c, cat(&|d| d.srst.as_ref().unwrap().1.clone()))),
+                en_over_srst: first.en_over_srst,
+                arst: first
+                    .arst
+                    .as_ref()
+                    .map(|(c, _)| (*c, cat(&|d| d.arst.as_ref().unwrap().1.clone()))),
+                init: cat(&|d| d.init.clone()),
+            };
+            merged += chunk.len() - 1;
+            m.add_cell(format!("{name}$word{k}"), CellKind::Dff(Box::new(dff)));
         }
     }
     merged

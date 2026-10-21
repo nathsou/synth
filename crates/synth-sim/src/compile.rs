@@ -62,9 +62,15 @@ fn optimize(m: &mut Module) -> Result<(), String> {
     }
     mem::merge_write_ports(m);
     opt::clean(m)?;
+    // Enables extracted bit by bit are mostly the same logic: merged first,
+    // the flip-flops they control then share them.
+    opt::merge_identical(m);
+    opt::clean(m)?;
     crate::words::merge_bit_muxes(m);
     opt::clean(m)?;
     opt::merge_identical(m);
+    opt::clean(m)?;
+    crate::words::merge_flops(m);
     opt::clean(m)
 }
 
