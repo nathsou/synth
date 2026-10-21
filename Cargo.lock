@@ -116,6 +116,7 @@ version = "0.1.0"
 dependencies = [
  "synth-core",
  "synth-elab",
+ "synth-netlist",
  "synth-rtl",
  "synth-verilog",
  "synth-weft",

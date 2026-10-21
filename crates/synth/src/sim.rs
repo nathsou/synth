@@ -89,17 +89,48 @@ impl Uart {
     }
 }
 
+/// The design after iCE40 synthesis, as RTL built from the primitives'
+/// simulation models.
+pub fn synthesized(m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    let (nl, _) = arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
+    synth_sim::netlist::from_netlist(&nl, &mut arch_ice40::sim::add_cell)
+}
+
 pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
         &[
-            "-I", "-D", "-P", "--top", "--clock", "--cycles", "--until", "--set", "--at",
-            "--print", "--vcd", "--uart", "--load", "--attach", "--emit-c",
+            "-I",
+            "-D",
+            "-P",
+            "--top",
+            "--clock",
+            "--cycles",
+            "--until",
+            "--set",
+            "--at",
+            "--print",
+            "--vcd",
+            "--uart",
+            "--load",
+            "--attach",
+            "--emit-c",
+            "--compare",
+            "--reset",
+            "--reset-low",
+            "--hold",
+            "--seed",
         ],
-        &["--four-state", "--two-state", "--trace", "--quiet"],
+        &["--four-state", "--two-state", "--trace", "--quiet", "--synth"],
     )?;
     let weft = crate::input_files(&a).iter().any(|p| crate::is_weft(p));
     let mut m = crate::load_rtl(&mut a)?;
+    if let Some(what) = a.value("--compare") {
+        return compare(&mut a, m, &what);
+    }
+    if a.flag("--synth") {
+        m = synthesized(m)?;
+    }
     for spec in a.values("--attach") {
         let f: Vec<&str> = spec.split(':').collect();
         let bad =
@@ -326,4 +357,128 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
         eprintln!("warning: {} combinational loops did not settle", sim.unstable_loops());
     }
     Ok(())
+}
+
+/// `--compare synth`: the RTL (two-state constants and initial values,
+/// four-state simulation) against its iCE40 netlist under random inputs,
+/// comparing every output bit the RTL defines after every rising edge.
+fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String> {
+    let mut reference = m.clone();
+    synth_rtl::opt::two_state(&mut reference);
+    let other = match what {
+        "synth" => synthesized(m)?,
+        _ => return Err(format!("--compare expects `synth`, got `{what}`")),
+    };
+    let clocks = {
+        let c = a.values("--clock");
+        if c.is_empty() { vec!["clk".to_string()] } else { c }
+    };
+    let reset = a.value("--reset");
+    let reset_low = a.value("--reset-low");
+    let cycles = a.value("--cycles").map(|c| parse_value(&c)).transpose()?.unwrap_or(10_000);
+    let hold = a.value("--hold").map(|c| parse_value(&c)).transpose()?.unwrap_or(20).max(1);
+    let seed = a.value("--seed").map(|c| parse_value(&c)).transpose()?.unwrap_or(1);
+    let quiet = a.flag("--quiet");
+    a.finish()?;
+    let mut r = Sim::new(&reference, &Options { four_state: true, prune: false })?;
+    let mut n = Sim::new(&other, &Options { four_state: false, prune: false })?;
+    for w in n.warnings() {
+        eprintln!("warning: {w}");
+    }
+    let find = |sim: &Sim, name: &str| {
+        sim.signal(name).ok_or_else(|| format!("no port `{name}` in the {what} netlist"))
+    };
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    for &(si, dir, _) in &r.program().ports {
+        let name = r.program().signals[si].0.clone();
+        let rs = r.signal(&name).unwrap();
+        match dir {
+            synth_rtl::PortDir::Input => {
+                if !clocks.contains(&name) {
+                    inputs.push((name.clone(), rs, find(&n, &name)?));
+                }
+            }
+            _ => outputs.push((name.clone(), rs, find(&n, &name)?)),
+        }
+    }
+    let clk: Vec<_> = clocks
+        .iter()
+        .map(|c| Ok((signal_of(&r, c)?, find(&n, c)?)))
+        .collect::<Result<_, String>>()?;
+    let mut rng = synth_core::Rng::new(seed);
+    let set =
+        |r: &mut Sim, n: &mut Sim, rs: &synth_sim::Signal, ns: &synth_sim::Signal, v: &LogicVec| {
+            r.poke_vec(rs, v);
+            n.poke_vec(ns, v);
+        };
+    // Inputs start at 0, resets active.
+    for (name, rs, ns) in &inputs {
+        let w = rs.width();
+        let v =
+            if Some(name) == reset_low.as_ref() { LogicVec::ones(w) } else { LogicVec::zeros(w) };
+        let v = if Some(name) == reset.as_ref() {
+            LogicVec::ones(w)
+        } else if Some(name) == reset_low.as_ref() {
+            LogicVec::zeros(w)
+        } else {
+            v
+        };
+        set(&mut r, &mut n, rs, ns, &v);
+    }
+    for (rc, nc) in &clk {
+        set(&mut r, &mut n, rc, nc, &LogicVec::zeros(1));
+    }
+    r.eval_quiet();
+    n.eval_quiet();
+    let mut errors = 0u64;
+    let t = Instant::now();
+    for cycle in 0..cycles {
+        for (rc, nc) in &clk {
+            set(&mut r, &mut n, rc, nc, &LogicVec::from_bool(true));
+        }
+        r.eval();
+        n.eval();
+        for (name, rs, ns) in &outputs {
+            let (rv, nv) = (r.peek_vec(rs), n.peek_vec(ns));
+            let differs = (0..rv.width()).any(|i| rv.get(i).is_known() && rv.get(i) != nv.get(i));
+            if differs {
+                errors += 1;
+                if errors <= 10 {
+                    eprintln!("cycle {cycle}: {name} reference {rv:?} {what} {nv:?}");
+                }
+            }
+        }
+        for (rc, nc) in &clk {
+            set(&mut r, &mut n, rc, nc, &LogicVec::zeros(1));
+        }
+        for (name, rs, ns) in &inputs {
+            if Some(name) == reset.as_ref() || Some(name) == reset_low.as_ref() {
+                if cycle == 4 {
+                    let v = LogicVec::from_bool(reset_low.as_ref() == Some(name));
+                    set(&mut r, &mut n, rs, ns, &v.resize(rs.width(), false));
+                }
+                continue;
+            }
+            if rng.below(1024) < (1024 / hold as usize).max(1) {
+                let w = rs.width();
+                let words: Vec<u64> = (0..w.div_ceil(64).max(1)).map(|_| rng.next_u64()).collect();
+                set(&mut r, &mut n, rs, ns, &LogicVec::from_planes(w, &words, &[]));
+            }
+        }
+        r.eval();
+        n.eval();
+    }
+    if errors > 0 {
+        return Err(format!("{errors} mismatches in {cycles} cycles"));
+    }
+    if !quiet {
+        eprintln!("info: compared in {:.2?}", t.elapsed());
+    }
+    println!("PASS {cycles} cycles");
+    Ok(())
+}
+
+fn signal_of(sim: &Sim, name: &str) -> Result<synth_sim::Signal, String> {
+    sim.signal(name).ok_or_else(|| format!("no signal `{name}`"))
 }

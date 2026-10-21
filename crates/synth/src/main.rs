@@ -66,7 +66,9 @@ SIM OPTIONS:
               [--vcd <out.vcd>] [--uart <name>[:<clocks per bit>]]
               [--load <memory>=<file.hex>]... [--two-state | --four-state]
               [--attach <name>:<addr>:<data>:<depth>[:<clock>:<enable>:<wdata>]]...
-              [--emit-c <dir>] [--quiet]
+              [--emit-c <dir>] [--synth] [--quiet]
+    synth sim <files...> --compare synth [--clock <name>]... [--reset <name>]
+              [--reset-low <name>] [--cycles <n>] [--hold <n>] [--seed <n>]
               Runs cycles of the clock (default `clk`): inputs set by --set
               and --at, then a rising and a falling edge. Stops after --cycles
               (default 1000) or once --until holds, then prints --print
@@ -75,6 +77,11 @@ SIM OPTIONS:
               --attach drives the input <data> with the word at <addr> of a
               new memory (written on the clock's rising edge when <enable>).
               --emit-c writes a two-state C model (<top>.h, <top>.c) instead.
+              --synth simulates the iCE40 netlist synthesis makes of it.
+              --compare synth runs the RTL and its netlist under the same
+              random inputs (held about --hold cycles; resets active for
+              the first 4 cycles) and compares every output bit the RTL
+              defines after every rising edge.
 
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>

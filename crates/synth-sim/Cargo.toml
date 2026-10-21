@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 synth-core.workspace = true
 synth-rtl.workspace = true
+synth-netlist.workspace = true
 
 [dev-dependencies]
 synth-weft.workspace = true

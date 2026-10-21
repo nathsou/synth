@@ -117,3 +117,60 @@ fn vcd_and_c_model() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn synthesized_netlists_match_their_rtl() {
+    let dir = std::env::temp_dir().join(format!("synth-sim-net-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Block RAMs in every width mode, initialized; the 16-bit one with byte
+    // write enables (the bit mask).
+    for (w, depth) in [(2, 2048), (4, 1024), (8, 512), (16, 256)] {
+        let abits = (depth as u32).trailing_zeros();
+        let write = if w == 16 {
+            "if (we[0]) mem[wa][7:0] <= wd[7:0]; if (we[1]) mem[wa][15:8] <= wd[15:8];"
+        } else {
+            "if (we[0]) mem[wa] <= wd;"
+        };
+        let v = format!(
+            "module ram(input clk, input [1:0] we, input [{a}:0] wa, input [{a}:0] ra, input [{d}:0] wd, output reg [{d}:0] q);\n\
+             reg [{d}:0] mem [0:{last}];\n\
+             integer i; initial for (i = 0; i < {depth}; i = i + 1) mem[i] = i * 7;\n\
+             always @(posedge clk) begin q <= mem[ra]; {write} end\nendmodule\n",
+            a = abits - 1,
+            d = w - 1,
+            last = depth - 1
+        );
+        std::fs::write(dir.join("ram.v"), v).unwrap();
+        let (out, _) =
+            sim(&dir, &["ram.v", "--compare", "synth", "--cycles", "3000", "--hold", "2"]);
+        assert!(out.contains("PASS"), "{w}-bit RAM: {out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // A CPU running firmware from block RAM.
+    let soc = root().join("tests/designs/picosoc");
+    let (out, _) = sim(
+        &soc,
+        &[
+            "soc.v",
+            "picorv32.v",
+            "--top",
+            "top",
+            "--compare",
+            "synth",
+            "--cycles",
+            "20000",
+            "--hold",
+            "5000",
+        ],
+    );
+    assert!(out.contains("PASS"), "{out}");
+    let euler = root().join("tests/designs/euler");
+    let (out, err) = sim(
+        &euler,
+        &[
+            "p025.v", "bcd.v", "--top", "euler25", "--set", "start=1", "--set", "rst=1", "--at",
+            "2:rst=0", "--until", "done", "--print", "answer", "--synth",
+        ],
+    );
+    assert!(out.contains("answer = 4782 ") && err.contains("info: 2392 cycles"), "{out}{err}");
+}

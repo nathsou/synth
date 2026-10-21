@@ -23,6 +23,7 @@ pub mod attach;
 pub mod compile;
 pub mod emit_c;
 pub mod exec;
+pub mod netlist;
 pub mod program;
 pub mod vcd;
 

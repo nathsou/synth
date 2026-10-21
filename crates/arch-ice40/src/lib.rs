@@ -18,6 +18,7 @@ pub mod pack;
 pub mod pcf;
 pub mod place;
 pub mod route;
+pub mod sim;
 pub mod synth;
 pub mod timing;
 
