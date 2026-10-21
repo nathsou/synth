@@ -183,21 +183,46 @@ def timed(a, prefix, xdc):
     except RuntimeError as e:
         return {"vivado_error": str(e)}
     skip = set()
-    for attempt in range(2):
+    for attempt in range(4):
         result = timed_attempt(a, prefix, xdc, skip)
         log = Path(f"{prefix}.timing.log").read_text()
         # Vivado ties some SLICEM shift register pins to VCC where the
         # rebuilt netlist routes them: route those nets freely and retry.
         conflicts = set(re.findall(r"Fixed routing constraint on net (\S+) conflicts", log))
-        if "vivado_error" not in result or not conflicts or attempt:
+        conflicts |= set(re.findall(r"Net, (\S+), is internally routed", log))
+        if "vivado_error" not in result or not conflicts or attempt == 3:
             return result
         skip |= conflicts
     return result
 
 
+# Vivado refuses a directed route on a net that is also routed inside a
+# site (a LUT feeding its lane's flip-flop and the interconnect).
+INTERNAL = r"""
+proc routed_internally {net} {
+  set dp [get_pins -quiet -leaf -of $net -filter {DIRECTION==OUT}]
+  if {[llength $dp] != 1} { return 0 }
+  set drv [get_cells -of $dp]
+  set ds [get_sites -quiet -of $drv]
+  set dbel [lindex [split [get_property BEL $drv] .] end]
+  set lane ""
+  if {[string match "?6LUT" $dbel] || [string match "?5LUT" $dbel]} { set lane [string index $dbel 0] }
+  if {$dbel eq "CARRY4" && [regexp {\[(\d)\]} [get_property REF_PIN_NAME $dp] -> k]} { set lane [string index "ABCD" $k] }
+  if {$lane eq ""} { return 0 }
+  foreach p [get_pins -quiet -leaf -of $net -filter {DIRECTION==IN}] {
+    set c [get_cells -of $p]
+    if {[get_sites -quiet -of $c] ne $ds} { continue }
+    set bel [lindex [split [get_property BEL $c] .] end]
+    if {[string match "*FF" $bel] && [string index $bel 0] eq $lane} { return 1 }
+  }
+  return 0
+}
+"""
+
+
 def timed_attempt(a, prefix, xdc, skip):
     bels = Path(f"{prefix}.bels.v")
-    guard = 'if {[llength $net] && [get_property TYPE $net] ne "GLOBAL_CLOCK"'
+    guard = 'if {[llength $net] && [get_property TYPE $net] ne "GLOBAL_CLOCK" && ![routed_internally $net]'
     # Vivado names such nets after their driver pin, as the constraints
     # select them.
     guard += "".join(f' && [get_property NAME $net] ne "{n}" && ![string match "*{n}" $pin]'
@@ -205,7 +230,7 @@ def timed_attempt(a, prefix, xdc, skip):
     constraints = re.sub(r"^set_property FIXED_ROUTE \$route \$net$",
                          guard + '} { set_property FIXED_ROUTE $route $net }',
                          Path(f"{prefix}.bels.xdc").read_text(), flags=re.M)
-    Path(f"{prefix}.routes.xdc").write_text(constraints)
+    Path(f"{prefix}.routes.xdc").write_text(INTERNAL + constraints)
     with (a.db / a.part / "package_pins.csv").open() as f:
         pins = {r["pin"]: (r["tile"], r["site"]) for r in csv.DictReader(f)}
     sites, clocks = bitsim.ports(xdc, pins)
