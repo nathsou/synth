@@ -2,6 +2,7 @@
 //! LUT RAM and shift registers need a SLICEM; LUT RAM and the wide-function
 //! multiplexers also fix their LUTs to particular lanes of one slice.
 use std::collections::{BTreeMap, BTreeSet};
+use synth_core::FxHashMap;
 use synth_netlist::{CellId, Const, Dir, NetId, Netlist, Param, PinRef};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -583,64 +584,26 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
         p.slices[s].luts[l] = Some(c);
         p.slots.insert(c, (s, l));
     }
+    // Flip-flops whose drivers are placed (carry sums, wide multiplexers,
+    // lane LUTs) join the driver's lane; the rest cluster below.
     let ffs: Vec<_> = nl.live_cells().filter(|&c| is_ff(nl.cell_kind(c))).collect();
+    let mut loose_ffs = Vec::new();
     for c in ffs {
         let ctrl = controls(nl, c)?;
         let d = nl.pin_net(c, "D").ok_or("FF missing D")?;
-        let driver = nl.nets[d].driver.map(|p| p.cell);
         let paired = nl.nets[d].driver.and_then(|drv| {
             let s = p.slots.get(&drv.cell)?.0;
             let pin = nl.str(nl.cells[drv.cell].pins[drv.pin as usize].name);
             let l = internal_lane(nl, &p, drv.cell, pin)?;
             (p.slices[s].ffs[l].is_none() && p.slices[s].accepts(&ctrl)).then_some((s, l))
         });
-        let (s, l) = if let Some(loc) = paired {
-            loc
+        if let Some((s, l)) = paired {
+            p.slices[s].ffs[l] = Some(c);
+            p.slices[s].controls = Some(ctrl);
+            p.slots.insert(c, (s, l));
         } else {
-            let lut = driver.filter(|d| is_lut(nl.cell_kind(*d)) && !p.slots.contains_key(d));
-            // A lane's X input can feed both its flip-flops the same net.
-            let x_ok = |slice: &Slice, l: usize| {
-                slice.x_free(nl, l) && slice.x_net(nl, l).is_none_or(|n| n == d)
-            };
-            // Slots 8-11 stand for the second bank fed through the lane's
-            // O5 output, a LUT route-through, when the X input is taken.
-            let loc = p.slices.iter().enumerate().find_map(|(s, slice)| {
-                if !slice.accepts(&ctrl) {
-                    return None;
-                }
-                (0..12)
-                    .find(|&k| {
-                        if lut.is_some() {
-                            k < 4 && slice.ffs[k].is_none() && slice.lane_free(k)
-                        } else if k < 4 {
-                            slice.ffs[k].is_none() && x_ok(slice, k)
-                        } else if k < 8 {
-                            slice.ff5_free(nl, k - 4) && x_ok(slice, k - 4)
-                        } else {
-                            slice.ff5_free(nl, k - 8) && slice.o5_fits(nl, k - 8, &[d])
-                        }
-                    })
-                    .map(|k| (s, k))
-            });
-            let (s, k) = loc.unwrap_or_else(|| {
-                p.slices.push(Slice::default());
-                (p.slices.len() - 1, 0)
-            });
-            if let Some(lut) = lut {
-                p.slices[s].luts[k] = Some(lut);
-                p.slots.insert(lut, (s, k));
-            }
-            if k >= 8 {
-                let through = buffer(nl, d)?;
-                rewire(nl, c, "D", nl.pin_net(through, "O").unwrap())?;
-                p.slices[s].lut5[k - 8] = Some(through);
-                p.slots.insert(through, (s, k - 8));
-            }
-            (s, if k >= 8 { k - 4 } else { k })
-        };
-        p.slices[s].ffs[l] = Some(c);
-        p.slices[s].controls = Some(ctrl);
-        p.slots.insert(c, (s, l));
+            loose_ffs.push(c);
+        }
     }
     // Dedicated carries must form chains; branching CI fanout cannot be legal.
     let mut next = BTreeMap::new();
@@ -695,52 +658,7 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
             e.insert(l);
         }
     }
-    let luts: Vec<_> =
-        nl.live_cells().filter(|&c| is_lut(nl.cell_kind(c)) && !p.slots.contains_key(&c)).collect();
-    for c in luts {
-        let loc = p
-            .slices
-            .iter()
-            .enumerate()
-            .find_map(|(s, x)| (0..4).find(|&l| x.lane_free(l)).map(|l| (s, l)));
-        if let Some((s, l)) = loc {
-            p.slices[s].luts[l] = Some(c);
-            p.slots.insert(c, (s, l));
-            continue;
-        }
-        // With every lane taken, share a LUT site rather than open a
-        // slice: on O5, beside the LUT sharing the most inputs. Its output
-        // takes the lane's output multiplexer, so the second bank is free.
-        let ins: Vec<NetId> = (0..lut_size(nl.cell_kind(c)))
-            .filter_map(|i| nl.pin_net(c, &format!("I{i}")))
-            .collect();
-        let shared = |x: &Slice, l: usize| {
-            let lane = x.lane_inputs(nl, l);
-            ins.iter().filter(|n| lane.contains(n)).count()
-        };
-        // Constant sources are routed from their lane's O6 pin.
-        let constant = p.constant_luts.values().any(|&k| k == c);
-        let o5 = (ins.len() <= 5 && !constant)
-            .then(|| {
-                p.slices
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(s, x)| (0..4).map(move |l| (s, x, l)))
-                    .filter(|&(_, x, l)| x.ffs[l + 4].is_none() && x.o5_fits(nl, l, &ins))
-                    .max_by_key(|&(s, x, l)| (shared(x, l), std::cmp::Reverse((s, l))))
-                    .map(|(s, _, l)| (s, l))
-            })
-            .flatten();
-        if let Some((s, l)) = o5 {
-            p.slices[s].lut5[l] = Some(c);
-            p.slots.insert(c, (s, l));
-        } else {
-            p.slices.push(Slice::default());
-            let s = p.slices.len() - 1;
-            p.slices[s].luts[0] = Some(c);
-            p.slots.insert(c, (s, 0));
-        }
-    }
+    cluster(nl, &mut p, loose_ffs)?;
     for c in nl.live_cells() {
         if nl.cell_kind(c) == "DSP48E1" {
             crate::physical_dsp::validate(nl, c)?;
@@ -764,6 +682,259 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
     }
     nl.check().map_err(|e| e.to_string())?;
     Ok(p)
+}
+/// The slice density (lanes or flip-flops used) below which a slice takes
+/// atoms unconnected to it rather than leaving the space empty.
+fn fill_threshold() -> f64 {
+    // EXPERIMENT hook
+    std::env::var("SYNTH_XC7_FILL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+}
+
+/// An atom of the clustering: a LUT, a flip-flop, or a LUT and the
+/// flip-flop it alone feeds.
+struct Atom {
+    lut: Option<CellId>,
+    ff: Option<CellId>,
+    /// The atom's nets that say something about locality: not constants,
+    /// not the widest (clocks and resets).
+    nets: Vec<NetId>,
+}
+
+/// Where an atom fits in a slice.
+enum Fit {
+    /// A LUT on the lane's O6 and/or a flip-flop on its first bank.
+    Lane(usize),
+    /// A LUT on the lane's O5, beside its LUT.
+    O5(usize),
+    /// A flip-flop alone: as the old slot numbering, 0-3 the first bank from
+    /// the X input, 4-7 the second from X, 8-11 the second through an O5
+    /// pass-through LUT.
+    Ff(usize),
+}
+
+/// Packs the LUTs and flip-flops left by the structured packing above by
+/// affinity, as AAPack clusters: a LUT and the flip-flop it alone feeds form
+/// one atom; a slice grows with the unplaced atom sharing the most nets with
+/// its cells until nothing connected fits. Slices with free lanes from the
+/// structured packing grow first; then each new slice is seeded with the
+/// most connected atom left. Connected logic so shares slices, which the
+/// placer moves as units: the first-fit packing this replaces spread it
+/// over the design, about doubling the wirelength of any placement.
+fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), String> {
+    let luts: Vec<CellId> =
+        nl.live_cells().filter(|&c| is_lut(nl.cell_kind(c)) && !p.slots.contains_key(&c)).collect();
+    let lut_set: BTreeSet<CellId> = luts.iter().copied().collect();
+    let mut atoms: Vec<Atom> = Vec::new();
+    let mut paired = BTreeSet::new();
+    for &ff in &ffs {
+        let d = nl.pin_net(ff, "D").ok_or("FF missing D")?;
+        let lut = nl.nets[d]
+            .driver
+            .map(|drv| drv.cell)
+            .filter(|c| lut_set.contains(c) && nl.nets[d].users.len() == 1);
+        if let Some(l) = lut {
+            paired.insert(l);
+        }
+        atoms.push(Atom { lut, ff: Some(ff), nets: Vec::new() });
+    }
+    for &l in &luts {
+        if !paired.contains(&l) {
+            atoms.push(Atom { lut: Some(l), ff: None, nets: Vec::new() });
+        }
+    }
+    let interesting =
+        |nl: &Netlist, n: NetId| nl.nets[n].constant.is_none() && nl.nets[n].users.len() <= 64;
+    let cell_nets = |nl: &Netlist, c: CellId| -> Vec<NetId> {
+        nl.cells[c].pins.iter().filter_map(|pin| pin.net).filter(|&n| interesting(nl, n)).collect()
+    };
+    let mut atom_of: FxHashMap<CellId, usize> = FxHashMap::default();
+    for (i, a) in atoms.iter_mut().enumerate() {
+        let mut nets = BTreeSet::new();
+        for c in a.lut.iter().chain(&a.ff) {
+            atom_of.insert(*c, i);
+            nets.extend(cell_nets(nl, *c));
+        }
+        a.nets = nets.into_iter().collect();
+    }
+    // The nets of each slice's cells.
+    let mut snets: Vec<BTreeSet<NetId>> = p
+        .slices
+        .iter()
+        .map(|x| {
+            let cells = x
+                .luts
+                .iter()
+                .chain(&x.lut5)
+                .chain(&x.ffs)
+                .chain(&x.f7)
+                .chain([&x.carry, &x.f8, &x.ram])
+                .flatten();
+            cells.flat_map(|&c| cell_nets(nl, c)).collect()
+        })
+        .collect();
+    let fit = |nl: &Netlist, p: &Packed, s: usize, a: &Atom| -> Option<Fit> {
+        let x = &p.slices[s];
+        if let Some(ff) = a.ff {
+            if !x.accepts(&controls(nl, ff).ok()?) {
+                return None;
+            }
+        }
+        match (a.lut, a.ff) {
+            (Some(_), Some(_)) => {
+                (0..4).find(|&l| x.lane_free(l) && x.ffs[l].is_none()).map(Fit::Lane)
+            }
+            (Some(lut), None) => {
+                let ins: Vec<NetId> = (0..lut_size(nl.cell_kind(lut)))
+                    .filter_map(|i| nl.pin_net(lut, &format!("I{i}")))
+                    .collect();
+                // Constant sources are routed from their lane's O6 pin.
+                let constant = p.constant_luts.values().any(|&k| k == lut);
+                let o5 = (ins.len() <= 5 && !constant)
+                    .then(|| {
+                        (0..4).find(|&l| {
+                            x.luts[l].is_some() && x.ffs[l + 4].is_none() && x.o5_fits(nl, l, &ins)
+                        })
+                    })
+                    .flatten();
+                o5.map(Fit::O5).or_else(|| (0..4).find(|&l| x.lane_free(l)).map(Fit::Lane))
+            }
+            (None, Some(ff)) => {
+                let d = nl.pin_net(ff, "D")?;
+                // A lane's X input can feed both its flip-flops the same net.
+                let x_ok = |l: usize| x.x_free(nl, l) && x.x_net(nl, l).is_none_or(|n| n == d);
+                (0..12)
+                    .find(|&k| {
+                        if k < 4 {
+                            x.ffs[k].is_none() && x_ok(k)
+                        } else if k < 8 {
+                            x.ff5_free(nl, k - 4) && x_ok(k - 4)
+                        } else {
+                            x.ff5_free(nl, k - 8) && x.o5_fits(nl, k - 8, &[d])
+                        }
+                    })
+                    .map(Fit::Ff)
+            }
+            (None, None) => None,
+        }
+    };
+    fn place(
+        nl: &mut Netlist,
+        p: &mut Packed,
+        snets: &mut [BTreeSet<NetId>],
+        s: usize,
+        a: &Atom,
+        f: Fit,
+    ) -> Result<(), String> {
+        let set_ff = |nl: &Netlist, p: &mut Packed, ff: CellId, l: usize| {
+            p.slices[s].ffs[l] = Some(ff);
+            p.slices[s].controls = Some(controls(nl, ff)?);
+            p.slots.insert(ff, (s, l));
+            Ok::<(), String>(())
+        };
+        match f {
+            Fit::Lane(l) => {
+                if let Some(lut) = a.lut {
+                    p.slices[s].luts[l] = Some(lut);
+                    p.slots.insert(lut, (s, l));
+                }
+                if let Some(ff) = a.ff {
+                    set_ff(nl, p, ff, l)?;
+                }
+            }
+            Fit::O5(l) => {
+                let lut = a.lut.unwrap();
+                p.slices[s].lut5[l] = Some(lut);
+                p.slots.insert(lut, (s, l));
+            }
+            Fit::Ff(k) => {
+                let ff = a.ff.unwrap();
+                let l = if k >= 8 {
+                    let d = nl.pin_net(ff, "D").unwrap();
+                    let through = buffer(nl, d)?;
+                    rewire(nl, ff, "D", nl.pin_net(through, "O").unwrap())?;
+                    p.slices[s].lut5[k - 8] = Some(through);
+                    p.slots.insert(through, (s, k - 8));
+                    k - 4
+                } else {
+                    k
+                };
+                set_ff(nl, p, ff, l)?;
+            }
+        }
+        snets[s].extend(a.nets.iter().copied());
+        Ok(())
+    }
+    let mut placed = vec![false; atoms.len()];
+    let mut fillers: Vec<usize> = (0..atoms.len()).collect();
+    fillers.sort_by_key(|&a| (atoms[a].nets.len(), a));
+    // Grows slice `s` with connected atoms while any fits.
+    let grow = |nl: &mut Netlist,
+                p: &mut Packed,
+                snets: &mut Vec<BTreeSet<NetId>>,
+                placed: &mut Vec<bool>,
+                s: usize|
+     -> Result<(), String> {
+        loop {
+            let mut candidates: BTreeSet<usize> = BTreeSet::new();
+            for &n in &snets[s] {
+                for pin in nl.nets[n].users.iter().chain(&nl.nets[n].driver) {
+                    if let Some(&a) = atom_of.get(&pin.cell)
+                        && !placed[a]
+                    {
+                        candidates.insert(a);
+                    }
+                }
+            }
+            let gain = |a: usize| atoms[a].nets.iter().filter(|n| snets[s].contains(n)).count();
+            let mut best: Option<(usize, usize, Fit)> = None;
+            for a in candidates {
+                let g = gain(a);
+                if best.as_ref().is_some_and(|b| b.1 >= g) {
+                    continue;
+                }
+                if let Some(f) = fit(nl, p, s, &atoms[a]) {
+                    best = Some((a, g, f));
+                }
+            }
+            let Some((a, _, f)) = best.or_else(|| {
+                // Nothing connected fits: fill the slice to the density
+                // threshold with the least connected atoms left, which have
+                // the least to lose elsewhere, rather than open another.
+                let x = &p.slices[s];
+                let lanes = (0..4).filter(|&l| !x.lane_free(l)).count() as f64 / 4.0;
+                let ffs = x.ffs.iter().flatten().count() as f64 / 8.0;
+                if lanes.max(ffs) >= fill_threshold() {
+                    return None;
+                }
+                fillers.iter().copied().find_map(|a| {
+                    (!placed[a]).then(|| fit(nl, p, s, &atoms[a]).map(|f| (a, 0, f))).flatten()
+                })
+            }) else {
+                return Ok(());
+            };
+            place(nl, p, snets, s, &atoms[a], f)?;
+            placed[a] = true;
+        }
+    };
+    for s in 0..p.slices.len() {
+        grow(nl, p, &mut snets, &mut placed, s)?;
+    }
+    // Seeds: the most connected atoms first.
+    let mut order: Vec<usize> = (0..atoms.len()).collect();
+    order.sort_by_key(|&a| (std::cmp::Reverse(atoms[a].nets.len()), a));
+    for a in order {
+        if placed[a] {
+            continue;
+        }
+        p.slices.push(Slice::default());
+        snets.push(BTreeSet::new());
+        let s = p.slices.len() - 1;
+        let f = fit(nl, p, s, &atoms[a]).ok_or("an atom fits no empty slice")?;
+        place(nl, p, &mut snets, s, &atoms[a], f)?;
+        placed[a] = true;
+        grow(nl, p, &mut snets, &mut placed, s)?;
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
