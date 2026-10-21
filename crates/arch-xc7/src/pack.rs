@@ -683,13 +683,6 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
     nl.check().map_err(|e| e.to_string())?;
     Ok(p)
 }
-/// The slice density (lanes or flip-flops used) below which a slice takes
-/// atoms unconnected to it rather than leaving the space empty.
-fn fill_threshold() -> f64 {
-    // EXPERIMENT hook
-    std::env::var("SYNTH_XC7_FILL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
-}
-
 /// An atom of the clustering: a LUT, a flip-flop, or a LUT and the
 /// flip-flop it alone feeds.
 struct Atom {
@@ -717,7 +710,9 @@ enum Fit {
 /// one atom; a slice grows with the unplaced atom sharing the most nets with
 /// its cells until nothing connected fits. Slices with free lanes from the
 /// structured packing grow first; then each new slice is seeded with the
-/// most connected atom left. Connected logic so shares slices, which the
+/// most connected atom left. A slice with nothing connected left to take
+/// fills with the least connected atoms until its lanes or flip-flops are
+/// all taken. Connected logic so shares slices, which the
 /// placer moves as units: the first-fit packing this replaces spread it
 /// over the design, about doubling the wirelength of any placement.
 fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), String> {
@@ -897,13 +892,13 @@ fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), Str
                 }
             }
             let Some((a, _, f)) = best.or_else(|| {
-                // Nothing connected fits: fill the slice to the density
-                // threshold with the least connected atoms left, which have
-                // the least to lose elsewhere, rather than open another.
+                // Nothing connected fits: until its lanes or flip-flops are
+                // all taken, fill the slice with the least connected atoms
+                // left, which have the least to lose elsewhere, rather than
+                // open another (filling only half full slices so cost 3-17%
+                // more slices for no Fmax measured by Vivado).
                 let x = &p.slices[s];
-                let lanes = (0..4).filter(|&l| !x.lane_free(l)).count() as f64 / 4.0;
-                let ffs = x.ffs.iter().flatten().count() as f64 / 8.0;
-                if lanes.max(ffs) >= fill_threshold() {
+                if (0..4).all(|l| !x.lane_free(l)) || x.ffs.iter().all(Option::is_some) {
                     return None;
                 }
                 fillers.iter().copied().find_map(|a| {

@@ -117,6 +117,10 @@ pub fn implement(
         // critical nets again after a legal routing gains about 1% for
         // nearly twice the time, so routing stops at the first.
         retime_every: 2,
+        // Critical connections weigh delay almost alone against congestion:
+        // the 0.9 default left them on slower detours (about 8% Fmax on the
+        // Euler designs, timed by Vivado), and nets still converge.
+        max_criticality: 0.99,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
