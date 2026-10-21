@@ -66,9 +66,12 @@ SIM OPTIONS:
               [--vcd <out.vcd>] [--uart <name>[:<clocks per bit>]]
               [--load <memory>=<file.hex>]... [--two-state | --four-state]
               [--attach <name>:<addr>:<data>:<depth>[:<clock>:<enable>:<wdata>]]...
-              [--emit-c <dir>] [--synth] [--quiet]
-    synth sim <files...> --compare synth [--clock <name>]... [--reset <name>]
-              [--reset-low <name>] [--cycles <n>] [--hold <n>] [--seed <n>]
+              [--emit-c <dir>] [--level <rtl|synth|bitstream>] [--quiet]
+    synth sim <files...> --compare <synth|bitstream> [--clock <name>]...
+              [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
+              [--seed <n>]
+              (bitstream: --device <dev> --package <pkg> --pcf <file>
+              [--bitstream <file.bin>] [--freq <MHz>])
               Runs cycles of the clock (default `clk`): inputs set by --set
               and --at, then a rising and a falling edge. Stops after --cycles
               (default 1000) or once --until holds, then prints --print
@@ -77,9 +80,12 @@ SIM OPTIONS:
               --attach drives the input <data> with the word at <addr> of a
               new memory (written on the clock's rising edge when <enable>).
               --emit-c writes a two-state C model (<top>.h, <top>.c) instead.
-              --synth simulates the iCE40 netlist synthesis makes of it.
-              --compare synth runs the RTL and its netlist under the same
-              random inputs (held about --hold cycles; resets active for
+              --level synth simulates the iCE40 netlist synthesis makes of
+              the design, --level bitstream what its bitstream implements
+              (built, or read from --bitstream), decoded back to cells; ports
+              are named after the PCF.
+              --compare runs the RTL and the netlist or bitstream under the
+              same random inputs (held about --hold cycles; resets active for
               the first 4 cycles) and compares every output bit the RTL
               defines after every rising edge.
 
@@ -179,7 +185,7 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
 /// `--timing-weight` (default 0.5).
 /// Clock targets: the PCF's `set_frequency` lines, and `--freq` for the
 /// other clocks.
-fn clocks(
+pub(crate) fn clocks(
     a: &mut Args,
     pcf: &arch_ice40::pcf::Pcf,
 ) -> Result<arch_ice40::timing::ClockConstraints, String> {
@@ -188,7 +194,7 @@ fn clocks(
     Ok(c)
 }
 
-fn timing_weight(a: &mut Args) -> Result<f64, String> {
+pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
     match a.value("--timing-weight") {
         Some(v) => v
             .parse()

@@ -169,8 +169,72 @@ fn synthesized_netlists_match_their_rtl() {
         &euler,
         &[
             "p025.v", "bcd.v", "--top", "euler25", "--set", "start=1", "--set", "rst=1", "--at",
-            "2:rst=0", "--until", "done", "--print", "answer", "--synth",
+            "2:rst=0", "--until", "done", "--print", "answer", "--level", "synth",
         ],
     );
     assert!(out.contains("answer = 4782 ") && err.contains("info: 2392 cycles"), "{out}{err}");
+}
+
+#[test]
+fn bitstreams_match_their_rtl() {
+    let d = root().join("tests/designs/euler");
+    let (out, _) = sim(
+        &d,
+        &[
+            "euler_top.v",
+            "report.v",
+            "p031.v",
+            "-D",
+            "SOLVER=euler31",
+            "-D",
+            "ANSWER_WIDTH=17",
+            "--top",
+            "euler_top",
+            "--compare",
+            "bitstream",
+            "--device",
+            "hx8k",
+            "--package",
+            "cb132",
+            "--pcf",
+            "alchitry_cu.pcf",
+            "--clock",
+            "clk",
+            "--reset-low",
+            "rst_n",
+            "--cycles",
+            "2000",
+        ],
+    );
+    assert!(out.contains("PASS"), "{out}");
+    // The answer's low byte on the LEDs, from the decoded bitstream.
+    let (out, _) = sim(
+        &d,
+        &[
+            "euler_top.v",
+            "report.v",
+            "p031.v",
+            "-D",
+            "SOLVER=euler31",
+            "-D",
+            "ANSWER_WIDTH=17",
+            "--top",
+            "euler_top",
+            "--level",
+            "bitstream",
+            "--device",
+            "hx8k",
+            "--package",
+            "cb132",
+            "--pcf",
+            "alchitry_cu.pcf",
+            "--set",
+            "rst_n=1",
+            "--cycles",
+            "400",
+            "--print",
+            "led",
+        ],
+    );
+    assert!(out.contains("led = 210 "), "{out}");
 }

@@ -9,7 +9,9 @@
 //! 2, 4 or 8 bits of a word holds one data bit per address, on a fixed data
 //! pin of the group, and address bits 8 and up select the bit in the group.
 //! I/O cells are modelled unregistered and global buffers as wires; PLLs
-//! pass their reference clock through.
+//! pass their reference clock through. The packed cells of placement
+//! (`ICESTORM_LC`, `ICESTORM_RAM`) are modelled too, so that decoded
+//! bitstreams simulate.
 
 use synth_core::{Logic, LogicVec};
 use synth_netlist::{Bit, CellId, Netlist};
@@ -143,6 +145,60 @@ pub fn add_cell(
         }
         "SB_GB" => {
             drive(m, pin("GLOBAL_BUFFER_OUTPUT"), input("USER_SIGNAL_TO_GLOBAL_BUFFER", SigBit::X))
+        }
+        // Packed cells, as placed on the die (and decoded from bitstreams).
+        "ICESTORM_LC" => {
+            let init = param_bits(nl, c, "LUT_INIT", 16);
+            let ins: Vec<SigBit> =
+                ["I0", "I1", "I2", "I3"].iter().map(|p| input(p, SigBit::ZERO)).collect();
+            let lut = m.shiftx(Sig::from_const(&init), Sig(ins.clone()), false, 0, 1).0[0];
+            if param_u64(nl, c, "CARRY_ENABLE") != 0 {
+                let cin = if param_u64(nl, c, "CIN_CONST") != 0 {
+                    SigBit::Const(Logic::from_bool(param_u64(nl, c, "CIN_SET") != 0))
+                } else {
+                    input("CIN", SigBit::ZERO)
+                };
+                let both = m.and1(ins[1], ins[2]);
+                let either = m.or1(ins[1], ins[2]);
+                let carried = m.and1(cin, either);
+                let co = m.or1(both, carried);
+                drive(m, pin("COUT"), co);
+            }
+            let Some(o) = pin("O") else { return Ok(true) };
+            if param_u64(nl, c, "DFF_ENABLE") == 0 {
+                m.connect(Sig::bit(o), Sig::bit(lut));
+                return Ok(true);
+            }
+            let set = param_u64(nl, c, "SET_NORESET") != 0;
+            let sr = pin("SR").map(|s| (Control { sig: s, pol: true }, LogicVec::from_bool(set)));
+            let (srst, arst) =
+                if param_u64(nl, c, "ASYNC_SR") != 0 { (None, sr) } else { (sr, None) };
+            m.add_cell(
+                name,
+                CellKind::Dff(Box::new(Dff {
+                    clk: Clock {
+                        sig: input("CLK", SigBit::ZERO),
+                        posedge: param_u64(nl, c, "NEG_CLK") == 0,
+                    },
+                    d: Sig::bit(lut),
+                    q: Sig::bit(o),
+                    en: pin("CEN").map(|e| Control { sig: e, pol: true }),
+                    srst,
+                    en_over_srst: true,
+                    arst,
+                    init: LogicVec::zeros(1),
+                })),
+            );
+        }
+        "ICESTORM_RAM" => {
+            let mut variant = String::from("SB_RAM40_4K");
+            if param_u64(nl, c, "NEG_CLK_R") != 0 {
+                variant.push_str("NR");
+            }
+            if param_u64(nl, c, "NEG_CLK_W") != 0 {
+                variant.push_str("NW");
+            }
+            ram(m, nl, c, pin, &variant, &name)?;
         }
         k if k.starts_with("SB_PLL40") => {
             let refclk = pin("REFERENCECLK").or_else(|| pin("PACKAGEPIN")).unwrap_or(SigBit::ZERO);

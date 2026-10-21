@@ -120,17 +120,28 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             "--reset-low",
             "--hold",
             "--seed",
+            "--device",
+            "--package",
+            "--pcf",
+            "--bitstream",
+            "--freq",
+            "--timing-weight",
+            "--level",
         ],
-        &["--four-state", "--two-state", "--trace", "--quiet", "--synth"],
+        &["--four-state", "--two-state", "--trace", "--quiet"],
     )?;
     let weft = crate::input_files(&a).iter().any(|p| crate::is_weft(p));
     let mut m = crate::load_rtl(&mut a)?;
     if let Some(what) = a.value("--compare") {
         return compare(&mut a, m, &what);
     }
-    if a.flag("--synth") {
-        m = synthesized(m)?;
-    }
+    let level = a.value("--level").unwrap_or_else(|| "rtl".into());
+    m = match level.as_str() {
+        "rtl" => m,
+        "synth" => synthesized(m)?,
+        "bitstream" => bitstream(&mut a, m)?,
+        _ => return Err(format!("--level expects rtl, synth or bitstream, got `{level}`")),
+    };
     for spec in a.values("--attach") {
         let f: Vec<&str> = spec.split(':').collect();
         let bad =
@@ -153,8 +164,9 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     } else if a.flag("--two-state") {
         false
     } else {
-        // Weft is two-state; Verilog keeps x as Icarus does.
-        !weft
+        // Weft is two-state, and so is hardware; Verilog RTL keeps x as
+        // Icarus does.
+        !weft && level == "rtl"
     };
     if let Some(dir) = a.value("--emit-c") {
         let sim = Sim::new(&m, &Options { four_state: false, prune: false })?;
@@ -367,7 +379,8 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
     synth_rtl::opt::two_state(&mut reference);
     let other = match what {
         "synth" => synthesized(m)?,
-        _ => return Err(format!("--compare expects `synth`, got `{what}`")),
+        "bitstream" => bitstream(a, m)?,
+        _ => return Err(format!("--compare expects `synth` or `bitstream`, got `{what}`")),
     };
     let clocks = {
         let c = a.values("--clock");
@@ -477,6 +490,41 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
     }
     println!("PASS {cycles} cycles");
     Ok(())
+}
+
+/// What the iCE40 bitstream of the design (built, or read from
+/// --bitstream) implements, decoded back to cells, as RTL.
+fn bitstream(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
+    let package = a.required("--package")?;
+    let pcf = arch_ice40::pcf::parse_pcf(&crate::read(&a.required("--pcf")?)?)?;
+    let cfg = match a.value("--bitstream") {
+        Some(path) => {
+            let data = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+            arch_ice40::bitstream::Config::from_bin(&data)
+                .map_err(|e| format!("{path}: {}", e.0))?
+        }
+        None => {
+            let (nl, _) =
+                arch_ice40::synth::synthesize(m, &arch_ice40::synth::SynthOptions::default())?;
+            let opts = arch_ice40::flow::FlowOptions {
+                part,
+                package: package.clone(),
+                seed: 1,
+                place_effort: 1.0,
+                timing_weight: crate::timing_weight(a)?,
+                clocks: crate::clocks(a, &pcf)?,
+                route_timing_rounds: 0,
+            };
+            arch_ice40::flow::implement(nl, &pcf.pins, &opts)?.config
+        }
+    };
+    let arch = arch_ice40::arch::Arch::new(part, &package)?;
+    let (nl, warnings) = arch_ice40::decode::decode(&cfg, &arch, &pcf.pins)?;
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+    synth_sim::netlist::from_netlist(&nl, &mut arch_ice40::sim::add_cell)
 }
 
 fn signal_of(sim: &Sim, name: &str) -> Result<synth_sim::Signal, String> {
