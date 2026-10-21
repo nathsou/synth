@@ -177,6 +177,9 @@ pub fn coverage(
     for r in routes {
         for &e in &r.edges {
             let (ti, pi) = graph.pip[e as usize];
+            if ti == crate::routing::VIRTUAL {
+                continue;
+            }
             let tile = &db.tiles[ti as usize];
             let pip = &db.templates[tile.template].pips[pi as usize];
             used.insert(tile.kind.clone());

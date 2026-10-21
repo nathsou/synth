@@ -324,12 +324,16 @@ fn net_delays(
             let mut t = delay.get(&at).copied().unwrap_or(0.0);
             for &e in path.iter().rev() {
                 let (ti, pi) = graph.pip[e as usize];
+                if ti == crate::routing::VIRTUAL {
+                    continue;
+                }
                 let tile = &db.tiles[ti as usize];
                 let tmpl = &db.templates[tile.template];
                 let pip = &tmpl.pips[pi as usize];
                 // The distance from the pip driving this pip's input wire.
                 let src_len = parent
                     .get(&edge_src(graph, e))
+                    .filter(|&&d| graph.pip[d as usize].0 != crate::routing::VIRTUAL)
                     .map(|&d| {
                         let from = &db.tiles[graph.pip[d as usize].0 as usize];
                         i32::from((from.x - tile.x).abs()) + i32::from((from.y - tile.y).abs())

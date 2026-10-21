@@ -41,6 +41,14 @@ pub struct Slice {
     pub memory: Option<Memory>,
 }
 impl Slice {
+    /// Whether the carry's DI input of `lane` comes from the lane's O5.
+    pub fn di_from_o5(&self, nl: &Netlist, lane: usize) -> bool {
+        let Some(c) = self.carry else { return false };
+        self.lut5[lane].is_some_and(|l| {
+            nl.pin_net(l, "O").is_some()
+                && nl.pin_net(l, "O") == nl.pin_net(c, &format!("DI[{lane}]"))
+        })
+    }
     /// Whether the slice needs a SLICEM site.
     pub fn needs_m(&self, nl: &Netlist) -> bool {
         self.ram.is_some() || self.luts.iter().flatten().any(|&c| is_srl(nl.cell_kind(c)))
@@ -311,6 +319,55 @@ fn lane_lut(nl: &mut Netlist, p: &Packed, c: CellId, pin: &str) -> Result<CellId
     })
 }
 
+/// A LUT for carry `c`'s DI input of `lane` on the lane's O5 output, which
+/// the carry reads inside the slice instead of through the X input: the
+/// constant, the DI net's own LUT (or a copy, if it has other readers), or
+/// a pass-through of a net the propagate LUT already reads, if its inputs
+/// fit beside the propagate LUT's in A1-A5.
+fn di_lut(
+    nl: &mut Netlist,
+    p: &Packed,
+    slice: &Slice,
+    c: CellId,
+    lane: usize,
+) -> Result<Option<CellId>, String> {
+    let Some(s) = slice.luts[lane] else { return Ok(None) };
+    if !is_lut(nl.cell_kind(s)) || lut_size(nl.cell_kind(s)) > 5 {
+        return Ok(None);
+    }
+    let pin = format!("DI[{lane}]");
+    let d = nl.pin_net(c, &pin).ok_or("carry missing DI")?;
+    let mut inputs = slice.lane_inputs(nl, lane);
+    let driver = nl.nets[d].driver.map(|x| x.cell).filter(|&x| is_lut(nl.cell_kind(x)));
+    let lut = if value(nl, d).is_some() {
+        if !inputs.contains(&d) && inputs.len() == 5 {
+            return Ok(None);
+        }
+        buffer(nl, d)?
+    } else if let Some(l) = driver.filter(|&l| lut_size(nl.cell_kind(l)) <= 5) {
+        for i in 0..lut_size(nl.cell_kind(l)) {
+            if let Some(n) = nl.pin_net(l, &format!("I{i}"))
+                && !inputs.contains(&n)
+            {
+                inputs.push(n);
+            }
+        }
+        if inputs.len() > 5 {
+            return Ok(None);
+        }
+        if !p.slots.contains_key(&l) && nl.nets[d].users.len() == 1 {
+            return Ok(Some(l));
+        }
+        replicate_lut(nl, l)?
+    } else if inputs.contains(&d) {
+        buffer(nl, d)?
+    } else {
+        return Ok(None);
+    };
+    rewire(nl, c, &pin, nl.pin_net(lut, "O").unwrap())?;
+    Ok(Some(lut))
+}
+
 pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
     nl.check().map_err(|e| e.to_string())?;
     // An inverter is a one-input LUT.
@@ -502,6 +559,10 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
             let lut = lane_lut(nl, &p, c, &format!("S[{lane}]"))?;
             slice.luts[lane] = Some(lut);
             p.slots.insert(lut, (idx, lane));
+            if let Some(lut) = di_lut(nl, &p, &slice, c, lane)? {
+                slice.lut5[lane] = Some(lut);
+                p.slots.insert(lut, (idx, lane));
+            }
         }
         p.slices.push(slice);
     }

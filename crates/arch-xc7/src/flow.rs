@@ -38,15 +38,34 @@ pub fn implement(
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
     let mut log = Vec::new();
-    let p = pack::pack(&mut nl)?;
+    let mut p = pack::pack(&mut nl)?;
     log.push(format!("packed {} slices, {} carry chains", p.slices.len(), p.chains.len()));
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
-    let placement = place::place(&db, &nl, &p, xdc, opts.seed, opts.effort)?;
+    // Timing-driven placement: criticalities from the delays the placement
+    // being annealed predicts.
+    let mut criticality = |pl: &place::Placement| {
+        let a = timer.analyze(&predictor(&db, &nl, &p, pl));
+        a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
+    };
+    let placement =
+        place::place(&db, &nl, &p, xdc, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
-    let mut features = cell_features(&db, &nl, &p, &placement, xdc)?;
-    let (mut requests, names, request_nets, owners) = requests(&db, &nl, &p, &placement)?;
+    // Detailed placement: lanes move between the placed slices, with
+    // criticalities from the delays the new slice contents predict.
+    let mut retime = |q: &Packed| {
+        let a = timer.analyze(&predictor(&db, &nl, q, &placement));
+        a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
+    };
+    let moves = crate::detail::refine(&db, &nl, &mut p, &placement, opts.seed, &mut retime)?;
+    log.push(format!(
+        "detailed placement: {moves} lane moves ({:.1}s)",
+        start.elapsed().as_secs_f64()
+    ));
+    let graph = RoutingGraph::new(&db)?;
+    let (mut requests, names, request_nets, owners, blocked_edges) =
+        requests(&db, &nl, &p, &placement, &graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
     // placement, then from the routes as they converge.
     let predicted = predictor(&db, &nl, &p, &placement);
@@ -71,7 +90,6 @@ pub fn implement(
             clock.period / 1000.0
         ));
     }
-    let graph = RoutingGraph::new(&db)?;
     log.push(format!(
         "routing {} physical nets on {} edges ({:.1}s)",
         requests.len(),
@@ -125,6 +143,7 @@ pub fn implement(
         progress: Some(&mut progress),
         retime: Some(&mut retime),
         node_class: &graph.class,
+        blocked_edges: &blocked_edges,
         ..Default::default()
     };
     let (routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
@@ -146,6 +165,8 @@ pub fn implement(
             }
         })?;
     crate::routing::verify(graph.graph(), &requests, &routes)?;
+    let pins = lut_pins(&graph, &nl, &p, &placement, &routes);
+    let mut features = cell_features(&db, &nl, &p, &placement, xdc, &pins)?;
     features.extend(graph.features(&db, &routes));
     let coverage = crate::timing::coverage(root, &db, &graph, &routes)?;
     log.push(coverage.report());
@@ -383,9 +404,71 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
 pub(crate) type Owners = BTreeMap<u32, Vec<(CellId, String, NetId)>>;
 /// Routing requests with their names and nets (none for a clock's route to
 /// its buffer), and the cell pins at the sinks.
-type Requests = (Vec<synth_route::NetRequest>, Vec<String>, Vec<Option<NetId>>, Owners);
+/// Edges the router may not use: LUT input A6 of lanes whose O5 LUT needs
+/// it high.
+type Requests = (Vec<synth_route::NetRequest>, Vec<String>, Vec<Option<NetId>>, Owners, Vec<u32>);
 
-fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Requests, String> {
+/// Whether a lane's LUT inputs may be permuted by the router: plain LUTs
+/// without constant inputs (constants route from the interconnect tile's
+/// own wires to a known pin).
+fn permutable(nl: &Netlist, slice: &pack::Slice, l: usize) -> bool {
+    slice.ram.is_none()
+        && slice.luts[l].iter().chain(&slice.lut5[l]).all(|&c| pack::is_lut(nl.cell_kind(c)))
+        && slice.lane_inputs(nl, l).iter().all(|&n| pack::value(nl, n).is_none())
+}
+
+/// The nets on each permuted lane's LUT inputs A1-A6, from the routes.
+type LutPins = FxHashMap<(usize, usize), [Option<NetId>; 6]>;
+
+fn lut_pins(
+    graph: &RoutingGraph,
+    nl: &Netlist,
+    p: &Packed,
+    pl: &Placement,
+    routes: &[synth_route::NetRoute],
+) -> LutPins {
+    let slices: FxHashMap<(u32, u32), usize> =
+        pl.slices.iter().enumerate().map(|(s, x)| ((x.tile as u32, x.index as u32), s)).collect();
+    let mut pins = LutPins::default();
+    for r in routes {
+        for &e in &r.edges {
+            let (t, pin) = graph.pip[e as usize];
+            if t != crate::routing::VIRTUAL {
+                continue;
+            }
+            let v = (graph.dst[e as usize] - graph.first_virtual) as usize;
+            let (tile, site, l) = graph.virtual_lanes[v / 6];
+            let Some(&s) = slices.get(&(tile, site)) else { continue };
+            let l = usize::from(l);
+            let net = p.slices[s].lane_inputs(nl, l)[v % 6];
+            pins.entry((s, l)).or_default()[pin as usize] = Some(net);
+        }
+    }
+    pins
+}
+
+fn requests(
+    db: &Device,
+    nl: &Netlist,
+    p: &Packed,
+    pl: &Placement,
+    graph: &RoutingGraph,
+) -> Result<Requests, String> {
+    // A lane with an O5 LUT holds A6 high: no input may take it.
+    let mut blocked = Vec::new();
+    for (s, slice) in p.slices.iter().enumerate() {
+        for l in 0..4 {
+            if slice.lut5[l].is_some() && permutable(nl, slice, l) {
+                let site = &pl.slices[s];
+                let a6 = site.node(db, &format!("{}6", char::from(b'A' + l as u8)))? as usize;
+                let first = graph.lane_sinks[&(site.tile as u32, site.index as u32, l as u8)];
+                blocked.extend(
+                    (graph.offsets[a6]..graph.offsets[a6 + 1])
+                        .filter(|&e| (first..first + 6).contains(&graph.dst[e as usize])),
+                );
+            }
+        }
+    }
     let mut sinks: BTreeMap<NetId, BTreeSet<u32>> = BTreeMap::new();
     let mut owners: Owners = BTreeMap::new();
     let mut add = |n: NetId, node: u32, c: CellId, pin: &str| {
@@ -490,6 +573,14 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
                         .iter()
                         .position(|&x| x == n)
                         .ok_or("LUT input missing from its site")?;
+                    // The router picks the input of a permutable lane: the
+                    // net's own sink behind all six.
+                    if permutable(nl, &p.slices[s], l) {
+                        let first =
+                            graph.lane_sinks[&(site.tile as u32, site.index as u32, l as u8)];
+                        add(n, first + i as u32, c, name);
+                        continue;
+                    }
                     Some(format!("{lane}{}", i + 1))
                 }
                 k if pack::is_ff(k) => match name {
@@ -506,7 +597,10 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
                     if name.starts_with("S[") {
                         None
                     } else if name.starts_with("DI[") {
-                        Some(format!("{}X", char::from(b'A' + name.as_bytes()[3] - b'0')))
+                        let lane = usize::from(name.as_bytes()[3] - b'0');
+                        // From the lane's O5 inside the slice, or its X input.
+                        (!p.slices[s].di_from_o5(nl, lane))
+                            .then(|| format!("{}X", char::from(b'A' + lane as u8)))
                     } else if name == "CI" && pack::value(nl, n).is_none() {
                         Some("CIN".into())
                     } else if matches!(name, "CI" | "CYINIT") {
@@ -581,7 +675,7 @@ fn requests(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement) -> Result<Req
         names.push(nl.str(nl.nets[n].name).into());
         nets.push(Some(n));
     }
-    Ok((requests, names, nets, owners))
+    Ok((requests, names, nets, owners, blocked))
 }
 fn enable(f: &mut BTreeSet<String>, prefix: &str, s: &str) {
     f.insert(format!("{prefix}.{s}"));
@@ -593,8 +687,15 @@ fn external(nl: &Netlist, p: &Packed, n: NetId) -> bool {
     nl.nets[n].users.iter().any(|u| {
         let Some(&(s, l)) = p.slots.get(&u.cell) else { return true };
         let slice = &p.slices[s];
+        let pin = nl.str(nl.cells[u.cell].pins[u.pin as usize].name);
         let internal = Some(s) == driver
             && (slice.f8 == Some(u.cell)
+                || slice.carry == Some(u.cell)
+                    && pin
+                        .strip_prefix("DI[")
+                        .and_then(|x| x.strip_suffix(']'))
+                        .and_then(|x| x.parse().ok())
+                        .is_some_and(|k| slice.di_from_o5(nl, k))
                 || pack::is_ff(nl.cell_kind(u.cell))
                     && pack::ff_mux(nl, slice, l, u.cell) != "BYPASS");
         !internal
@@ -606,6 +707,7 @@ fn lut_config(
     nl: &Netlist,
     s: &pack::Slice,
     l: usize,
+    routed: Option<&[Option<NetId>; 6]>,
 ) -> Result<Option<(u64, Vec<String>)>, String> {
     let lane = char::from(b'A' + l as u8);
     // Data input 1 comes from the lane's I input (D has no other choice).
@@ -641,12 +743,17 @@ fn lut_config(
     }
     // Physical input j + 1 carries the lane's j-th input net; unrouted
     // inputs read 1. With an O5 LUT, A6 is high: O6 reads the upper half.
-    let pins = s.lane_inputs(nl, l);
+    // A routed permutation names the input of each net instead.
+    let pins: Vec<Option<NetId>> = match routed {
+        Some(r) => r.to_vec(),
+        None => s.lane_inputs(nl, l).into_iter().map(Some).collect(),
+    };
     let value = |c: CellId, j: usize| -> Result<u64, String> {
         let mut idx = 0;
         for i in 0..pack::lut_size(nl.cell_kind(c)) {
             let n = nl.pin_net(c, &format!("I{i}")).ok_or("unconnected LUT input")?;
-            let pos = pins.iter().position(|&x| x == n).ok_or("LUT input missing from its site")?;
+            let pos =
+                pins.iter().position(|&x| x == Some(n)).ok_or("LUT input missing from its site")?;
             idx |= (j >> pos & 1) << i;
         }
         Ok(pack::param(nl, c, "INIT", 0) >> idx & 1)
@@ -671,13 +778,14 @@ fn cell_features(
     p: &Packed,
     pl: &Placement,
     xdc: &Constraints,
+    pins: &LutPins,
 ) -> Result<BTreeSet<String>, String> {
     let mut f = BTreeSet::new();
     for (i, s) in p.slices.iter().enumerate() {
         let prefix = pl.slices[i].prefix(db);
         for l in 0..4 {
             let lane = char::from(b'A' + l as u8);
-            let Some((init, modes)) = lut_config(nl, s, l)? else { continue };
+            let Some((init, modes)) = lut_config(nl, s, l, pins.get(&(i, l)))? else { continue };
             for bit in 0..64 {
                 if init >> bit & 1 != 0 {
                     enable(&mut f, &prefix, &format!("{lane}LUT.INIT[{bit}]"));
@@ -764,6 +872,9 @@ fn cell_features(
             };
             enable(&mut f, &prefix, &format!("PRECYINIT.{init}"));
             for l in 0..4 {
+                if s.di_from_o5(nl, usize::from(l)) {
+                    enable(&mut f, &prefix, &format!("CARRY4.{}CY0", char::from(b'A' + l)));
+                }
                 let used =
                     |pin: &str| nl.pin_net(c, pin).is_some_and(|n| !nl.nets[n].users.is_empty());
                 if used(&format!("O[{l}]")) {

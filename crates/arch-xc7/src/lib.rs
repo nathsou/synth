@@ -1,6 +1,7 @@
 //! Native Artix-7 synthesis and experimental physical implementation.
 pub mod bitstream;
 mod bram;
+mod detail;
 pub mod device;
 mod dsp;
 pub mod fasm;
