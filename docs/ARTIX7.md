@@ -274,8 +274,10 @@ XC7A100T-CSG324 with the same pins and clock, each judged by Vivado
 Each design is constrained 20% beyond the best Fmax any flow reached at
 100 MHz, so that every flow works for timing (Vivado stops optimizing once
 a constraint is met; synth's results do not depend on the target). synth's
-figures are the median of three placement seeds. Slices are occupied
-slices after routing. Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
+figures are the median of three placement seeds, at revision `c7acb03`
+(later revisions only fix a bitstream bug of Euler 58's and route critical
+sinks first, by about 1% more). Slices are occupied slices after routing.
+Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
 
 | Design | Slices: Vivado / netlist / synth | LUTs: Vivado / netlist | FFs: Vivado / netlist / synth | MHz, Vivado's timer: Vivado / netlist / synth | synth's estimate |
 |---|---:|---:|---:|---:|---:|
