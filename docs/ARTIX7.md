@@ -337,7 +337,7 @@ Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
 - **Placement and routing.** synth's own placement and routing remain
   5–28% slower than Vivado's under a tight constraint (Euler 43, where
   synth's netlist is much better, is 18% faster; Euler 31 varies most
-  between seeds, 219–252 MHz). Since revision `c7acb03` the analytical
+  between seeds, 226–254 MHz). Since revision `c7acb03` the analytical
   placer, per-input setup checks, Vivado's flip-flop timing and
   timing-driven packing gained about 6% on average (2.1% of it since
   `ae1dd6c`, over six seeds). Routing is no longer the main gap: Vivado
