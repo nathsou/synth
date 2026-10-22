@@ -1,8 +1,11 @@
 //! Word-level multiplexers from bit-level ones.
 //!
-//! Process lowering builds each bit of a register's next value as its own
-//! chain of one-bit multiplexers. Simulated as they are, every bit pays for
-//! its own instructions and the bits are gathered back into words. A
+//! Some logic reaches the simulator bit by bit: the elaborator merges `if`
+//! and `case` branches a variable at a time, but other constructs (indexed
+//! assignments, other front ends, netlist-level passes) still build each
+//! bit of a value as its own chain of one-bit multiplexers. Simulated as
+//! they are, every bit pays for its own instructions and the bits are
+//! gathered back into words. A
 //! multiplexer is bitwise, so one-bit multiplexers with the same select can
 //! be one wide multiplexer: this pass merges those at the same depth (so
 //! that no merged cell feeds another of its own group), ordering each group
