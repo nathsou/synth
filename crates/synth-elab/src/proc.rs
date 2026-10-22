@@ -71,6 +71,23 @@ impl ProcState {
     }
 }
 
+/// Variable bits grouped by variable (wire), each group in bit order.
+fn by_variable(mut ks: Vec<SigBit>) -> Vec<Vec<SigBit>> {
+    ks.sort();
+    let mut groups: Vec<Vec<SigBit>> = Vec::new();
+    for k in ks {
+        let same = |g: &Vec<SigBit>| match (g[0], k) {
+            (SigBit::Wire(a, _), SigBit::Wire(b, _)) => a == b,
+            _ => false,
+        };
+        match groups.last_mut() {
+            Some(g) if same(g) => g.push(k),
+            _ => groups.push(vec![k]),
+        }
+    }
+    groups
+}
+
 /// Splits an expression like `rst`, `!rst_n`, `~rst_n`, `rst_n == 0` into
 /// the tested signal and whether it is negated.
 fn split_condition(e: &Expr) -> Option<(&Expr, bool)> {
@@ -581,23 +598,30 @@ impl<'a> Elab<'a> {
         }
         for &k in &keys {
             out.note(k);
-            let in_t = t.vals.contains_key(&k);
-            let in_e = e.vals.contains_key(&k);
-            if in_t || in_e {
-                let tv = t.vals.get(&k).copied().unwrap_or(k);
-                let ev = e.vals.get(&k).copied().unwrap_or(k);
-                let v =
-                    if tv == ev { tv } else { self.out.mux(c, Sig::bit(ev), Sig::bit(tv)).0[0] };
-                out.vals.insert(k, v);
+        }
+        // One multiplexer per variable (its bits in order), not per bit.
+        for nba in [false, true] {
+            fn map(st: &ProcState, nba: bool) -> &HashMap<SigBit, SigBit> {
+                if nba { &st.nba } else { &st.vals }
             }
-            let in_t = t.nba.contains_key(&k);
-            let in_e = e.nba.contains_key(&k);
-            if in_t || in_e {
-                let tv = t.nba.get(&k).copied().unwrap_or(k);
-                let ev = e.nba.get(&k).copied().unwrap_or(k);
-                let v =
-                    if tv == ev { tv } else { self.out.mux(c, Sig::bit(ev), Sig::bit(tv)).0[0] };
-                out.nba.insert(k, v);
+            let ks: Vec<SigBit> = keys
+                .iter()
+                .copied()
+                .filter(|k| map(&t, nba).contains_key(k) || map(&e, nba).contains_key(k))
+                .collect();
+            for group in by_variable(ks) {
+                let tv: Sig =
+                    group.iter().map(|k| map(&t, nba).get(k).copied().unwrap_or(*k)).collect();
+                let ev: Sig =
+                    group.iter().map(|k| map(&e, nba).get(k).copied().unwrap_or(*k)).collect();
+                let v = self.out.mux(c, ev, tv);
+                for (&k, &b) in group.iter().zip(v.iter()) {
+                    if nba {
+                        out.nba.insert(k, b);
+                    } else {
+                        out.vals.insert(k, b);
+                    }
+                }
             }
         }
         out.writes = t.writes;
@@ -894,19 +918,29 @@ impl<'a> Elab<'a> {
         }
         for &k in &keys {
             out.note(k);
-            for nba in [false, true] {
-                let get =
-                    |st: &ProcState| if nba { st.nba.get(&k) } else { st.vals.get(&k) }.copied();
-                if states.iter().chain([&dflt]).all(|st| get(st).is_none()) {
-                    continue;
-                }
-                let d = get(&dflt).unwrap_or(k);
-                let vs: Vec<SigBit> = states.iter().map(|st| get(st).unwrap_or(k)).collect();
-                let v = self.parallel_merge(k, d, &vs, &sel);
-                if nba {
-                    out.nba.insert(k, v);
-                } else {
-                    out.vals.insert(k, v);
+        }
+        for nba in [false, true] {
+            let get = |st: &ProcState, k: SigBit| {
+                if nba { st.nba.get(&k) } else { st.vals.get(&k) }.copied()
+            };
+            let ks: Vec<SigBit> = keys
+                .iter()
+                .copied()
+                .filter(|&k| states.iter().chain([&dflt]).any(|st| get(st, k).is_some()))
+                .collect();
+            for group in by_variable(ks) {
+                let d: Sig = group.iter().map(|&k| get(&dflt, k).unwrap_or(k)).collect();
+                let vs: Vec<Sig> = states
+                    .iter()
+                    .map(|st| group.iter().map(|&k| get(st, k).unwrap_or(k)).collect())
+                    .collect();
+                let v = self.parallel_merge(&group, &d, &vs, &sel);
+                for (&k, &b) in group.iter().zip(v.iter()) {
+                    if nba {
+                        out.nba.insert(k, b);
+                    } else {
+                        out.vals.insert(k, b);
+                    }
                 }
             }
         }
@@ -917,26 +951,54 @@ impl<'a> Elab<'a> {
         self.proc = Some(out);
     }
 
-    /// The value of variable bit `k` after parallel items: `vs[i]` when
-    /// `sel[i]`, else `d`. A bit that keeps its old value somewhere becomes a
+    /// The values of variable bits `ks` after parallel items: `vs[i]` when
+    /// `sel[i]`, else `d`. Bits that keep their old value somewhere become a
     /// chain of multiplexers instead (whose feedback flip-flop enable
-    /// inference recognises).
-    fn parallel_merge(&mut self, k: SigBit, d: SigBit, vs: &[SigBit], sel: &[SigBit]) -> SigBit {
+    /// inference recognises). Bits with the same items setting them, and the
+    /// same choice, share a multiplexer.
+    fn parallel_merge(&mut self, ks: &[SigBit], d: &Sig, vs: &[Sig], sel: &[SigBit]) -> Sig {
         let unknown = |x: SigBit| matches!(x, SigBit::Const(Logic::X | Logic::Z));
-        let differ: Vec<usize> = (0..vs.len()).filter(|&i| vs[i] != d && !unknown(vs[i])).collect();
-        if differ.is_empty() {
-            return d;
-        }
-        if d == k || differ.iter().any(|&i| vs[i] == k) {
-            let mut v = d;
-            for &i in &differ {
-                v = self.out.mux(sel[i], Sig::bit(v), Sig::bit(vs[i])).0[0];
+        // Per bit: the items setting it to another value, and whether it
+        // keeps its old value somewhere.
+        let shape = |j: usize| {
+            let differ: Vec<usize> =
+                (0..vs.len()).filter(|&i| vs[i].0[j] != d.0[j] && !unknown(vs[i].0[j])).collect();
+            let keeps = d.0[j] == ks[j] || differ.iter().any(|&i| vs[i].0[j] == ks[j]);
+            (differ, keeps)
+        };
+        // (Shape, bits of that shape.)
+        type Group = ((Vec<usize>, bool), Vec<usize>);
+        let mut groups: Vec<Group> = Vec::new();
+        for j in 0..ks.len() {
+            let sh = shape(j);
+            match groups.iter_mut().find(|g| g.0 == sh) {
+                Some(g) => g.1.push(j),
+                None => groups.push((sh, vec![j])),
             }
-            return v;
         }
-        let cases = differ.iter().map(|&i| Sig::bit(vs[i])).collect();
-        let s = differ.iter().map(|&i| sel[i]).collect();
-        self.out.pmux(Sig::bit(d), cases, s).0[0]
+        let mut out = d.clone();
+        for ((differ, keeps), js) in groups {
+            if differ.is_empty() {
+                continue;
+            }
+            let part = |s: &Sig| -> Sig { js.iter().map(|&j| s.0[j]).collect() };
+            let dv = part(d);
+            let v = if keeps {
+                let mut v = dv;
+                for &i in &differ {
+                    v = self.out.mux(sel[i], v, part(&vs[i]));
+                }
+                v
+            } else {
+                let cases = differ.iter().map(|&i| part(&vs[i])).collect();
+                let s = differ.iter().map(|&i| sel[i]).collect();
+                self.out.pmux(dv, cases, s)
+            };
+            for (k, &j) in js.iter().enumerate() {
+                out.0[j] = v.0[k];
+            }
+        }
+        out
     }
 
     /// Whether constant case items cover all values of a `w`-bit subject.

@@ -1,6 +1,15 @@
 //! The `synth` command-line tool.
 
+/// Prints `info: …` to stderr, above any progress line.
+macro_rules! info {
+    ($($t:tt)*) => {
+        synth_core::progress::info(&format!($($t)*))
+    };
+}
+
 mod args;
+mod progress;
+mod sim;
 mod xc7;
 
 use std::process::ExitCode;
@@ -18,6 +27,7 @@ COMMANDS:
     build      Synthesise, place and route a design into a bitstream
     synth      Synthesise a design to iCE40 or Artix-7 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
+    sim        Simulate a design (or write it as a C model with --emit-c)
     pnr        Place and route a mapped netlist (RTLIL)
     pack-fasm  Assemble Artix-7 FASM into a bitstream
     unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
@@ -25,7 +35,8 @@ COMMANDS:
     unpack     Convert a binary bitstream to an IceStorm .asc file
     fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
-    playground Serve the playground web app (--port <n>, default 8080)
+    playground Serve the playground web app (--port <n>, default 8080;
+               --xc7-db <prjxray-db/artix7> for the Artix-7 boards)
     help       Print this message
     version    Print version information
 
@@ -77,12 +88,54 @@ ELAB OPTIONS:
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
               [--pass <clean|merge|share|trees|fsm|wreduce|shiftmul|dff|memff|memtrans|memregs|two-state>]...
 
+SIM OPTIONS:
+    synth sim <files.v|.weft...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
+              [-P <NAME=VALUE>] [--clock <name>] [--cycles <n>]
+              [--until <name>[=<value>]] [--set <name>=<value>]...
+              [--at <cycle>:<name>=<value>]... [--print <name>]... [--trace]
+              [--vcd <out.vcd>] [--uart <name>[:<clocks per bit>]]
+              [--load <memory>=<file.hex>]... [--two-state | --four-state]
+              [--attach <name>:<addr>:<data>:<depth>[:<clock>:<enable>:<wdata>]]...
+              [--emit-c <dir>] [--level <rtl|synth|bitstream>] [--optimize]
+              [--stats] [--quiet]
+    synth sim <files...> --compare <synth|bitstream> [--clock <name>]...
+              [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
+              [--seed <n>]
+              (bitstream: --device <dev> --package <pkg> --pcf <file>
+              [--bitstream <file.bin>] [--freq <MHz>])
+              Runs cycles of the clock (default `clk`): inputs set by --set
+              and --at, then a rising and a falling edge. Stops after --cycles
+              (default 1000) or once --until holds, then prints --print
+              signals (every cycle with --trace). Weft simulates two-state,
+              Verilog four-state. --uart decodes an 8N1 output line.
+              --attach drives the input <data> with the word at <addr> of a
+              new memory (written on the clock's rising edge when <enable>).
+              --emit-c writes a two-state C model (<top>.h, <top>.c) instead,
+              optimized as --optimize does. --optimize runs synthesis's RTL
+              optimizations first and merges bit-level multiplexers and
+              flip-flops into words: faster, but internal signals may be
+              gone or renamed. --stats prints what the program runs.
+              --level synth simulates the iCE40 netlist synthesis makes of
+              the design, --level bitstream what its bitstream implements
+              (built, or read from --bitstream), decoded back to cells; ports
+              are named after the PCF.
+              --compare runs the RTL and the netlist or bitstream under the
+              same random inputs (held about --hold cycles; resets active for
+              the first 4 cycles) and compares every output bit the RTL
+              defines after every rising edge.
+
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
               [--freq <MHz>] [--timing-allow-fail] [--route-timing-rounds <n>]
               [--incremental [<checkpoint>]]
 ";
+
+/// Whether the command line selects the Artix-7 flow.
+fn xc7_family(argv: &[String]) -> bool {
+    argv.windows(2).any(|w| w[0] == "--family" && matches!(w[1].as_str(), "artix7" | "xc7"))
+        || argv.iter().any(|a| matches!(a.as_str(), "--family=artix7" | "--family=xc7"))
+}
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -97,9 +150,11 @@ fn main() -> ExitCode {
         }
         Some("check") => cmd_check(&argv[1..]),
         Some("elab") => cmd_elab(&argv[1..]),
-        Some("build") => cmd_build(&argv[1..]),
-        Some("synth") => cmd_synth(&argv[1..]),
-        Some("pnr") => cmd_pnr(&argv[1..]),
+        Some("sim") => sim::cmd_sim(&argv[1..]),
+        // The flows show their progress on a terminal.
+        Some("build") => progress::run(xc7_family(&argv), || cmd_build(&argv[1..])),
+        Some("synth") => progress::run(xc7_family(&argv), || cmd_synth(&argv[1..])),
+        Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
         Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
         Some("unpack-xc7") => xc7::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
@@ -129,11 +184,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn read(path: &str) -> Result<String, String> {
+pub(crate) fn read(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
 }
 
-fn write(path: &str, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write(path: &str, data: &[u8]) -> Result<(), String> {
     std::fs::write(path, data).map_err(|e| format!("{path}: {e}"))
 }
 
@@ -152,8 +207,10 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
         return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
     }
     let t = std::time::Instant::now();
+    synth_core::progress::step("elaborate", "");
     let m = load_rtl(a)?;
-    eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    info!("elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    synth_core::progress::step("synthesize", "");
     let (nl, log) = if family == "ice40" {
         let mut synth_opts = arch_ice40::synth::SynthOptions::default();
         if let Some(value) = a.value("--carry-min-width") {
@@ -172,20 +229,17 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
         arch_xc7::synth::synthesize(m)?
     };
     for l in &log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     let stats = nl.stats();
-    eprintln!(
-        "info: {}",
-        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
-    );
+    info!("{}", stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
     Ok(nl)
 }
 
 /// `--timing-weight` (default 0.5).
 /// Clock targets: the PCF's `set_frequency` lines, and `--freq` for the
 /// other clocks.
-fn clocks(
+pub(crate) fn clocks(
     a: &mut Args,
     pcf: &arch_ice40::pcf::Pcf,
 ) -> Result<arch_ice40::timing::ClockConstraints, String> {
@@ -194,7 +248,7 @@ fn clocks(
     Ok(c)
 }
 
-fn timing_weight(a: &mut Args) -> Result<f64, String> {
+pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
     match a.value("--timing-weight") {
         Some(v) => v
             .parse()
@@ -251,9 +305,12 @@ fn cmd_fmt(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_playground(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let mut a = Args::parse(argv, &["--port", "--host", "--xc7-db"], &[])?;
     let port = a.value("--port").unwrap_or_else(|| "8080".into());
     let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    if let Some(db) = a.value("--xc7-db") {
+        synth_playground::XC7_DB.set(db.into()).ok();
+    }
     a.finish()?;
     synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
@@ -425,7 +482,7 @@ fn implement(
         Ok(bytes) => match arch_ice40::checkpoint::Checkpoint::decode(&bytes) {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("info: ignoring checkpoint {path}: {e}; using fresh PnR");
+                info!("ignoring checkpoint {path}: {e}; using fresh PnR");
                 None
             }
         },
@@ -471,7 +528,7 @@ fn checkpoint_path(
     std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
     let path = format!("{dir}/{}-{}-{:016x}.chk", opts.part, opts.package, key.finish());
     a.set_value("--incremental", path.clone());
-    eprintln!("info: incremental checkpoint: {path}");
+    info!("incremental checkpoint: {path}");
     Ok(Some(path))
 }
 
@@ -498,7 +555,7 @@ fn write_checkpoint(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// and never replaces the previous checkpoint.
 fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), String> {
     for l in &res.log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     if let Some(out) = a.value("-o") {
         write(&out, &res.config.to_bin())?;
@@ -536,26 +593,26 @@ fn cmd_unpack(argv: &[String]) -> Result<(), String> {
 }
 
 /// The input files given on the command line.
-fn input_files(a: &Args) -> Vec<String> {
+pub(crate) fn input_files(a: &Args) -> Vec<String> {
     (0..).map_while(|i| a.positional(i, "file").ok()).collect()
 }
 
-fn is_weft(path: &str) -> bool {
+pub(crate) fn is_weft(path: &str) -> bool {
     path.ends_with(".weft")
 }
 
 /// Elaborates the design given on the command line, Verilog or Weft, into
 /// RTL. Weft sources may be mixed with Verilog files that define their
 /// extern modules.
-fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
+pub(crate) fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     let paths = input_files(a);
     if !paths.iter().any(|p| is_weft(p)) {
         let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
         let (sm, src) = load_verilog(a)?;
         let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
-        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::StdBlackBoxes);
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         return m.ok_or_else(|| format!("{} error(s)", diags.error_count()));
     }
@@ -576,7 +633,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     } else {
         let (src, diags) = synth_verilog::parse_files(&mut sm, &verilog, &preproc_options(a));
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         if diags.has_errors() {
             return Err(format!("{} error(s)", diags.error_count()));
@@ -587,14 +644,14 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     let warnings =
         diags.items.iter().filter(|d| d.severity == synth_core::Severity::Warning).count();
     match m {
         Some(m) => {
             if warnings > 0 {
-                eprintln!("info: {warnings} warning(s)");
+                info!("{warnings} warning(s)");
             }
             Ok(m)
         }
@@ -637,7 +694,7 @@ fn load_verilog(
     }
     let (src, diags) = synth_verilog::parse_files(&mut sm, &files, &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     if diags.has_errors() {
         return Err(format!("{} error(s)", diags.error_count()));
@@ -655,31 +712,31 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         "two-state" => opt::two_state(m),
         "merge" => {
             let n = opt::merge_identical(m);
-            eprintln!("info: merge: {n} duplicate cells");
+            info!("merge: {n} duplicate cells");
         }
         "fsm" => {
             let n = synth_rtl::fsm::simplify_state_compares(m);
-            eprintln!("info: fsm: {n} state comparisons simplified");
+            info!("fsm: {n} state comparisons simplified");
         }
         "trees" => {
             let n = opt::chains_to_trees(m);
-            eprintln!("info: trees: {n} multiplexer chains as trees");
+            info!("trees: {n} multiplexer chains as trees");
         }
         "share" => {
             let n = opt::share_arith(m);
-            eprintln!("info: share: {n} multiplexed operations shared");
+            info!("share: {n} multiplexed operations shared");
         }
         "wreduce" => {
             let n = opt::reduce_widths(m);
-            eprintln!("info: wreduce: {n} result bits constant");
+            info!("wreduce: {n} result bits constant");
         }
         "shiftmul" => {
             let n = opt::shift_by_multiple(m);
-            eprintln!("info: shiftmul: {n} shifts by multiples as multiplexers");
+            info!("shiftmul: {n} shifts by multiples as multiplexers");
         }
         "dff" => {
             let n = synth_rtl::dff::extract_controls(m);
-            eprintln!("info: dff: {n} flip-flop bits gained controls");
+            info!("dff: {n} flip-flop bits gained controls");
         }
         "memff" => {
             if mem::remove_feedback_writes(m) > 0 {
@@ -687,7 +744,7 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             }
             mem::merge_write_ports(m);
             let n = mem::merge_read_ffs(m);
-            eprintln!("info: memff: {n} read ports made synchronous");
+            info!("memff: {n} read ports made synchronous");
         }
         "memtrans" => {
             for mi in mems() {
@@ -737,11 +794,11 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top"], &[])?;
     if input_files(&a).iter().any(|p| is_weft(p)) {
         let m = load_rtl(&mut a)?;
-        eprintln!("info: `{}` checked: no errors", m.name);
+        info!("`{}` checked: no errors", m.name);
         return Ok(());
     }
     let (_, src) = load_verilog(&mut a)?;
-    eprintln!("info: parsed {} module(s)", src.modules.len());
+    info!("parsed {} module(s)", src.modules.len());
     Ok(())
 }
 
@@ -754,8 +811,8 @@ fn cmd_elab(argv: &[String]) -> Result<(), String> {
         run_rtl_pass(&mut m, p)?;
     }
     let stats = m.stats();
-    eprintln!(
-        "info: {} wires, cells: {}",
+    info!(
+        "{} wires, cells: {}",
         m.wires.len(),
         stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     );

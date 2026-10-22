@@ -141,9 +141,19 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
             &synth_logic::lower::LowerOptions { carry_min_width: Some(min) },
         )
     };
+    // Progress: a step per mapping (the shared and wide ones may not run).
+    let mappings = alternatives.len() + 4;
+    let mut mapped = 0;
+    let mut next = |what: &str| {
+        mapped += 1;
+        let f = (mapped - 1) as f64 / mappings as f64;
+        synth_core::progress::advance(f, || format!("mapping {mapped} of {mappings}: {what}"));
+    };
+    next("carry chains of 3 bits and more");
     let mut best = map_logic(initial, 8)?;
     let mut selected = 3;
     for min in alternatives {
+        next(&format!("carry chains of {min} bits and more"));
         let candidate = map_logic(lower(min)?, 8)?;
         if candidate.improves(&best) {
             (best, selected) = (candidate, min);
@@ -153,6 +163,7 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     // a worse local optimum. Retry only the selected arithmetic partition
     // and keep the existing mapping when any cost increases.
     let mut cuts = 8;
+    next("more cuts");
     let candidate = map_logic(lower(selected)?, 16)?;
     if candidate.improves(&best) {
         (best, cuts) = (candidate, 16);
@@ -162,6 +173,7 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     // Keep it only when the final resource vector and delay dominate the
     // unshared mapping; fewer LUTs alone must not buy extra carry blocks.
     let mut shared = lower(selected)?;
+    next("shared carry chains");
     if synth_logic::carry::merge_duplicate_carries(&mut shared) != 0 {
         let mut candidate = map_logic(shared, cuts)?;
         candidate.share_luts()?;
@@ -172,6 +184,7 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     }
     // Wide functions remap the selected partition only: comparing every
     // candidate with them would let their small savings steer the choice.
+    next("wide functions");
     let wide = MapOptions { wide: Some(lutmap::Wide { delay: vec![F7, F8] }), ..map_options(cuts) };
     if let Some((graph, mapping)) =
         synth_logic::mapping::widen(&best.net, &best.mapping, &wide, chain_timing, netlist_luts)?
@@ -196,6 +209,7 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     log.push(format!(
         "selected minimum carry width {selected}, {cuts} cuts; LUT/FF/CARRY4/BRAM18/DSP48 {cost:?}"
     ));
+    crate::pll::lower(&mut nl, &mut log)?;
     Ok((nl, log))
 }
 

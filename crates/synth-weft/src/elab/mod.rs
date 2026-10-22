@@ -32,6 +32,10 @@ pub struct Options {
     pub top: Option<String>,
     /// Generic arguments of the top module: integers or `"strings"`.
     pub params: Vec<(String, String)>,
+    /// Generic arguments for the top module only if it declares them (like
+    /// a board's clock frequency); unlike `params`, they do not choose the
+    /// top.
+    pub defaults: Vec<(String, String)>,
     /// Check every module, without requiring a top (for editors).
     pub check_all: bool,
 }
@@ -1007,6 +1011,17 @@ fn elaborate_top<'a>(d: &mut Design<'a>, def: &'a ast::Module, opts: &Options) -
             )));
         };
         given.insert(g.name.name.clone(), val);
+    }
+    for (k, v) in &opts.defaults {
+        if given.contains_key(k) || !def.generics.iter().any(|g| &g.name.name == k) {
+            continue;
+        }
+        let Some(val) = parse_param(v) else {
+            return d.err(Diagnostic::global_error(format!(
+                "bad value `{v}` for `{k}`: expected an integer, `true`, `false` or a \"string\""
+            )));
+        };
+        given.insert(k.clone(), val);
     }
     let mut cx = ModCx::new(def, String::new(), true);
     cx.bind_generics(d, def, &[], given, def.name.span)?;

@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from '../layout.js';
 import { tokenize, highlightHtml, langOf } from '../highlight.js';
+import * as progress from '../progress.js';
 
 function graph(n, edges) {
   return {
@@ -69,4 +70,41 @@ test('highlighting: semantic kinds and languages', () => {
   const pcf = tokenize('set_io clk 15 # pin', 'pcf');
   assert.equal(pcf[0][2], 'tok-kw');
   assert.equal(pcf[pcf.length - 1][2], 'tok-com');
+});
+
+test('highlight: XDC constraints read as pin files', () => {
+  assert.equal(langOf('pins.xdc'), 'pcf');
+  const toks = tokenize('set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports {clk}] # c', 'pcf');
+  const kw = toks.filter((t) => t[2] === 'tok-kw').length;
+  assert.ok(kw >= 4, `keywords: ${kw}`);
+});
+
+test('progress: steps before the current one are full, the bar adds up', () => {
+  for (const family of Object.keys(progress.STEPS)) {
+    const start = progress.layout(family, null);
+    assert.equal(start.fraction, 0);
+    assert.ok(Math.abs(start.segments.reduce((a, s) => a + s.share, 0) - 1) < 1e-9);
+    let last = 0;
+    for (const s of start.segments) {
+      const mid = progress.layout(family, { step: s.step, fraction: 0.5, detail: '' });
+      assert.ok(mid.fraction > last, `${family} ${s.step} moves the bar on`);
+      last = mid.fraction;
+      const unknown = progress.layout(family, { step: s.step, fraction: null, detail: '' });
+      assert.equal(unknown.segments[unknown.index].fill, null);
+      assert.ok(unknown.segments.slice(0, unknown.index).every((x) => x.fill === 1));
+    }
+  }
+  assert.equal(progress.describe({ step: 'route', fraction: 0.5, detail: 'iteration 3' }, 2500), 'Routing · iteration 3 · 2.5 s');
+});
+
+test('progress: learning moves the weights toward a run\'s shares', () => {
+  const run = { elaborate: 0, synthesize: 600, pack: 0, device: 100, place: 100, route: 200, bitstream: 0, timing: 0 };
+  let w = {};
+  for (let i = 0; i < 30; i++) w = progress.learn('Artix-7', w, run);
+  assert.ok(Math.abs(w.synthesize - 60) < 1, `synthesize ${w.synthesize}`);
+  assert.equal(w.timing, 0.5);
+  // Halfway through synthesis is now about 30% of the run.
+  const l = progress.layout('Artix-7', { step: 'synthesize', fraction: 0.5, detail: '' }, w);
+  assert.ok(Math.abs(l.fraction - 0.3) < 0.02, `fraction ${l.fraction}`);
+  assert.deepEqual(progress.learn('Artix-7', w, {}), w);
 });

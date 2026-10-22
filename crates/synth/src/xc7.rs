@@ -77,8 +77,8 @@ pub fn pack_stats(nl: &synth_netlist::Netlist) -> Result<(), String> {
     let luts = count(&|k| arch_xc7::pack::is_lut(k));
     let carries = count(&|k| k == "CARRY4");
     let slicem = packed.slices.iter().filter(|s| s.needs_m(&nl)).count();
-    eprintln!(
-        "info: packed {{\"slices\":{},\"slicem\":{slicem},\"lut\":{luts},\"carry4\":{carries}}}",
+    info!(
+        "packed {{\"slices\":{},\"slicem\":{slicem},\"lut\":{luts},\"carry4\":{carries}}}",
         packed.slices.len()
     );
     Ok(())
@@ -117,7 +117,7 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
     let name = nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into());
     let result = arch_xc7::flow::implement(nl, Path::new(&db), &xdc, &opts)?;
     for l in &result.log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     if let Some(p) = a.value("--fasm") {
         write(&p, arch_xc7::fasm::text(&result.features).as_bytes())?;

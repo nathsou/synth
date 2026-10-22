@@ -3,7 +3,7 @@
 //!
 //! - `ICESTORM_LC`: LUT4 + carry + flip-flop of one logic cell;
 //! - `SB_IO` (top-level ports get one inserted automatically);
-//! - `ICESTORM_RAM`, `SB_GB`.
+//! - `ICESTORM_RAM`, `SB_GB`, `SB_PLL40_CORE`.
 //!
 //! It also forms carry chains, folds constant LUT inputs into truth tables,
 //! drives remaining constants from dedicated logic cells, and promotes clocks
@@ -30,6 +30,9 @@ pub struct Packed {
     /// Carry chains: logic cells that must occupy consecutive positions,
     /// first (least significant) element first.
     pub chains: Vec<Vec<CellId>>,
+    /// PLLs whose `LOCK` output is read, with the logic cell passing it on:
+    /// `LOCK` reaches the logic cells of one tile only.
+    pub lock_buffers: Vec<(CellId, CellId)>,
 }
 
 /// Packing statistics and warnings, for reporting.
@@ -112,17 +115,45 @@ pub fn pack(nl: &mut Netlist) -> Result<(Packed, PackReport), String> {
         report.messages.push(format!("{merged} flip-flops packed into carry-only logic cells"));
     }
     pack_ram(nl)?;
+    let lock_buffers = buffer_locks(nl)?;
     fold_lut_constants(nl);
     drive_constants(nl)?;
     promote_globals(nl, &mut report)?;
     nl.check().map_err(|e| e.0)?;
     for c in nl.live_cells() {
         let k = nl.cell_kind(c);
-        if !matches!(k, LC | RAM | IO | GB) {
+        if !matches!(k, LC | RAM | IO | GB | crate::pll::CORE) {
             return Err(format!("cell {} of type {k} is not supported", nl.str(nl.cells[c].name)));
         }
     }
-    Ok((Packed { chains }, report))
+    Ok((Packed { chains, lock_buffers }, report))
+}
+
+/// Puts a logic cell (a buffer) between each PLL's `LOCK` and its users: the
+/// signal reaches only the logic cells of the tile next to the PLL.
+fn buffer_locks(nl: &mut Netlist) -> Result<Vec<(CellId, CellId)>, String> {
+    let plls: Vec<CellId> =
+        nl.live_cells().filter(|&c| nl.cell_kind(c) == crate::pll::CORE).collect();
+    let mut out = Vec::new();
+    for pll in plls {
+        let Some(lock) = nl.pin_net(pll, "LOCK") else { continue };
+        if nl.nets[lock].users.is_empty() {
+            continue;
+        }
+        let name = format!("{}$lock", nl.str(nl.cells[pll].name));
+        let lc = new_lc(nl, &name);
+        // O = I0.
+        set_int(nl, lc, "LUT_INIT", 0xAAAA);
+        let buffered = nl.add_net(&name);
+        for p in nl.nets[lock].users.clone() {
+            nl.disconnect(p);
+            nl.connect(p, buffered).map_err(|e| e.0)?;
+        }
+        nl.connect(pin_ref(nl, lc, "I0").unwrap(), lock).map_err(|e| e.0)?;
+        nl.connect(pin_ref(nl, lc, "O").unwrap(), buffered).map_err(|e| e.0)?;
+        out.push((pll, lc));
+    }
+    Ok(out)
 }
 
 /// Gives every top-level port an `SB_IO` (absorbing explicitly instantiated
@@ -715,7 +746,13 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
         let Some(drv) = net.driver else { continue };
         // Constant drivers need no global network.
         let dname = nl.str(nl.cells[drv.cell].name);
-        if nl.cell_kind(drv.cell) == GB || dname == "$PACKER_VCC" || dname == "$PACKER_GND" {
+        // Nor do PLL outputs on a global network.
+        let dpin = nl.str(nl.cells[drv.cell].pins[drv.pin as usize].name);
+        if nl.cell_kind(drv.cell) == GB
+            || dname == "$PACKER_VCC"
+            || dname == "$PACKER_GND"
+            || dpin == "PLLOUTGLOBAL"
+        {
             continue;
         }
         let (mut clocks, mut resets, mut enables) = (0, 0, 0);

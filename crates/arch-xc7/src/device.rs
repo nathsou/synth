@@ -6,7 +6,7 @@ use std::path::Path;
 use synth_core::FxHashMap;
 
 pub(crate) fn read_json(p: &Path) -> Result<Value, String> {
-    json::parse(&std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?)
+    json::parse(&synth_core::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?)
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 fn u32_field(v: &Value, key: &str) -> Result<u32, String> {
@@ -210,7 +210,7 @@ impl Device {
             });
         }
         let mut pins = BTreeMap::new();
-        let csv = std::fs::read_to_string(root.join(&part.name).join("package_pins.csv"))
+        let csv = synth_core::fs::read_to_string(&root.join(&part.name).join("package_pins.csv"))
             .map_err(|e| e.to_string())?;
         for line in csv.lines().skip(1) {
             let cols: Vec<_> = line.split(',').collect();
@@ -402,7 +402,7 @@ impl Template {
         let mut fixed = BTreeSet::new();
         for prefix in ["segbits", "ppips"] {
             let path = root.join(format!("{prefix}_{}.db", kind.to_lowercase()));
-            match std::fs::read_to_string(&path) {
+            match synth_core::fs::read_to_string(&path) {
                 Ok(s) => {
                     for line in s.lines() {
                         let mut words = line.split_whitespace();

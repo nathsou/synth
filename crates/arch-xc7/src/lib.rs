@@ -17,6 +17,7 @@ pub mod xdc;
 pub mod flow;
 pub mod pack;
 pub mod place;
+pub mod pll;
 pub mod routing;
 
 mod physical_bram;

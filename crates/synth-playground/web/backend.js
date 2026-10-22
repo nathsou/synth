@@ -9,6 +9,10 @@ class WorkerChannel {
     this.worker.onmessage = (e) => {
       const p = this.pending.get(e.data.id);
       if (!p) return;
+      if (e.data.progress) {
+        p.onProgress?.(e.data.progress);
+        return;
+      }
       this.pending.delete(e.data.id);
       if (e.data.ok) p.resolve(e.data.out);
       else p.reject(new Error(e.data.error));
@@ -18,20 +22,38 @@ class WorkerChannel {
       this.pending.clear();
     };
   }
-  call(method, body) {
+  call(method, body, onProgress) {
     const id = this.next++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, onProgress });
       this.worker.postMessage({ id, method, body });
     });
   }
 }
 
 class HttpChannel {
-  async call(method, body) {
-    const r = await fetch(`api/${method}`, { method: 'POST', body, headers: { 'Content-Type': 'application/json' } });
+  async call(method, body, onProgress) {
+    const url = onProgress ? `api/${method}?progress` : `api/${method}`;
+    const r = await fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/json' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
+    if (!onProgress || !r.body) return r.text();
+    // One JSON object of progress per line, then the result.
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    const parts = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      let start = 0;
+      for (let nl = value.indexOf('\n'); nl >= 0; nl = value.indexOf('\n', start)) {
+        parts.push(value.slice(start, nl));
+        const line = parts.join('');
+        parts.length = 0;
+        start = nl + 1;
+        try { onProgress(JSON.parse(line)); } catch { /* not progress */ }
+      }
+      parts.push(value.slice(start));
+    }
+    return parts.join('');
   }
 }
 
@@ -43,10 +65,10 @@ class Latest {
     this.busy = false;
     this.waiting = null;
   }
-  call(method, body) {
+  call(method, body, onProgress) {
     return new Promise((resolve, reject) => {
       if (this.waiting) this.waiting.reject(Object.assign(new Error('superseded'), { superseded: true }));
-      this.waiting = { method, body, resolve, reject };
+      this.waiting = { method, body, onProgress, resolve, reject };
       this.pump();
     });
   }
@@ -56,7 +78,8 @@ class Latest {
     this.waiting = null;
     this.busy = true;
     try {
-      job.resolve(JSON.parse(await this.channel.call(job.method, job.body)));
+      job.onProgress?.(null);
+      job.resolve(JSON.parse(await this.channel.call(job.method, job.body, job.onProgress)));
     } catch (e) {
       job.reject(e);
     } finally {
@@ -93,7 +116,9 @@ export class Backend {
     return JSON.parse(await this.direct.call(method, body));
   }
 
-  run(req) { return this.runs.call('run', JSON.stringify(req)); }
+  /** `onProgress` receives `{step, fraction, detail}` as the flow runs, and
+   *  null when the run starts (after waiting for the previous one). */
+  run(req, onProgress) { return this.runs.call('run', JSON.stringify(req), onProgress); }
   analyze(req) { return this.checks.call('analyze', JSON.stringify(req)); }
   async format(text) { return JSON.parse(await this.checker.call('format', JSON.stringify({ text }))); }
 }

@@ -18,3 +18,4 @@ synth-elab.workspace = true
 workspace = true
 
 [dev-dependencies]
+synth-sim.workspace = true

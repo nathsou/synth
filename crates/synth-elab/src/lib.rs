@@ -43,6 +43,24 @@ impl BlackBoxes for NoBlackBoxes {
     }
 }
 
+/// The family-neutral primitives every backend implements: `synth_pll`
+/// (a clock from the device's PLL, see the Weft standard library).
+#[derive(Debug, Default)]
+pub struct StdBlackBoxes;
+
+impl BlackBoxes for StdBlackBoxes {
+    fn port_dir(&self, module: &str, port: &str) -> Option<PortDir> {
+        match (module, port) {
+            ("synth_pll", "clk_in") => Some(PortDir::Input),
+            ("synth_pll", "clk_out" | "locked") => Some(PortDir::Output),
+            _ => None,
+        }
+    }
+    fn is_blackbox(&self, module: &str) -> bool {
+        module == "synth_pll"
+    }
+}
+
 /// Elaboration options.
 #[derive(Clone, Debug, Default)]
 pub struct ElabOptions {

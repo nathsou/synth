@@ -199,9 +199,22 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   checks part ID, frame boundaries, ECC and CRC.
 
 The 35T uses X-Ray's shared 50T fabric, as the reference tools do; site
-legality at device capacity is not independently validated. PLL/MMCM,
-RAMB36, DSP cascades, advanced I/O and incremental checkpoints are not
-implemented. `--timing-allow-fail` is an explicit bring-up override: without
+legality at device capacity is not independently validated. RAMB36, DSP
+cascades, MMCMs, advanced I/O and incremental checkpoints are not
+implemented.
+
+- **PLLs.** The family-neutral `synth_pll<IN_HZ, OUT_HZ>` (Weft standard
+  library, or a Verilog black box) becomes a `PLLE2_ADV` in internal
+  feedback, on the PLL site nearest its reference clock's pad (a
+  clock-capable pin then reaches it through `HCLK_CMT_CCIO`), its output on
+  a BUFG and its control inputs tied as nextpnr-xilinx ties them. The
+  feedback multiplier is always 8: the lock and loop filter settings
+  (`LKTABLE`, `TABLE`) depend on it, and the only values known here are
+  nextpnr-xilinx's, for 8. From a 100 MHz board clock the VCO runs at
+  800 MHz and CLKOUT0 divides it (100, 80, 66.7, 57.1, 50, 40, 33.3, 25 MHz,
+  ...). The PLL's output frequency is its clock's timing target. Its
+  features match nextpnr-xilinx's for the same design bit for bit, apart
+  from the BUFG chosen; it has not run on hardware yet. `--timing-allow-fail` is an explicit bring-up override: without
 it a build writes its bitstream and exits unsuccessfully, never reporting
 uncertified timing as passing.
 

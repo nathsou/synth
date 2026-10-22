@@ -43,7 +43,7 @@ impl<'a> Assembler<'a> {
             };
             let path = self.root.join(format!("segbits_{}{suffix}.db", kind.to_lowercase()));
             let mut table = BTreeMap::new();
-            match std::fs::read_to_string(&path) {
+            match synth_core::fs::read_to_string(&path) {
                 Ok(s) => {
                     for (line_no, line) in s.lines().enumerate() {
                         let mut tokens = line.split_whitespace();
@@ -86,7 +86,7 @@ impl<'a> Assembler<'a> {
         if !self.ppips.contains_key(kind) {
             let path = self.root.join(format!("ppips_{}.db", kind.to_lowercase()));
             let mut set = BTreeSet::new();
-            match std::fs::read_to_string(&path) {
+            match synth_core::fs::read_to_string(&path) {
                 Ok(s) => {
                     for line in s.lines() {
                         if let Some((_, f)) =

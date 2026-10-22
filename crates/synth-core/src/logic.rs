@@ -231,6 +231,28 @@ impl LogicVec {
         self.width
     }
 
+    /// Builds a vector from its two planes, 64 bits per word, least
+    /// significant first (missing words are 0, bits above `width` ignored).
+    pub fn from_planes(width: usize, val: &[u64], unk: &[u64]) -> Self {
+        let mut r = Self::zeros(width);
+        let n = r.val.len();
+        let (nv, nu) = (n.min(val.len()), n.min(unk.len()));
+        r.val[..nv].copy_from_slice(&val[..nv]);
+        r.unk[..nu].copy_from_slice(&unk[..nu]);
+        r.mask();
+        r
+    }
+
+    /// The value plane: bit `i` of word `i / 64` is 1 for `1` and `z`.
+    pub fn val_words(&self) -> &[u64] {
+        &self.val
+    }
+
+    /// The unknown plane: bit `i` of word `i / 64` is 1 for `x` and `z`.
+    pub fn unk_words(&self) -> &[u64] {
+        &self.unk
+    }
+
     #[inline]
     pub fn get(&self, i: usize) -> Logic {
         debug_assert!(i < self.width);

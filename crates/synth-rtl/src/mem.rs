@@ -312,10 +312,20 @@ pub fn to_registers(m: &mut Module, mi: MemId) -> Result<(), String> {
         for (w, nw) in next.iter_mut().enumerate() {
             let a = LogicVec::from_i64(w as i64 + mem.offset, wr.addr.width());
             let hit = m.eq_const(wr.addr.clone(), &a);
-            let mut y = Sig::new();
-            for b in 0..width {
-                let we = m.and1(hit, wr.en.0[b]);
-                y.push(m.mux(we, Sig::bit(nw.0[b]), Sig::bit(wr.data.0[b])).0[0]);
+            // One multiplexer per enable signal (usually one for the word).
+            let mut y = nw.clone();
+            let mut enables: Vec<SigBit> = wr.en.iter().copied().collect();
+            enables.sort();
+            enables.dedup();
+            for e in enables {
+                let bits: Vec<usize> = (0..width).filter(|&b| wr.en.0[b] == e).collect();
+                let we = m.and1(hit, e);
+                let old: Sig = bits.iter().map(|&b| nw.0[b]).collect();
+                let new: Sig = bits.iter().map(|&b| wr.data.0[b]).collect();
+                let v = m.mux(we, old, new);
+                for (k, &b) in bits.iter().enumerate() {
+                    y.0[b] = v.0[k];
+                }
             }
             *nw = y;
         }

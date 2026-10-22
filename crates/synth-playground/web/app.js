@@ -6,7 +6,8 @@ import { Schematic } from './schematic.js';
 import { ChipView } from './chipview.js';
 import { BitstreamView, renderPipeline, renderTiming, renderProblems, renderLog } from './panels.js';
 import { settings, openSettings } from './settings.js';
-import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64 } from './util.js';
+import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
+import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins } from './util.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,6 +37,10 @@ class App {
     this.devices = [];
     this.view = 'pipeline';
     this.docState = new Map();
+    // The run in progress: {family, start, p}; its elapsed time ticks on
+    // between reports.
+    this.running = null;
+    setInterval(() => this.running && this.renderProgress(), 500);
   }
 
   async start() {
@@ -70,12 +75,12 @@ class App {
   exampleProject(ex) {
     return {
       example: ex.id,
-      files: [...ex.files.map((f) => ({ ...f })), { name: 'pins.pcf', text: ex.pcf }],
+      files: [...ex.files.map((f) => ({ ...f })), { name: ex.pins_file || 'pins.pcf', text: ex.pins ?? ex.pcf }],
       pcfAuto: true,
       active: ex.files[0].name,
       part: ex.part,
       package: ex.package,
-      top: '',
+      top: ex.top || '',
     };
   }
 
@@ -133,7 +138,7 @@ class App {
     $('theme').addEventListener('click', () => settings.set('theme', settings.get('theme') === 'dark' ? 'light' : 'dark'));
     $('share').addEventListener('click', () => this.share());
     $('download').addEventListener('click', () => {
-      if (this.result?.bin) download(`${this.result.top || 'design'}.bin`, fromBase64(this.result.bin));
+      if (this.result?.bin) download(this.result.bin_name || `${this.result.top || 'design'}.bin`, fromBase64(this.result.bin));
     });
     $('run-options').addEventListener('click', (e) => this.runOptions(e.currentTarget));
     for (const b of $('view-tabs').querySelectorAll('button')) b.addEventListener('click', () => this.openView(b.dataset.view));
@@ -212,19 +217,28 @@ class App {
   /** After a device change: the pins of the new package's board, then run. */
   devicePins() {
     const dev = this.devices.find((d) => d.part === this.project.part);
-    const pcf = dev?.pcf?.[this.project.package];
-    const file = this.project.files.find((f) => f.name.endsWith('.pcf'));
-    if (pcf !== undefined) {
+    const pins = dev?.pins?.[this.project.package];
+    const file = this.project.files.find((f) => isPins(f.name));
+    if (pins !== undefined) {
       const where = dev.boards?.[this.project.package] || `${this.project.part.toUpperCase()} ${this.project.package}`;
+      // Another family's constraints (.pcf or .xdc) are replaced without
+      // asking: they cannot apply.
+      const other = file && file.name.split('.').pop() !== dev.pins_file.split('.').pop();
       if (!file) {
-        this.project.files.push({ name: 'pins.pcf', text: pcf });
+        this.project.files.push({ name: dev.pins_file, text: pins });
         this.project.pcfAuto = true;
         this.renderFiles();
-      } else if (file.text !== pcf && (this.project.pcfAuto || confirm(`Replace ${file.name} with the pins for the ${where}?`))) {
-        file.text = pcf;
+      } else if (file.text !== pins && (other || this.project.pcfAuto || confirm(`Replace ${file.name} with the pins for the ${where}?`))) {
+        const was = file.name;
+        file.text = pins;
+        if (other) file.name = dev.pins_file;
         this.project.pcfAuto = true;
-        if (this.project.active === file.name) this.editor.setDoc(file.name, pcf);
-        toast(`Pins: ${dev.boards?.[this.project.package] ? `the ${where}` : 'chosen by the placer'}`);
+        if (this.project.active === was) {
+          this.project.active = file.name;
+          this.editor.setDoc(file.name, pins);
+        }
+        if (other) this.renderFiles();
+        toast(`Pins: ${dev.boards?.[this.project.package] ? `the ${where}` : dev.family === 'Artix-7' ? 'none (give every port a pin)' : 'chosen by the placer'}`);
       }
     }
     this.save();
@@ -312,7 +326,7 @@ class App {
   }
 
   newFile() {
-    const name = prompt('File name (.weft, .v or .pcf):', 'new.weft');
+    const name = prompt('File name (.weft, .v, .pcf or .xdc):', 'new.weft');
     if (!name) return;
     if (this.project.files.some((f) => f.name === name)) return toast(`${name} exists already`);
     const text = name.endsWith('.weft') ? '// A new module.\nmodule example(in a: bool, out y: bool) {\n    y = !a;\n}\n' : '';
@@ -360,7 +374,7 @@ class App {
     const f = this.file(this.project.active);
     if (!f) return;
     f.text = text;
-    if (f.name.endsWith('.pcf')) this.project.pcfAuto = false;
+    if (isPins(f.name)) this.project.pcfAuto = false;
     this.modified();
     if (settings.get('liveCheck')) this.scheduleAnalyze();
     if (settings.get('autoRun')) this.scheduleRun();
@@ -385,7 +399,7 @@ class App {
   // ----- analysis and runs -----
 
   sources() {
-    return this.project.files.filter((f) => !f.name.endsWith('.pcf'));
+    return this.project.files.filter((f) => !isPins(f.name));
   }
 
   async analyze() {
@@ -454,11 +468,14 @@ class App {
   async run() {
     if (!this.project) return;
     this.scheduleRun?.cancel();
-    const pcf = this.project.files.find((f) => f.name.endsWith('.pcf'));
+    const pins = this.project.files.find((f) => isPins(f.name));
     const files = this.sources().map((f) => ({ name: f.name, text: f.text }));
+    const dev = this.devices.find((d) => d.part === this.project.part);
     const req = {
       files,
-      pcf: pcf ? pcf.text : '',
+      pins: pins ? pins.text : '',
+      // The board's clock, for a top with a CLK_HZ parameter.
+      clock_hz: dev?.clock_hz?.[this.project.package],
       part: this.project.part,
       package: this.project.package,
       top: this.project.top,
@@ -470,16 +487,81 @@ class App {
     const t0 = performance.now();
     this.status('busy', 'Running the flow…');
     $('run').disabled = true;
+    const state = { family: dev?.family || 'iCE40', start: t0, p: null, steps: [] };
+    const onProgress = (p) => {
+      const now = performance.now();
+      // Null when the run starts (it may have waited for the previous one).
+      if (p === null) Object.assign(state, { start: now, p: null, steps: [] });
+      else {
+        if (p.step !== state.p?.step) state.steps.push([p.step, now]);
+        state.p = p;
+      }
+      this.running = state;
+      this.renderProgress();
+    };
     try {
-      const out = await this.backend.run(req);
+      const out = await this.backend.run(req, onProgress);
+      if (this.running === state) this.running = null;
+      if (out.ok && state.steps.length) this.learnSteps(state);
       this.resultTexts = Object.fromEntries(files.map((f) => [f.name, f.text]));
       this.showResult(out, performance.now() - t0);
     } catch (e) {
       if (e.superseded) return;
       this.status('error', e.message);
     } finally {
+      if (this.running === state) this.running = null;
+      if (!this.running) {
+        // The line fills up, fades out, then goes back to the start.
+        const line = $('progress-line');
+        if (line.classList.contains('active')) line.style.width = '100%';
+        line.classList.remove('active');
+        setTimeout(() => { if (!this.running) line.style.width = '0'; }, 400);
+      }
       $('run').disabled = false;
     }
+  }
+
+  /** Learns the share of each step from a finished run, so that the next
+   *  runs' bars move about evenly. */
+  learnSteps(state) {
+    const end = performance.now();
+    const durations = {};
+    state.steps.forEach(([step, at], i) => {
+      durations[step] = (durations[step] || 0) + ((state.steps[i + 1]?.[1] ?? end) - at);
+    });
+    const key = `progress:${state.family}`;
+    store.set(key, learnProgress(state.family, store.get(key, {}), durations));
+  }
+
+  /** The status bar during a run: a bar with a segment per step of the
+   *  flow, the step, what it is doing and the time so far; and the whole
+   *  run's progress as a line under the top bar. */
+  renderProgress() {
+    const state = this.running;
+    state.learned ??= store.get(`progress:${state.family}`, {});
+    const { segments, fraction, index, count } = progressLayout(state.family, state.p, state.learned);
+    const el = $('status');
+    // Built once per run, then updated, so that the bars move smoothly.
+    if (this.progressView?.state !== state || !el.contains(this.progressView.bar)) {
+      const fills = segments.map(() => h('div', { class: 'fill' }));
+      const bar = h('div', { class: 'progress' },
+        segments.map((s, i) => h('div', { class: 'segment', style: { flexGrow: s.share }, title: s.label }, fills[i])));
+      const step = h('span', { class: 'muted' });
+      const text = h('span', { class: 'progress-text' });
+      el.className = 'status busy';
+      el.replaceChildren(bar, step, text);
+      this.progressView = { state, bar, fills, step, text };
+    }
+    const v = this.progressView;
+    segments.forEach((s, i) => {
+      v.fills[i].classList.toggle('indeterminate', s.fill === null);
+      v.fills[i].style.width = `${100 * (s.fill ?? 1)}%`;
+    });
+    v.step.textContent = index >= 0 ? `${index + 1}/${count}` : '';
+    v.text.textContent = describeProgress(state.p, performance.now() - state.start);
+    const line = $('progress-line');
+    line.classList.add('active');
+    line.style.width = `${100 * fraction}%`;
   }
 
   showResult(out, ms) {
@@ -489,7 +571,7 @@ class App {
     const errors = (out.diagnostics || []).filter((d) => d.severity === 'error').length;
     if (out.ok) {
       const clk = out.timing?.clocks?.[0];
-      this.status('ok', `${out.top}: ${out.chip ? `${out.chip.usage.lc} LCs` : 'synthesised'}${clk ? `, ${clk.fmax_mhz.toFixed(1)} MHz` : ''} · ${Math.round(ms)} ms`);
+      this.status('ok', `${out.top}: ${out.chip ? `${out.chip.usage.lc} LCs` : out.placed ? `${out.placed.slices} slices` : 'synthesised'}${clk ? `, ${clk.fmax_mhz.toFixed(1)} MHz` : ''} · ${Math.round(ms)} ms`);
     } else {
       this.status('error', errors ? `${errors} error${errors > 1 ? 's' : ''}` : out.error || 'failed');
     }

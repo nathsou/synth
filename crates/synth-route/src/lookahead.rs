@@ -57,23 +57,30 @@ impl Lookahead {
         let classes = class.iter().map(|&c| c as usize + 1).max().unwrap_or(1);
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
         let chunk = samples.len().div_ceil(threads).max(1);
-        let found: Vec<(Vec<f32>, Vec<f32>)> = std::thread::scope(|s| {
-            let workers: Vec<_> = samples
-                .chunks(chunk)
-                .map(|chunk| {
-                    s.spawn(move || {
-                        let mut search = Search::new(g.graph.num_nodes(), classes * cells);
-                        for &sink in chunk {
-                            for by_delay in [false, true] {
-                                search.run(g, class, sink, radius, by_delay);
-                            }
-                        }
-                        (search.cost, search.delay)
-                    })
-                })
-                .collect();
-            workers.into_iter().map(|w| w.join().expect("lookahead search panicked")).collect()
-        });
+        let search = move |chunk: &[u32]| {
+            let mut search = Search::new(g.graph.num_nodes(), classes * cells);
+            for (i, &sink) in chunk.iter().enumerate() {
+                // The first tenth of routing (reports from worker threads
+                // are dropped).
+                synth_core::progress::advance(0.1 * i as f64 / chunk.len() as f64, || {
+                    "building the routing lookahead".into()
+                });
+                for by_delay in [false, true] {
+                    search.run(g, class, sink, radius, by_delay);
+                }
+            }
+            (search.cost, search.delay)
+        };
+        // One thread searches in place (WebAssembly cannot spawn threads).
+        let found: Vec<(Vec<f32>, Vec<f32>)> = if threads == 1 {
+            vec![search(&samples)]
+        } else {
+            std::thread::scope(|s| {
+                let workers: Vec<_> =
+                    samples.chunks(chunk).map(|chunk| s.spawn(move || search(chunk))).collect();
+                workers.into_iter().map(|w| w.join().expect("lookahead search panicked")).collect()
+            })
+        };
         let mut cost = vec![f32::INFINITY; classes * cells];
         let mut delay = cost.clone();
         for (c, d) in found {

@@ -9,9 +9,10 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    time::Instant,
 };
 use synth_core::FxHashMap;
+use synth_core::progress;
+use synth_core::time::Instant;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
 #[derive(Clone, Debug)]
@@ -38,6 +39,25 @@ pub fn implement(
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
     let mut log = Vec::new();
+    // As in Vivado, constraints of ports the design does not have are
+    // dropped, so one board's file serves every design on it.
+    let ports: BTreeSet<&str> = nl
+        .live_cells()
+        .filter(|&c| matches!(nl.cell_kind(c), "$input" | "$output"))
+        .map(|c| nl.str(nl.cells[c].name))
+        .collect();
+    let mut xdc = xdc.clone();
+    let unused: Vec<String> =
+        xdc.ports.keys().filter(|n| !ports.contains(n.as_str())).cloned().collect();
+    for n in &unused {
+        xdc.ports.remove(n);
+        xdc.clocks.remove(n);
+    }
+    if !unused.is_empty() {
+        log.push(format!("XDC constrains ports the design does not have: {}", unused.join(", ")));
+    }
+    let xdc = &xdc;
+    progress::step("pack", "");
     let original = nl.clone();
     let mut p = pack::pack(&mut nl)?;
     // Timing-driven packing: the cells critical in the first packing, timed
@@ -54,6 +74,7 @@ pub fn implement(
         p.chains.len(),
         critical.len()
     ));
+    progress::step("device", &format!("loading {}", opts.part));
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
@@ -63,8 +84,10 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    progress::advance(0.6, || "building the routing graph".into());
     let graph = RoutingGraph::new(&db)?;
     let clocked = graph.clocked(&db)?;
+    progress::step("place", "");
     let placement =
         place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
@@ -74,6 +97,7 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, q, &placement));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    progress::advance(0.95, || "detailed placement".into());
     let moves = crate::detail::refine(&db, &nl, &mut p, &placement, opts.seed, &mut retime)?;
     log.push(format!(
         "detailed placement: {moves} lane moves ({:.1}s)",
@@ -85,6 +109,7 @@ pub fn implement(
     if let Ok(path) = std::env::var("SYNTH_XC7_MACROS") {
         std::fs::write(&path, packing_macros(&nl, &p)).map_err(|e| e.to_string())?;
     }
+    progress::step("route", "");
     let (mut requests, names, request_nets, owners, blocked_edges) =
         requests(&db, &nl, &p, &placement, &graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
@@ -118,7 +143,7 @@ pub fn implement(
         start.elapsed().as_secs_f64()
     ));
     for line in &log {
-        eprintln!("info: {line}");
+        progress::info(line);
     }
     let route_opts = synth_route::RouteOptions {
         // Wires span up to 18 tiles: a lookahead by wire class bounds the
@@ -140,12 +165,12 @@ pub fn implement(
         timing_rounds: 3,
         ..Default::default()
     };
-    let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
-        eprintln!(
-            "info: route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
+    let mut iterations = |iteration: usize, routed: usize, overused: &[usize]| {
+        progress::info(&format!(
+            "route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
             overused.len(),
             start.elapsed().as_secs_f64()
-        );
+        ));
     };
     let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
         let wires =
@@ -159,15 +184,15 @@ pub fn implement(
             .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
             .collect();
         let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
-        eprintln!(
-            "info: routed timing estimate: {:.3} ns ({:.1}s)",
+        progress::info(&format!(
+            "routed timing estimate: {:.3} ns ({:.1}s)",
             score / 1000.0,
             start.elapsed().as_secs_f64()
-        );
+        ));
         synth_route::Retimed { criticality, score }
     };
     let hooks = synth_route::RouteHooks {
-        progress: Some(&mut progress),
+        progress: Some(&mut iterations),
         retime: Some(&mut retime),
         node_class: &graph.class,
         blocked_edges: &blocked_edges,
@@ -192,6 +217,7 @@ pub fn implement(
             }
         })?;
     crate::routing::verify(graph.graph(), &requests, &routes)?;
+    progress::step("bitstream", "");
     let pins = lut_pins(&graph, &nl, &p, &placement, &routes);
     let mut features = cell_features(&db, &nl, &p, &placement, xdc, &pins)?;
     features.extend(graph.features(&db, &routes));
@@ -210,6 +236,7 @@ pub fn implement(
         features.len(),
         start.elapsed().as_secs_f64()
     ));
+    progress::step("timing", "");
     let wires =
         crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, &routes, &owners);
     let routed = |c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0);
@@ -222,22 +249,13 @@ pub fn implement(
     }
     for clock in &timing {
         let name = nl.str(nl.nets[clock.net].name);
-        let target = xdc
-            .clocks
-            .iter()
-            .find(|(port, _)| {
-                nl.live_cells().any(|c| {
-                    nl.str(nl.cells[c].name) == port.as_str()
-                        && nl.pin_net(c, "PAD") == Some(clock.net)
-                })
-            })
-            .map(|(_, &ns)| {
-                format!(
-                    ", target {ns:.3} ns: {}",
-                    if clock.period <= ns * 1000.0 { "met" } else { "MISSED" }
-                )
-            })
-            .unwrap_or_default();
+        let target = target_ns(&nl, xdc, clock.net).map(|ns| {
+            format!(
+                ", target {ns:.3} ns: {}",
+                if clock.period <= ns * 1000.0 { "met" } else { "MISSED" }
+            )
+        });
+        let target = target.unwrap_or_default();
         log.push(format!(
             "timing estimate: clock {name}: {:.3} ns ({:.1} MHz){target}",
             clock.period / 1000.0,
@@ -270,6 +288,25 @@ pub fn implement(
     drop(predicted);
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
+/// The target period (ns) of a clock net: its port's `create_clock`, or the
+/// frequency of the PLL driving it.
+pub fn target_ns(nl: &Netlist, xdc: &Constraints, net: NetId) -> Option<f64> {
+    if let Some(d) = nl.nets[net].driver
+        && nl.cell_kind(d.cell) == crate::pll::PLL
+    {
+        let hz = nl.param(d.cell, crate::pll::OUT_HZ).and_then(synth_netlist::Param::as_u64)?;
+        return Some(1e9 / hz as f64);
+    }
+    xdc.clocks
+        .iter()
+        .find(|(port, _)| {
+            nl.live_cells().any(|c| {
+                nl.str(nl.cells[c].name) == port.as_str() && nl.pin_net(c, "PAD") == Some(net)
+            })
+        })
+        .map(|(_, &ns)| ns)
+}
+
 /// The local GND_WIRE and VCC_WIRE nodes of the constant sinks that are
 /// interconnect inputs.
 fn local_constants(
@@ -300,8 +337,10 @@ fn local_constants(
     }
     let mut out: FxHashMap<u32, (u32, u32)> =
         wanted.iter().filter_map(|n| inputs.get(n).map(|&c| (*n, c))).collect();
-    // Block RAM and DSP pins are one pip beyond an interconnect input.
-    for t in db.tiles.iter().filter(|t| t.kind.starts_with("BRAM_") || t.kind.starts_with("DSP_")) {
+    // Block RAM, DSP and PLL pins are one pip beyond an interconnect input.
+    for t in db.tiles.iter().filter(|t| {
+        t.kind.starts_with("BRAM_") || t.kind.starts_with("DSP_") || t.kind.starts_with("CMT_TOP")
+    }) {
         for pip in &db.templates[t.template].pips {
             let (src, dst) = (t.nodes[pip.src as usize], t.nodes[pip.dst as usize]);
             if wanted.contains(&dst)
@@ -347,7 +386,11 @@ fn location(
     let site = if let Some(&(s, _)) = p.slots.get(&c) {
         &pl.slices[s]
     } else {
-        pl.rams.get(&c).or_else(|| pl.dsps.get(&c)).or_else(|| pl.ports.get(&c))?
+        pl.rams
+            .get(&c)
+            .or_else(|| pl.dsps.get(&c))
+            .or_else(|| pl.ports.get(&c))
+            .or_else(|| pl.plls.get(&c))?
     };
     let t = &db.tiles[site.tile];
     Some(((t.x, t.y), (site.tile, site.index)))
@@ -385,7 +428,9 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
     if let Some(site) = pl.ports.get(&d.cell) {
         return site.node(db, "I");
     }
-    if let Some(site) = pl.rams.get(&d.cell).or_else(|| pl.dsps.get(&d.cell)) {
+    if let Some(site) =
+        pl.rams.get(&d.cell).or_else(|| pl.dsps.get(&d.cell)).or_else(|| pl.plls.get(&d.cell))
+    {
         let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name).replace(['[', ']'], "");
         return site.node(db, &pin);
     }
@@ -525,6 +570,12 @@ fn requests(
         }
         if let Some(site) = pl.dsps.get(&c) {
             for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site)? {
+                add(n, site.node(db, &pin)?, c, &pin);
+            }
+            continue;
+        }
+        if let Some(site) = pl.plls.get(&c) {
+            for (pin, n) in crate::pll::inputs(nl, c) {
                 add(n, site.node(db, &pin)?, c, &pin);
             }
             continue;
@@ -972,6 +1023,9 @@ fn cell_features(
     }
     for (&c, site) in &pl.dsps {
         f.extend(crate::physical_dsp::features(db, nl, c, site)?);
+    }
+    for (&c, site) in &pl.plls {
+        f.extend(crate::pll::features(db, nl, c, site)?);
     }
     for site in pl.clocks.values() {
         let t = &db.tiles[site.tile];

@@ -898,17 +898,22 @@ the standard library. It is the only way to bypass tag checking, so a search for
 
 ### 8.7 Example: a PLL clock domain
 
-(The iCE40 prelude does not declare `SB_PLL40_CORE` yet, because the backend
-cannot place PLLs. The example shows the intended use.)
+The standard library's `synth_pll<IN_HZ, OUT_HZ>(clk_in, clk_out, locked)`
+makes a clock of `OUT_HZ` from `clk_in` (`IN_HZ`) with the device's PLL: an
+`SB_PLL40_CORE` on iCE40 (its settings found as `icepll` finds them), a
+`PLLE2_ADV` on Artix-7. When `OUT_HZ` equals `IN_HZ` it is `clk_in` itself,
+and `locked` is always high, so one source serves boards with and without a
+PLL. The output frequency must be one the PLL makes to within 0.2%; it
+becomes the clock's timing target. The same primitive exists in Verilog:
+`synth_pll #(.IN_HZ(..), .OUT_HZ(..)) pll (.clk_in(..), .clk_out(..),
+.locked(..))`.
 
 ```weft
-module top(in clk_12m: clock, in btn: bool, out led: bool) {
-    inst pll = SB_PLL40_CORE<DIVR: 0, DIVF: 66, DIVQ: 5, FILTER_RANGE: 1>(
-        REFERENCECLK: clk_12m,
-    );
-    domain px_raw { clock: pll.PLLOUTCORE }
-    let rst = reset_sync(!pll.LOCK || btn) @px_raw;
-    default domain px { clock: pll.PLLOUTCORE, reset: rst }
+module top<CLK_HZ: int = 100_000_000>(in clk: clock, in btn: bool, out led: bool) {
+    inst pll = synth_pll<IN_HZ: CLK_HZ, OUT_HZ: 40_000_000>(clk_in: clk);
+    domain px_raw { clock: pll.clk_out }
+    let rst = reset_sync(!pll.locked || btn) @px_raw;
+    default domain px { clock: pll.clk_out, reset: rst }
 
     reg count: uint<26> = 0;        // in `px`, reset by `rst`
     count := count +% 1;
@@ -916,8 +921,10 @@ module top(in clk_12m: clock, in btn: bool, out led: bool) {
 }
 ```
 
-`!pll.LOCK || btn` mixes two asynchronous values, which is fine: it goes to the
-asynchronous input of `reset_sync`.
+`!pll.locked || btn` mixes two asynchronous values, which is fine: it goes to
+the asynchronous input of `reset_sync`. Memory writes are not blocked by reset
+(§10.2): a design whose writes depend on registers with reset values writes
+nothing unexpected while it waits for the PLL.
 
 ---
 
@@ -1381,9 +1388,12 @@ Because the source already states clock enables, resets and read-port behaviour,
 the existing RTL passes find exactly what was written. The frontend does not
 recognize patterns.
 
-**Simulation.** Until synth has its own simulator, a Weft design is simulated by
-writing the elaborated RTL as Verilog (`synth elab design.weft --verilog out.v`)
-and using Icarus Verilog or Verilator. `undef` appears as `x` there.
+**Simulation.** `synth sim` simulates a Weft design two-state, as this
+specification defines it (`undef` reads as 0): it drives the clock, sets inputs
+(`--set`, `--at`), prints signals, decodes a serial line (`--uart`) and writes
+VCD; `--emit-c` writes a C model for long runs. The elaborated RTL can also be
+written as Verilog (`synth elab design.weft --verilog out.v`) for Icarus
+Verilog or Verilator, where `undef` appears as `x`.
 
 ---
 
@@ -1470,7 +1480,8 @@ changing the meaning of existing programs.
 - Generic structs; traits or interfaces.
 - `match` guards.
 - Runtime assertions, cover properties and formal verification.
-- Testbench constructs and a native simulator (`synth sim`).
+- Testbench constructs (the simulator, `synth sim`, exists; stimulus comes
+  from its options or from Rust through `synth-sim`).
 - Asynchronous FIFO and handshake crossings in the standard library.
 - Saturating arithmetic; runtime division.
 - Packages, imports and visibility.

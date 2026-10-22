@@ -20,6 +20,7 @@ synth-rtl.workspace = true
 synth-verilog.workspace = true
 synth-weft.workspace = true
 arch-ice40.workspace = true
+arch-xc7.workspace = true
 
 [lints]
 workspace = true
