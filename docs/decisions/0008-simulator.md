@@ -31,9 +31,10 @@ kernels, deterministic results, and the code must build for WebAssembly.
   initial values and out-of-range reads are 0.
 - Scheduling is static. Combinational cells are ordered once; strongly
   connected components (combinational loops, latches) iterate to a fixpoint.
-  Each operation records which sources (inputs, clock domains, memories)
-  reach it, and an evaluation runs only the operations reached by what
-  changed, in the precomputed order.
+  Operations are grouped into units, each with a dirty bit set when a value
+  it reads changes; a settle runs the dirty units in the precomputed order,
+  and a flip-flop commits only when one of its inputs changed. Comparisons
+  of one value against many constants become decoders.
 - Clocks are signals, not a separate mechanism: after settling, edges on
   clock bits fire their domains. Every fired domain samples before any
   commits, and settling repeats until no clock changes, which covers both
@@ -43,6 +44,16 @@ kernels, deterministic results, and the code must build for WebAssembly.
   long runs, compiled by the user's C compiler like a Verilator model. There
   is no JIT: it would need `unsafe`, two instruction sets and does not run in
   WebAssembly.
+- The C backend groups the logic into fanout-free partitions (as ESSENT
+  does): values read once become C locals, and multiplexers evaluate only the
+  selected input. It has two schedules, chosen at run time from the work
+  actually done: only the partitions whose inputs changed, or all of them
+  with commits that only copy (as Verilator does), which wins when most of
+  the design changes at every edge.
+- `Options::optimize` runs synthesis's RTL passes before compiling (the C
+  backend always does), so the simulator sees word-level multiplexers,
+  flip-flop enables and registers instead of what elaboration left. Internal
+  signals may then be gone or renamed; ports behave the same.
 - Gate-level netlists are simulated by turning primitives back into RTL
   cells. Each architecture crate supplies its primitive models as RTL;
   `synth-sim` depends on no architecture.

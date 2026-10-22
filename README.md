@@ -89,11 +89,12 @@ For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
 ports) inside the model. The model runs only the logic that changed, or all
 of it, as Verilator does, when most of it changes at each edge
 (`-DSIM_SETTLE_CHANGED` or `-DSIM_SETTLE_ALL` forces one). On the NES of the
-Weft examples, the C model runs twice as fast as Verilator, and on the
-PicoRV32 SoC 0.8 times as fast; the interpreter is 5 to 15 times slower than
+Weft examples, the C model runs twice as fast as Verilator, on the Euler
+solvers 1.1 times as fast (geometric mean, from 0.6 to 2.1 times) and on the
+PicoRV32 SoC 0.8 times as fast; the interpreter is 7 to 70 times slower than
 the C model. `--optimize` speeds up the interpreter (it is always on for C
-models), at the cost of internal signals. Rust code drives simulations through the `synth-sim` crate. See
-[ADR 0008](docs/decisions/0008-simulator.md).
+models), at the cost of internal signals. Rust code drives simulations
+through the `synth-sim` crate. See [ADR 0008](docs/decisions/0008-simulator.md).
 
 The same simulator checks the flow: `--level synth` simulates the iCE40
 netlist synthesis makes of a design and `--level bitstream` what its
