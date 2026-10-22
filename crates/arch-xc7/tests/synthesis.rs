@@ -403,3 +403,46 @@ fn shallow_memories_become_distributed_ram() {
     assert_eq!(count(&deep, "RAM64M"), 2);
     assert_eq!(count(&deep, "FDRE"), 4);
 }
+
+#[test]
+fn block_ram_output_registers_absorb_read_pipelines() {
+    // A second register after the read, with an enable and a reset to a
+    // constant, moves into the RAM's output register: no flip-flops remain.
+    let nl = synth(
+        "module m(input clk, we, en, clr, input [8:0] wa, ra, input [15:0] d, output reg [15:0] q);
+         reg [15:0] mem [0:511];
+         reg [15:0] r;
+         always @(posedge clk) begin
+           if (we) mem[wa] <= d;
+           r <= mem[ra];
+           if (clr) q <= 16'h00ff; else if (en) q <= r;
+         end
+         endmodule",
+    );
+    assert_eq!(count(&nl, "RAMB18E1"), 1);
+    assert_eq!(count(&nl, "FDRE") + count(&nl, "FDSE"), 0);
+    let c = nl.live_cells().find(|&c| nl.cell_kind(c) == "RAMB18E1").unwrap();
+    assert_eq!(nl.param(c, "DOA_REG").and_then(Param::as_u64), Some(1));
+    assert_eq!(nl.param(c, "SRVAL_A").and_then(Param::as_u64).map(|v| v & 0xffff), Some(0xff));
+    // A shallow memory read through two register stages goes to block RAM
+    // rather than LUT RAM; the 36-bit SDP words register both halves.
+    let nl = synth(
+        "module m(input clk, we, input [3:0] a, input [127:0] d, output reg [127:0] q);
+         reg [127:0] mem [0:15];
+         reg [127:0] r;
+         always @(posedge clk) begin
+           if (we) mem[a] <= d;
+           r <= mem[a];
+           q <= r;
+         end
+         endmodule",
+    );
+    assert_eq!(count(&nl, "RAM32M"), 0);
+    assert_eq!(count(&nl, "RAMB18E1"), 4);
+    assert_eq!(count(&nl, "FDRE"), 0);
+    for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == "RAMB18E1") {
+        for p in ["DOA_REG", "DOB_REG"] {
+            assert_eq!(nl.param(c, p).and_then(Param::as_u64), Some(1), "{p}");
+        }
+    }
+}

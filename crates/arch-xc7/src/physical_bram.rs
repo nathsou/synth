@@ -9,15 +9,19 @@ use synth_netlist::{Bit, CellId, Dir, NetId, Netlist};
 pub fn validate(nl: &Netlist, c: CellId) -> Result<(), String> {
     let mode = nl.param(c, "RAM_MODE").and_then(|p| p.as_str()).unwrap_or("TDP");
     if mode == "SDP" {
-        // Start with the native mapper's symmetric, unregistered SDP mode.
-        // Reject mixed widths and optional output registers until legalized.
+        // The native mapper's symmetric SDP mode. Its output register spans
+        // both halves of the word, so both are registered or neither.
         if param(nl, c, "READ_WIDTH_A", 0) != 36
             || param(nl, c, "WRITE_WIDTH_B", 0) != 36
-            || ["READ_WIDTH_B", "WRITE_WIDTH_A", "DOA_REG", "DOB_REG"]
-                .iter()
-                .any(|p| param(nl, c, p, 0) != 0)
+            || ["READ_WIDTH_B", "WRITE_WIDTH_A"].iter().any(|p| param(nl, c, p, 0) != 0)
+            || param(nl, c, "DOA_REG", 0) != param(nl, c, "DOB_REG", 0)
+            || param(nl, c, "DOA_REG", 0) > 1
         {
-            return Err("physical SDP RAMB18 requires unregistered 36-bit read/write ports".into());
+            return Err(
+                "physical SDP RAMB18 requires 36-bit read/write ports and one output register \
+                        setting"
+                    .into(),
+            );
         }
         return Ok(());
     } else if mode != "TDP" {

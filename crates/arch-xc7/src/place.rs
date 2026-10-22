@@ -1,6 +1,7 @@
-//! Deterministic placement by annealing HPWL (VPR's adaptive schedule and
-//! move window): slice macros with legal carry chains, and block RAMs and
-//! DSPs on sites of their kind.
+//! Deterministic placement: analytical global placement (`analytic`),
+//! legalized and refined by annealing HPWL and timing (VPR's adaptive
+//! schedule and move window): slice macros with legal carry chains, and
+//! block RAMs and DSPs on sites of their kind.
 use crate::{
     device::{Device, xy},
     pack::Packed,
@@ -64,26 +65,40 @@ fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> 
 /// timing-driven placement.
 pub type Criticality<'a> = &'a mut dyn FnMut(&Placement) -> FxHashMap<(CellId, NetId), f32>;
 
-/// The weight of timing against wirelength in timing-driven placement, as
-/// in VPR and nextpnr. With permutable LUT inputs relieving congestion, it
-/// beats 0.25 on the Euler designs and narrows their spread over seeds;
-/// before, the longer wires cost more in routing than placement gained.
-/// The criticality exponent's range, raised as moves become local, is
-/// VPR's.
-pub(crate) const TIMING_TRADEOFF: f64 = 0.5;
+/// The weight of timing against wirelength in timing-driven placement:
+/// VPR's 0.5 lengthened wires enough on congested designs (Euler 48) to
+/// lose more in routing than placement gained; 0.25 helped or held on each
+/// design measured. The criticality exponent's range, raised as moves
+/// become local, is VPR's.
+pub(crate) const TIMING_TRADEOFF: f64 = 0.25;
+
 const CRITICALITY_EXPONENT: (f64, f64) = (1.0, 8.0);
 /// Temperatures between timing analyses of the placement.
 const RETIME_TEMPERATURES: usize = 4;
+/// Target sites tried per move before giving up: most offsets near a slice
+/// land on a carry chain's sites, which a single slice cannot take.
+const TARGET_RETRIES: usize = 8;
+
+/// Analytical placement's timing pull: the weight of a connection of
+/// criticality 1 against a two-pin net, and the criticality exponent.
+const ANALYTIC_TIMING: (f64, f64) = (2.0, 4.0);
+/// The move window and the temperature, against the deviation of cost
+/// changes, that annealing refines an analytical placement from: VPR's
+/// schedule from a random placement starts at twenty deviations.
+const ANALYTIC_WINDOW: i32 = 6;
+const ANALYTIC_TEMPERATURE: f64 = 0.3;
 
 /// The smallest move window in tiles: neighboring slice columns are two or
 /// more tile columns apart, across their interconnect.
 const MIN_WINDOW: i32 = 3;
 
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     db: &Device,
     nl: &Netlist,
     p: &Packed,
     xdc: &Constraints,
+    clocked: &[bool],
     seed: u64,
     effort: f64,
     mut criticality: Option<Criticality<'_>>,
@@ -129,7 +144,9 @@ pub fn place(
             return Err(format!("XDC references nonexistent port {n}"));
         }
     }
-    let all = sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
+    // Slices only where a global clock reaches.
+    let mut all = sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
+    all.retain(|s| s.node(db, "CLK").is_ok_and(|n| clocked.get(n as usize) == Some(&true)));
     let is_m: Vec<bool> = all
         .iter()
         .map(|s| db.templates[db.tiles[s.tile].template].sites[s.index].kind == "SLICEM")
@@ -359,11 +376,7 @@ pub fn place(
             .iter()
             .map(|(e, _, weight)| {
                 let (x, y) = tile_at(*e);
-                let delay = if (x, y) == (dx, dy) {
-                    0.0
-                } else {
-                    crate::sta::predicted_delay(x - dx, y - dy)
-                };
+                let delay = crate::sta::predicted_delay(x - dx, y - dy);
                 weight.get() * delay
             })
             .sum::<f64>()
@@ -390,9 +403,170 @@ pub fn place(
             index.entry(slice_xy[v[0]]).or_default().push(i);
         }
     }
+    let objects = macros.len() + hard.len();
+    let snapshot = || {
+        let (mut rams, mut dsps) = (BTreeMap::new(), BTreeMap::new());
+        for (h, &(c, k)) in hard.iter().enumerate() {
+            let site = kinds[k][hard_loc[h].get()].clone();
+            if k == 0 {
+                rams.insert(c, site)
+            } else {
+                dsps.insert(c, site)
+            };
+        }
+        Placement {
+            slices: loc.iter().map(|s| all[s.get()].clone()).collect(),
+            ports: ports.clone(),
+            clocks: BTreeMap::new(),
+            rams,
+            dsps,
+            hpwl: (0..nets.len()).map(hpwl).sum(),
+        }
+    };
+    // Analytical global placement, legalized onto the nearest free sites,
+    // for the annealing to refine locally.
+    let analytic = !macros.is_empty() && !nets.is_empty();
+    if analytic {
+        use crate::analytic::{Grid, Pin, Problem};
+        let fixed_xy = ports.values().map(tile_of);
+        let (width, height) = slice_xy
+            .iter()
+            .chain(hard_xy.iter().flatten())
+            .copied()
+            .chain(fixed_xy)
+            .fold((0, 0), |(w, h), (x, y)| (w.max(x + 1), h.max(y + 1)));
+        let mut grids = vec![Grid::new(width as usize, height as usize); 1 + kinds.len()];
+        for &(x, y) in &slice_xy {
+            grids[0].add(x, y);
+        }
+        for (k, xy) in hard_xy.iter().enumerate() {
+            for &(x, y) in xy {
+                grids[1 + k].add(x, y);
+            }
+        }
+        // Tiles per slice up a column (rows run down the tile grid).
+        let up = by_xy
+            .iter()
+            .find_map(|(&(x, y), &a)| {
+                let b = *by_xy.get(&(x, y + 1))?;
+                Some(f64::from(slice_xy[b].1 - slice_xy[a].1))
+            })
+            .unwrap_or(-1.0);
+        let mut member = vec![(0, 0); p.slices.len()];
+        for (m, list) in macros.iter().enumerate() {
+            for (i, &s) in list.iter().enumerate() {
+                member[s] = (m, i);
+            }
+        }
+        let slice_pin = |s: usize| {
+            let (m, i) = member[s];
+            Pin::Object(m, 0.0, up * (i as f64 - (macros[m].len() - 1) as f64 / 2.0))
+        };
+        let mut problem = Problem {
+            kind: (0..macros.len()).map(|_| 0).chain(hard.iter().map(|&(_, k)| 1 + k)).collect(),
+            area: macros.iter().map(|m| m.len() as f64).chain(hard.iter().map(|_| 1.0)).collect(),
+            nets: nets
+                .iter()
+                .map(|net| {
+                    let slices = net.slices.iter().map(|&s| slice_pin(s));
+                    let blocks = net.hard.iter().map(|&h| Pin::Object(macros.len() + h, 0.0, 0.0));
+                    let fixed = net.fixed.iter().map(|&(x, y)| Pin::Fixed(x, y));
+                    slices.chain(blocks).chain(fixed).collect()
+                })
+                .collect(),
+            arcs: Vec::new(),
+            grids,
+        };
+        // Everything starts around the pins' centroid.
+        let pins: Vec<(f64, f64)> = nets.iter().flat_map(|n| n.fixed.iter().copied()).collect();
+        let centroid = if pins.is_empty() {
+            (f64::from(width) / 2.0, f64::from(height) / 2.0)
+        } else {
+            let n = pins.len() as f64;
+            (pins.iter().map(|p| p.0).sum::<f64>() / n, pins.iter().map(|p| p.1).sum::<f64>() / n)
+        };
+        let mut pos: Vec<(f64, f64)> = (0..objects)
+            .map(|_| (centroid.0 + rng.unit() - 0.5, centroid.1 + rng.unit() - 0.5))
+            .collect();
+        // Legalization: chains, then single slices, each on the free
+        // candidate nearest its spread position.
+        let distance = |a: (f64, f64), b: (f64, f64)| {
+            (a.0 - b.0).abs() + crate::analytic::VERTICAL_COST * (a.1 - b.1).abs()
+        };
+        let mut legalize = |spread: &[(f64, f64)]| -> Result<(), String> {
+            occupied.fill(None);
+            for (m, list) in macros.iter().enumerate() {
+                let key = (list.len(), macro_m[m]);
+                let center = |v: &[usize]| {
+                    let (a, b) = (slice_xy[v[0]], slice_xy[v[v.len() - 1]]);
+                    (f64::from(a.0 + b.0) / 2.0, f64::from(a.1 + b.1) / 2.0)
+                };
+                let v = choices[&key]
+                    .iter()
+                    .filter(|v| v.iter().all(|&s| occupied[s].is_none()))
+                    .min_by(|a, b| {
+                        distance(center(a), spread[m]).total_cmp(&distance(center(b), spread[m]))
+                    })
+                    .ok_or("no legal sites left for a slice macro")?
+                    .clone();
+                for (&cluster, &s) in list.iter().zip(&v) {
+                    loc[cluster].set(s);
+                    occupied[s] = Some(m);
+                }
+                macro_sites[m] = v;
+            }
+            for row in hard_occupied.iter_mut() {
+                row.fill(None);
+            }
+            for (h, &(c, k)) in hard.iter().enumerate() {
+                let target = spread[macros.len() + h];
+                let xy = |t: usize| (f64::from(hard_xy[k][t].0), f64::from(hard_xy[k][t].1));
+                let site = (0..kinds[k].len())
+                    .filter(|&t| hard_occupied[k][t].is_none())
+                    .min_by(|&a, &b| distance(xy(a), target).total_cmp(&distance(xy(b), target)))
+                    .ok_or_else(|| format!("not enough {} sites", nl.cell_kind(c)))?;
+                hard_occupied[k][site] = Some(h);
+                hard_loc[h].set(site);
+            }
+            Ok(())
+        };
+        // Timing-driven: connections pulled by their criticality in the
+        // legalized placement.
+        let end_pin = |e: End| match e {
+            End::Slice(s) => slice_pin(s),
+            End::Hard(h) => Pin::Object(macros.len() + h, 0.0, 0.0),
+            End::Fixed(x, y) => Pin::Fixed(f64::from(x), f64::from(y)),
+        };
+        let spread = {
+            let mut timed = |spread: &[(f64, f64)]| -> Vec<(Pin, Pin, f64)> {
+                let Some(criticality) = criticality.as_mut() else { return Vec::new() };
+                if legalize(spread).is_err() {
+                    return Vec::new();
+                }
+                let crit = criticality(&snapshot());
+                let mut arcs = Vec::new();
+                for net in &nets {
+                    let Some(d) = net.driver else { continue };
+                    for (e, key, _) in &net.sinks {
+                        let c = f64::from(crit.get(key).copied().unwrap_or(0.0));
+                        let w = ANALYTIC_TIMING.0 * c.powf(ANALYTIC_TIMING.1);
+                        if w > 0.01 * ANALYTIC_TIMING.0 {
+                            arcs.push((end_pin(d), end_pin(*e), w));
+                        }
+                    }
+                }
+                arcs
+            };
+            crate::analytic::place(&mut problem, &mut pos, Some(&mut timed))
+        };
+        legalize(&spread)?;
+        if std::env::var("SYNTH_XC7_PLACE_TRACE").is_ok() {
+            let wl: f64 = (0..nets.len()).map(hpwl).sum();
+            eprintln!("trace: analytic legal hpwl {wl:.0}");
+        }
+    }
     let span =
         slice_xy.iter().chain(hard_xy.iter().flatten()).fold(1, |m, &(x, y)| m.max(x).max(y));
-    let objects = macros.len() + hard.len();
     let mut step =
         |m: usize, window: i32, temperature: f64, rng: &mut Rng| -> Option<(f64, bool)> {
             let accept = |delta: f64, rng: &mut Rng| {
@@ -447,32 +621,88 @@ pub fn place(
             // Offsets land on tiles without a site for this shape
             // (interconnect columns, the device edge): try a few.
             let d = 2 * window as usize + 1;
-            let at = (0..16).find_map(|_| {
-                let (dx, dy) = (rng.below(d) as i32 - window, rng.below(d) as i32 - window);
-                nearby[&key].get(&(cx + dx, cy + dy))
-            })?;
-            let target = &choices[&key][at[rng.below(at.len())]];
-            if *target == macro_sites[m] {
-                return None;
+            // Offsets that land on a macro's slices are retried: a single
+            // slice cannot take a chain's site, and a chain only swaps with
+            // a chain of its own length below.
+            let mut found = None;
+            for _ in 0..TARGET_RETRIES {
+                let Some(at) = (0..16).find_map(|_| {
+                    let (dx, dy) = (rng.below(d) as i32 - window, rng.below(d) as i32 - window);
+                    nearby[&key].get(&(cx + dx, cy + dy))
+                }) else {
+                    continue;
+                };
+                let target = &choices[&key][at[rng.below(at.len())]];
+                if *target == macro_sites[m] {
+                    continue;
+                }
+                let owners: BTreeSet<usize> =
+                    target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
+                let chain = owners.iter().copied().find(|&o| macros[o].len() != 1);
+                if let Some(o) = chain {
+                    let swap = macros[m].len() > 1
+                        && owners.len() == 1
+                        && macros[o].len() == macros[m].len()
+                        && macro_m[o] == macro_m[m]
+                        && macro_sites[o] == *target
+                        && macro_sites[m].iter().all(|&s| occupied[s] == Some(m));
+                    if !swap {
+                        continue;
+                    }
+                }
+                found = Some((target, owners, chain));
+                break;
             }
-            let owners: BTreeSet<_> =
-                target.iter().filter_map(|&s| occupied[s]).filter(|&o| o != m).collect();
-            let swap = if owners.is_empty() {
-                None
-            } else if owners.len() == 1
-            && macros[m].len() == 1
-            && macros[*owners.first().unwrap()].len() == 1
-            // The displaced slice takes this one's site.
-            && (!macro_m[*owners.first().unwrap()] || is_m[macro_sites[m][0]])
-            {
-                owners.first().copied()
-            } else {
-                return None;
-            };
-            let mut moved = vec![m];
-            if let Some(o) = swap {
-                moved.push(o);
+            let (target, owners, chain) = found?;
+            if let Some(o) = chain {
+                // Two chains of one length exchange their sites.
+                let changed: BTreeSet<_> = [m, o]
+                    .iter()
+                    .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
+                    .collect();
+                let old: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let (mine, theirs) = (macro_sites[m].clone(), macro_sites[o].clone());
+                for (&s, &t) in macros[m].iter().zip(&theirs) {
+                    loc[s].set(t);
+                }
+                for (&s, &t) in macros[o].iter().zip(&mine) {
+                    loc[s].set(t);
+                }
+                let new: f64 = changed.iter().map(|&i| cost(i)).sum();
+                let accepted = accept(new - old, rng);
+                if accepted {
+                    macro_sites[m] = theirs;
+                    macro_sites[o] = mine;
+                    for &m in &[m, o] {
+                        for &s in &macro_sites[m] {
+                            occupied[s] = Some(m);
+                        }
+                    }
+                } else {
+                    for (&s, &t) in macros[m].iter().zip(&mine) {
+                        loc[s].set(t);
+                    }
+                    for (&s, &t) in macros[o].iter().zip(&theirs) {
+                        loc[s].set(t);
+                    }
+                }
+                return Some((new - old, accepted));
             }
+            // Single slices in the way move into the sites the macro leaves
+            // (VPR's macro moves), a slice needing a SLICEM only onto one.
+            let free: Vec<usize> =
+                macro_sites[m].iter().copied().filter(|s| !target.contains(s)).collect();
+            let mut displaced: Vec<(usize, usize)> = Vec::new();
+            let mut taken = vec![false; free.len()];
+            let mut order: Vec<usize> = owners.into_iter().collect();
+            order.sort_by_key(|&o| !macro_m[o]);
+            for o in order {
+                let k = (0..free.len()).find(|&k| !taken[k] && (!macro_m[o] || is_m[free[k]]))?;
+                taken[k] = true;
+                displaced.push((o, free[k]));
+            }
+            let moved: Vec<usize> =
+                std::iter::once(m).chain(displaced.iter().map(|&(o, _)| o)).collect();
             let changed: BTreeSet<_> = moved
                 .iter()
                 .flat_map(|&m| macros[m].iter().flat_map(|&s| affected[s].iter().copied()))
@@ -482,8 +712,8 @@ pub fn place(
             for (&s, &t) in macros[m].iter().zip(target) {
                 loc[s].set(t);
             }
-            if let Some(o) = swap {
-                loc[macros[o][0]].set(saved[0][0]);
+            for &(o, site) in &displaced {
+                loc[macros[o][0]].set(site);
             }
             let new: f64 = changed.iter().map(|&i| cost(i)).sum();
             let accepted = accept(new - old, rng);
@@ -494,8 +724,8 @@ pub fn place(
                     }
                 }
                 macro_sites[m] = target.clone();
-                if let Some(o) = swap {
-                    macro_sites[o] = saved[0].clone();
+                for &(o, site) in &displaced {
+                    macro_sites[o] = vec![site];
                 }
                 for &m in &moved {
                     for &s in &macro_sites[m] {
@@ -511,25 +741,6 @@ pub fn place(
             }
             Some((new - old, accepted))
         };
-    let snapshot = || {
-        let (mut rams, mut dsps) = (BTreeMap::new(), BTreeMap::new());
-        for (h, &(c, k)) in hard.iter().enumerate() {
-            let site = kinds[k][hard_loc[h].get()].clone();
-            if k == 0 {
-                rams.insert(c, site)
-            } else {
-                dsps.insert(c, site)
-            };
-        }
-        Placement {
-            slices: loc.iter().map(|s| all[s.get()].clone()).collect(),
-            ports: ports.clone(),
-            clocks: BTreeMap::new(),
-            rams,
-            dsps,
-            hpwl: (0..nets.len()).map(hpwl).sum(),
-        }
-    };
     // Timing-driven placement: criticalities from the current placement,
     // the exponent raised as moves become local, and both costs weighted by
     // the inverse of their totals.
@@ -556,16 +767,20 @@ pub fn place(
         // toward 44% acceptance; cooling is slower while acceptance is
         // moderate, and ends when the temperature is negligible beside the
         // cost per net.
-        let mut window = span;
+        // From an analytical placement, annealing starts local and cool:
+        // its probe moves only take improvements.
+        let mut window = if analytic { ANALYTIC_WINDOW.clamp(MIN_WINDOW, span) } else { span };
         retime(window);
+        let probe = if analytic { 0.0 } else { f64::INFINITY };
         let deltas: Vec<f64> = (0..objects)
-            .filter_map(|_| step(rng.below(objects), window, f64::INFINITY, &mut rng).map(|d| d.0))
+            .filter_map(|_| step(rng.below(objects), window, probe, &mut rng).map(|d| d.0))
             .collect();
         let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
         let deviation = (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
             / deltas.len().max(1) as f64)
             .sqrt();
-        let mut temperature = 20.0 * deviation.max(1e-3);
+        let mut temperature =
+            if analytic { ANALYTIC_TEMPERATURE } else { 20.0 } * deviation.max(1e-3);
         let moves = ((objects as f64).powf(4.0 / 3.0) * effort).max(objects as f64) as usize;
         for round in 1.. {
             let (mut tried, mut accepted) = (0, 0);
@@ -593,6 +808,12 @@ pub fn place(
                 retime(window);
             }
             let total: f64 = (0..nets.len()).map(cost).sum();
+            if std::env::var("SYNTH_XC7_PLACE_TRACE").is_ok() {
+                let wl: f64 = (0..nets.len()).map(hpwl).sum();
+                eprintln!(
+                    "trace: round {round} T {temperature:.3e} rate {rate:.3} window {window} tried {tried} hpwl {wl:.0} cost {total:.4}"
+                );
+            }
             if temperature < 0.005 * total / nets.len() as f64 {
                 break;
             }

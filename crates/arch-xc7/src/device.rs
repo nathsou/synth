@@ -470,7 +470,8 @@ impl Template {
                     src: t.wire(src)?,
                     dst: t.wire(dst)?,
                     feature: name,
-                    delay: pip_delay(arc.get("delay")?)?,
+                    delay: pip_delay(arc.get("delay")?)?
+                        .or_else(|| untimed_pip_delay(kind, src, dst)),
                     res: field("res").unwrap_or(0.0),
                     cap: field("in_cap").unwrap_or(0.0),
                     buffered: !matches!(
@@ -484,6 +485,42 @@ impl Template {
         }
         Ok(t)
     }
+}
+
+/// Routing delays of Project X-Ray's timing model scale by this factor to
+/// Vivado 2025.2's slow-corner net delays (fitted with `untimed_pip_delay`
+/// over the routed connections of Euler designs, `tools/vivado_artix7.py
+/// --delays`).
+pub const VENDOR_SCALE: f32 = 1.144;
+
+/// Intrinsic delays (ps, before `VENDOR_SCALE`) of pips Project X-Ray leaves
+/// untimed, fitted to Vivado 2025.2's slow-corner net delays: the
+/// interconnect-to-slice input pips, which differ by LUT input (A6 fastest,
+/// as the vendor router uses it), slice outputs through the output muxes,
+/// and the IOB input path. Other untimed pips (direct outputs, bounce and
+/// alternate interconnect wires) fit to about zero.
+fn untimed_pip_delay(kind: &str, src: &str, dst: &str) -> Option<f32> {
+    let lane_pin = |w: &str| w.rsplit('_').next().unwrap_or("").to_string();
+    let ps = if kind.starts_with("CLBL") {
+        let (from, to) = (lane_pin(src), lane_pin(dst));
+        match to.as_bytes() {
+            [b'A'..=b'D', d @ b'1'..=b'6'] => {
+                [515.0, 494.0, 340.0, 275.0, 114.0, 0.0][(d - b'1') as usize]
+            }
+            _ if to == "CE" => 172.0,
+            _ if to == "SR" => 38.0,
+            [b'A'..=b'D', b'X'] => 73.0,
+            _ if from.len() == 4 && from.ends_with("MUX") => 185.0,
+            _ => return None,
+        }
+    } else if (kind.starts_with("LIOI3") || kind.starts_with("RIOI3"))
+        && (src.contains("_IBUF") || dst.contains("ILOGIC") && dst.ends_with("_D"))
+    {
+        193.0
+    } else {
+        return None;
+    };
+    Some(ps / VENDOR_SCALE)
 }
 
 fn pip_delay(value: &Value) -> Result<Option<f32>, String> {

@@ -49,8 +49,10 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    let graph = RoutingGraph::new(&db)?;
+    let clocked = graph.clocked(&db)?;
     let placement =
-        place::place(&db, &nl, &p, xdc, opts.seed, opts.effort, Some(&mut criticality))?;
+        place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     // Detailed placement: lanes move between the placed slices, with
     // criticalities from the delays the new slice contents predict.
@@ -63,7 +65,12 @@ pub fn implement(
         "detailed placement: {moves} lane moves ({:.1}s)",
         start.elapsed().as_secs_f64()
     ));
-    let graph = RoutingGraph::new(&db)?;
+    if let Ok(path) = std::env::var("SYNTH_XC7_PLACEMENT") {
+        std::fs::write(&path, placement_xdc(&nl, &p, &placement)).map_err(|e| e.to_string())?;
+    }
+    if let Ok(path) = std::env::var("SYNTH_XC7_MACROS") {
+        std::fs::write(&path, packing_macros(&nl, &p)).map_err(|e| e.to_string())?;
+    }
     let (mut requests, names, request_nets, owners, blocked_edges) =
         requests(&db, &nl, &p, &placement, &graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
@@ -107,10 +114,16 @@ pub fn implement(
         arc_bounding_boxes: true,
         max_iterations: 100,
         stall_iterations: 30,
-        // Criticalities follow the routes every other iteration; rerouting
-        // critical nets again after a legal routing gains about 1% for
-        // nearly twice the time, so routing stops at the first.
+        // Criticalities follow the routes every other iteration.
         retime_every: 2,
+        // Critical connections weigh delay almost alone against congestion:
+        // the 0.9 default left them on slower detours (about 8% Fmax on the
+        // Euler designs, by the calibrated estimate), and nets still converge.
+        max_criticality: 0.99,
+        // Once routing is legal, critical nets are routed again three times,
+        // keeping the best timed routing: 1-6% Fmax for up to 1.6 times the
+        // routing time (more rounds gained no more).
+        timing_rounds: 3,
         ..Default::default()
     };
     let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
@@ -295,13 +308,7 @@ fn predictor<'a>(
     move |c, n| {
         let Some(d) = nl.nets[n].driver else { return 0.0 };
         match (location(db, p, pl, d.cell), location(db, p, pl, c)) {
-            (Some((a, sa)), Some((b, sb))) if a == b => {
-                if sa == sb {
-                    0.0
-                } else {
-                    150.0
-                }
-            }
+            (Some((a, sa)), Some((b, sb))) if a == b && sa == sb => 0.0,
             (Some(((ax, ay), _)), Some(((bx, by), _))) => {
                 crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
             }
@@ -696,7 +703,10 @@ fn external(nl: &Netlist, p: &Packed, n: NetId) -> bool {
                         .and_then(|x| x.strip_suffix(']'))
                         .and_then(|x| x.parse().ok())
                         .is_some_and(|k| slice.di_from_o5(nl, k))
+                // Only a flip-flop's data input reads inside the slice: its
+                // clock enable and reset come through the interconnect.
                 || pack::is_ff(nl.cell_kind(u.cell))
+                    && pin == "D"
                     && pack::ff_mux(nl, slice, l, u.cell) != "BYPASS");
         !internal
     })
@@ -951,4 +961,172 @@ fn cell_features(
         }
     }
     Ok(f)
+}
+
+/// The placement as Vivado BEL and LOC constraints on the netlist's cells
+/// (a development aid: Vivado can then route and time synth's placement of
+/// its own netlist). Cells Vivado renames are skipped by the guard.
+fn placement_xdc(nl: &Netlist, p: &Packed, pl: &Placement) -> String {
+    let mut out = String::new();
+    let mut add = |c: CellId, bel: Option<String>, site: &str| {
+        let name = nl.str(nl.cells[c].name);
+        // Cells Vivado renamed or made constant drivers are skipped.
+        out.push_str(&format!("if {{[llength [get_cells -quiet {{{name}}}]]}} {{ catch {{\n"));
+        if let Some(bel) = bel {
+            out.push_str(&format!("  set_property BEL {bel} [get_cells {{{name}}}]\n"));
+        }
+        out.push_str(&format!("  set_property LOC {site} [get_cells {{{name}}}]\n}} }}\n"));
+    };
+    for (s, slice) in p.slices.iter().enumerate() {
+        let site = &pl.slices[s].name;
+        for l in 0..4 {
+            let lane = char::from(b'A' + l as u8);
+            if let Some(c) = slice.luts[l].filter(|c| !p.constant_luts.values().any(|k| k == c)) {
+                add(c, Some(format!("{lane}6LUT")), site);
+            }
+            if let Some(c) = slice.lut5[l] {
+                add(c, Some(format!("{lane}5LUT")), site);
+            }
+            if let Some(c) = slice.ffs[l] {
+                add(c, Some(format!("{lane}FF")), site);
+            }
+            if let Some(c) = slice.ffs[l + 4] {
+                add(c, Some(format!("{lane}5FF")), site);
+            }
+        }
+        if let Some(c) = slice.carry {
+            add(c, Some("CARRY4".into()), site);
+        }
+        if let Some(c) = slice.ram {
+            add(c, None, site);
+        }
+        for (i, c) in slice.f7.iter().enumerate() {
+            if let Some(c) = c {
+                add(*c, Some(format!("F7{}MUX", if i == 0 { 'A' } else { 'B' })), site);
+            }
+        }
+        if let Some(c) = slice.f8 {
+            add(c, Some("F8MUX".into()), site);
+        }
+    }
+    for (c, site) in pl.rams.iter().chain(&pl.dsps) {
+        add(*c, None, &site.name);
+    }
+    out
+}
+
+/// synth's packing as Vivado relatively placed macros (a development aid):
+/// each carry chain or single slice becomes a macro whose cells keep their
+/// BELs and rows, so Vivado's placer places synth's slices.
+fn packing_macros(nl: &Netlist, p: &Packed) -> String {
+    let mut out = String::new();
+    let chained: std::collections::BTreeSet<usize> = p.chains.iter().flatten().copied().collect();
+    let groups = p
+        .chains
+        .iter()
+        .cloned()
+        .chain((0..p.slices.len()).filter(|s| !chained.contains(s)).map(|s| vec![s]));
+    for (k, group) in groups.enumerate() {
+        let mut cells = Vec::new();
+        for (row, &s) in group.iter().enumerate() {
+            let slice = &p.slices[s];
+            if slice.ram.is_some() {
+                cells.clear();
+                break;
+            }
+            let mut add = |c: CellId, bel: &str| {
+                if !p.constant_luts.values().any(|k| *k == c) {
+                    cells.push((nl.str(nl.cells[c].name).to_string(), bel.to_string(), row));
+                }
+            };
+            for l in 0..4 {
+                let lane = char::from(b'A' + l as u8);
+                if let Some(c) = slice.luts[l] {
+                    add(c, &format!("{lane}6LUT"));
+                }
+                if let Some(c) = slice.lut5[l] {
+                    add(c, &format!("{lane}5LUT"));
+                }
+                if let Some(c) = slice.ffs[l] {
+                    add(c, &format!("{lane}FF"));
+                }
+                if let Some(c) = slice.ffs[l + 4] {
+                    add(c, &format!("{lane}5FF"));
+                }
+            }
+            if let Some(c) = slice.carry {
+                add(c, "CARRY4");
+            }
+            for (i, c) in slice.f7.iter().enumerate() {
+                if let Some(c) = c {
+                    add(*c, &format!("F7{}MUX", if i == 0 { 'A' } else { 'B' }));
+                }
+            }
+            if let Some(c) = slice.f8 {
+                add(c, "F8MUX");
+            }
+        }
+        if cells.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = cells.iter().map(|(n, _, _)| format!("{{{n}}}")).collect();
+        out.push_str(&format!("set cells [get_cells -quiet [list {}]]\n", names.join(" ")));
+        out.push_str(&format!("if {{[llength $cells] == {}}} {{\n", cells.len()));
+        for (n, bel, _) in &cells {
+            out.push_str(&format!("  set_property BEL {bel} [get_cells {{{n}}}]\n"));
+        }
+        out.push_str(&format!("  create_macro m{k}\n  update_macro m{k} [list"));
+        for (n, _, row) in &cells {
+            out.push_str(&format!(" {{{n}}} X0Y{row}"));
+        }
+        out.push_str("]\n}\n");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synth_netlist::{Const, Param};
+
+    #[test]
+    fn a_flip_flop_enable_from_its_own_slice_leaves_through_the_outmux() {
+        // d = a & b on a lane's O6 feeds a flip-flop whose enable e = !a is
+        // a LUT packed into the same slice: the enable reaches CE through
+        // the interconnect, so its LUT's output must leave the slice.
+        let mut nl = Netlist::default();
+        let input = |nl: &mut Netlist, name: &str| {
+            let c = nl.add_cell(name, synth_netlist::INPUT_PORT);
+            let n = nl.add_net(name);
+            nl.add_pin(c, "PAD", Dir::Output, Some(n)).unwrap();
+            n
+        };
+        let (clk, a, b) = (input(&mut nl, "clk"), input(&mut nl, "a"), input(&mut nl, "b"));
+        let lut = |nl: &mut Netlist, ins: &[NetId], init: i64| {
+            let c = nl.add_cell("lut", &format!("LUT{}", ins.len()));
+            nl.set_param(c, "INIT", Param::Int(init));
+            for (i, &n) in ins.iter().enumerate() {
+                nl.add_pin(c, &format!("I{i}"), Dir::Input, Some(n)).unwrap();
+            }
+            let o = nl.add_net("o");
+            nl.add_pin(c, "O", Dir::Output, Some(o)).unwrap();
+            o
+        };
+        let d = lut(&mut nl, &[a, b], 0b1000);
+        let e = lut(&mut nl, &[a], 0b01);
+        let zero = nl.add_const_net(Const::Zero);
+        let ff = nl.add_cell("ff", "FDRE");
+        for (pin, n) in [("C", clk), ("D", d), ("CE", e), ("R", zero)] {
+            nl.add_pin(ff, pin, Dir::Input, Some(n)).unwrap();
+        }
+        let q = nl.add_net("q");
+        nl.add_pin(ff, "Q", Dir::Output, Some(q)).unwrap();
+        let out = nl.add_cell("q", synth_netlist::OUTPUT_PORT);
+        nl.add_pin(out, "PAD", Dir::Input, Some(q)).unwrap();
+        let p = pack::pack(&mut nl).unwrap();
+        let slice = |n: NetId| p.slots[&nl.nets[n].driver.unwrap().cell].0;
+        assert_eq!(slice(e), p.slots[&ff].0, "the enable's LUT shares the flip-flop's slice");
+        assert!(external(&nl, &p, e));
+        assert!(!external(&nl, &p, d));
+    }
 }

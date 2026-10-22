@@ -35,7 +35,10 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     // registers stay ordinary flip-flops that pack beside the RAM outputs.
     let mut lutram = false;
     for mi in (0..m.memories.len()).map(MemId::new) {
-        if m.memories[mi].alive && crate::lutram::eligible(&m.memories[mi]) {
+        if m.memories[mi].alive
+            && crate::lutram::eligible(&m.memories[mi])
+            && !crate::bram::absorbs_read_pipeline(&m, mi)
+        {
             let n = crate::lutram::map(&mut m, mi);
             let kind = if m.memories[mi].depth <= 32 { "RAM32M" } else { "RAM64M" };
             log.push(format!("{n} {kind} for {}", m.memories[mi].name));
@@ -97,6 +100,11 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
                 }
                 let n = crate::bram::map(&mut m, mi, &read_init);
                 log.push(format!("{n} RAMB18E1 for {}", m.memories[mi].name));
+            } else if crate::lutram::eligible(&m.memories[mi]) {
+                // Left for block RAM, but its read registers did not merge.
+                let n = crate::lutram::map(&mut m, mi);
+                let kind = if m.memories[mi].depth <= 32 { "RAM32M" } else { "RAM64M" };
+                log.push(format!("{n} {kind} for {}", m.memories[mi].name));
             } else {
                 log.push(format!("memory {} built from flip-flops", m.memories[mi].name));
                 mem::to_registers(&mut m, mi)?;
@@ -106,6 +114,11 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     opt::clean(&mut m)?;
     dff::extract_controls(&mut m);
     opt::clean(&mut m)?;
+    let registered = crate::bram::absorb_output_registers(&mut m);
+    if registered != 0 {
+        log.push(format!("{registered} RAMB18E1 output registers"));
+        opt::clean(&mut m)?;
+    }
     let dsps = crate::dsp::map(&mut m);
     if dsps != 0 {
         log.push(format!("{dsps} DSP48E1 multiplier blocks"));

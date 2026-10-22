@@ -92,6 +92,32 @@ pub struct RoutingGraph {
 /// The tile of a virtual edge's pip.
 pub const VIRTUAL: u32 = u32::MAX;
 impl RoutingGraph {
+    /// Whether each node is reachable from the global clock buffers' outputs:
+    /// under Project X-Ray's U-turn clock rows, two columns of fifty slices
+    /// per part have no clock.
+    pub fn clocked(&self, db: &Device) -> Result<Vec<bool>, String> {
+        let mut seen = vec![false; self.offsets.len() - 1];
+        let mut stack = Vec::new();
+        for (i, t) in db.tiles.iter().enumerate() {
+            for (_, index) in db.sites(i)? {
+                let site = &db.templates[t.template].sites[index];
+                if site.kind == "BUFGCTRL" {
+                    let o = t.nodes[*site.pins.get("O").ok_or("BUFGCTRL without O")? as usize];
+                    seen[o as usize] = true;
+                    stack.push(o);
+                }
+            }
+        }
+        while let Some(u) = stack.pop() {
+            for e in self.offsets[u as usize]..self.offsets[u as usize + 1] {
+                let d = self.dst[e as usize] as usize;
+                if !std::mem::replace(&mut seen[d], true) {
+                    stack.push(d as u32);
+                }
+            }
+        }
+        Ok(seen)
+    }
     pub fn new(db: &Device) -> Result<Self, String> {
         let real = db.node_x.len();
         // Each SLICE lane's LUT input nodes A1-A6.
@@ -162,7 +188,8 @@ impl RoutingGraph {
                 graph.dst[e] = dst;
                 graph.pip[e] = (i as u32, j as u32);
                 // Unknown timing gets a routing heuristic, never a reported timing arc.
-                graph.delay[e] = p.delay.unwrap_or(if p.fixed { 0.0 } else { 100.0 });
+                graph.delay[e] = p.delay.unwrap_or(if p.fixed { 0.0 } else { 100.0 })
+                    * crate::device::VENDOR_SCALE;
                 if p.delay.is_none() && !p.fixed {
                     graph.missing_timing += 1;
                 }

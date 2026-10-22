@@ -211,8 +211,6 @@ pub fn refine(
                 let (s, (x, y)) = place(p, u)?;
                 let d = if s == ds && s != usize::MAX {
                     0.0
-                } else if (x, y) == (dx, dy) {
-                    150.0
                 } else {
                     crate::sta::predicted_delay(x - dx, y - dy)
                 };

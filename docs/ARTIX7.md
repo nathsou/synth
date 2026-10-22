@@ -4,11 +4,20 @@ synth has a native Rust path from Verilog through synthesis, packing,
 placement, routing, static timing estimation, FASM and an uncompressed
 Artix-7 bitstream. It is **experimental, not at the iCE40 flow's maturity**:
 bitstreams have been checked against independent encoders and by simulating
-the netlist reconstructed from them, but never run on hardware, and the
-timing estimate is uncalibrated. Missing timing characterization is reported
-and fails timing acceptance by default.
+the netlist reconstructed from them, but never run on hardware. The timing
+estimate's routing delays are calibrated against Vivado 2025.2's timing of
+the same routed designs (see below); it is still an estimate, without clock
+skew, I/O or hold analysis. Missing timing characterization is reported and
+fails timing acceptance by default.
 
-On nine Project Euler solvers, the native flow is compared with Yosys's
+[Against Vivado](#against-vivado), with Vivado's own timer judging both
+tools' placed and routed results, synth uses fewer slices on nine of the ten
+Euler solvers. Its synthesis is on par with Vivado's (Vivado implementing
+synth's netlist is within 7% of its own flow, and ahead on four designs),
+but its placement and routing are 5–25% slower under a tight clock
+constraint (details below).
+
+On nine Project Euler solvers, the native flow is also compared with Yosys's
 `synth_xilinx` followed by nextpnr-xilinx, and with Yosys's netlist placed
 and routed by synth's own backend. Summary (details below):
 
@@ -48,11 +57,17 @@ The `arch-xc7` crate emits:
 - RAM32M/RAM64M distributed RAM for memories of at most 64 words with
   asynchronous reads and one write port: other-address reads use ports A to
   C and the write-address port D; writes are grouped by enable and gated by
-  an address range check.
+  an address range check. A shallow memory whose reads pass through two
+  register stages goes to block RAM instead, as with Vivado: the block RAM
+  absorbs both stages, LUT RAM neither.
 - RAMB18E1 for larger memories with synchronous reads and at most one write
   port, in TDP mode (widths 1–18) or 36-bit SDP mode, choosing the geometry
   with the fewest blocks. Initialization, parity, read enables, falling
-  edges, address offsets and output initialization are supported.
+  edges, address offsets and output initialization are supported. A
+  register that alone follows the read data moves into the RAM's output
+  register (DOA_REG, and DOB_REG for SDP words) with its clock enable and
+  synchronous reset; the registered output is also faster (0.88 ns clock to
+  output rather than 2.45).
 - DSP48E1 multipliers with signed/unsigned extension, partial products for
   wider operands and truncation. An addition of a product with no other use
   folds into the post-adder (P = A·B + C) when the product fits one DSP.
@@ -94,14 +109,40 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   second bank fed from O5 or the bypass input). Control sets, carry
   macros, MUXF7/F8 lanes and SLICEM-only LUT RAM and shift registers (which
   share the slice's write clock and enable) are legalized. Constant sinks
-  draw from each interconnect tile's own GND/VCC wires where they can.
-- **Placement.** Deterministic simulated annealing of half-perimeter
-  wirelength over slice macros, block RAMs and DSPs together, with I/O
-  fixed by the XDC, on VPR's schedule: the initial temperature from the
-  cost changes of random moves, N^(4/3) moves per temperature within a
+  draw from each interconnect tile's own GND/VCC wires where they can. After
+  carries, wide multiplexers and memories take their lanes, the remaining
+  LUTs and flip-flops cluster by affinity (as VPR's AAPack): a LUT and the
+  flip-flop it alone feeds form one atom, and a slice grows with the atom
+  sharing the most nets with it, then fills with the least connected atoms
+  left. The first-fit packing this replaced spread connected logic over the
+  design and about doubled the wirelength of any placement of it, Vivado's
+  included.
+- **Placement.** Analytical global placement (HeAP, as in nextpnr) over
+  slice macros, block RAMs and DSPs together, with I/O fixed by the XDC:
+  quadratic wirelength under the bound-to-bound net model, solved per axis
+  by conjugate gradients, is spread over the sites of each kind by
+  recursive cuts of the regions that overflow, and each spread placement
+  anchors the next solution with a weight growing every iteration. Every
+  five iterations the spread placement is legalized (each macro onto the
+  free site nearest its position) and timed, and connections pull in
+  proportion to their criticality to the fourth power. Simulated annealing
+  then refines the legalized placement on VPR's schedule from a local
+  window and a low temperature: N^(4/3) moves per temperature within a
   window adapting toward 44% acceptance, cooling by acceptance rate, and a
-  greedy finish. Clock nets use BUFGs and global routing and are left out
-  of the wirelength cost.
+  greedy finish, minimizing half-perimeter wirelength and each
+  connection's predicted delay (from its distance, fitted to the
+  calibrated delays of routed connections) weighted by its criticality.
+  A carry chain moving onto single slices displaces them into the sites it
+  leaves, chains of one length may swap, and a move tries several targets
+  before giving up (most offsets land on a chain). Clock nets use BUFGs
+  and global routing and are left out of the costs; slices go only where a
+  global clock reaches (under X-Ray's U-turn clock rows, two columns of
+  fifty slices per part have none). Spreading counts a row as two tile
+  columns, as the routed delays do, so that a design pressed into a corner
+  by its pins spreads wide rather than tall. Against annealing from a
+  random placement, the analytical start raised synth's estimate by 3%
+  (geometric mean of the medians of five seeds of Euler 14, 25, 31, 57, 58
+  and 92), and 1.6% by Vivado's timer of the median seed of each.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in
@@ -110,14 +151,32 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   nets keep the branches of their trees clear of overused nodes and reroute
   only the sinks they lose. Routing is timing-driven: sink criticalities
   come from the placement's predicted delays, then from the routes every
-  other iteration. Address cascades between block RAM tiles and buffer
-  pass-throughs are not general routing.
+  other iteration; a connection's criticality (at most 0.99) weighs its
+  delay against congestion. The router also picks each LUT input pin, so a
+  critical connection takes a fast one. Address cascades between block RAM
+  tiles and buffer pass-throughs are not general routing.
 - **Timing estimate.** Static timing over the packed netlist using X-Ray's
   SDF cell delays (slow-corner maxima, per CARRY4 arc and per DSP register
-  configuration) and nextpnr-xilinx's routing delay model of X-Ray wire RC.
+  configuration) and nextpnr-xilinx's routing delay model of X-Ray wire RC,
+  calibrated against Vivado 2025.2: X-Ray's pip delays scale by 1.144 to
+  Vivado's slow corner, and the pips X-Ray leaves untimed take fitted
+  delays, mainly the interconnect-to-slice inputs (515 ps into A1 down to
+  none into A6), the slice output muxes and the IOB input path. Fitted on
+  Euler 14's 17,000 routed connections and checked on Euler 31's, the
+  error per connection against Vivado's net delays fell from 430 ps RMS to
+  under 100; the estimate of a whole design is within 6% of Vivado's
+  timing of the same routing on the Euler designs (it was up to 35%
+  optimistic). Setup checks are per input: a block RAM's by input class
+  from the SDF (data inputs 241 ps read-first, as synth's memories are),
+  a flip-flop's data and enable inputs from the SDF, and its set or reset
+  at Vivado's 429 ps, which X-Ray lacks. The worst setup of each kind,
+  applied to every input before, made block RAM paths 0.4-0.5 ns and data
+  inputs 0.15 ns slower than Vivado times them, and resets 0.3 ns faster,
+  steering placement and routing towards the wrong paths (1% Fmax by
+  Vivado's timer across the Euler designs, 3-4% on those with block RAM).
   It reports each clock's worst period, the critical path, and the estimate
-  without block RAM and DSP paths (which nextpnr-xilinx does not time). It
-  has no clock skew, I/O timing or hold analysis and is not calibrated.
+  without block RAM and DSP paths. It has no clock skew, I/O timing or hold
+  analysis.
 - **Constraints.** An explicit XDC subset: `set_property` (including
   `-dict`), `get_ports` and `create_clock`; every port needs PACKAGE_PIN and
   LVCMOS33. Unknown commands or properties are errors.
@@ -184,10 +243,98 @@ restores. This checks the configured circuit, but through fasm2bels's
 interpretation of the bits, not hardware. Results:
 [ARTIX7_BITSIM.json](ARTIX7_BITSIM.json).
 
-No hardware execution or vendor timing validation has been possible: no
-Vivado installation or board was available.
+**Against Vivado** (Vivado 2025.2, not needed by the executable):
+
+```sh
+python3 tools/xsim_euler.py --out /tmp/xc7-xsim
+python3 tools/vivado_artix7.py --db /tmp/prjxray-db/artix7 --out /tmp/xc7-vivado \
+  --fasm2bels /tmp/fasm2bels/venv/bin/python --connections /tmp/fasm2bels/conn \
+  --bitread /tmp/xc7-oracle/build/tools/bitread --seeds 3
+# Again with each design constrained beyond the best Fmax of that run:
+python3 tools/vivado_artix7.py --db /tmp/prjxray-db/artix7 --out /tmp/xc7-vivado-tight \
+  --targets /tmp/xc7-vivado/results.json --fasm2bels /tmp/fasm2bels/venv/bin/python \
+  --connections /tmp/fasm2bels/conn --bitread /tmp/xc7-oracle/build/tools/bitread --seeds 3
+python3 tools/vivado_report.py --vivado /tmp/xc7-vivado-tight/results.json \
+  --netlist /tmp/xc7-vivado-tight/results.json --synth /tmp/xc7-vivado-tight/results.json
+python3 tools/xsim_euler.py --out /tmp/xc7-xsim-bits --bitstream-dir /tmp/xc7-vivado \
+  --db /tmp/prjxray-db/artix7 --bitread /tmp/xc7-oracle/build/tools/bitread \
+  --fasm2bels /tmp/fasm2bels/venv/bin/python --connections /tmp/fasm2bels/conn
+```
+
+`xsim_euler.py` simulates every Euler solver's synthesized netlist with
+Xilinx's UNISIM models in Vivado's simulator to its known answer and exact
+cycle count (all ten pass, Euler 58 over 2.6 million cycles), and with
+`--bitstream-dir` the netlists fasm2bels rebuilds from synth's routed
+bitstreams (all eight without DSPs pass). It found that a LUT on a lane's
+O5 output driving the clock enable or reset of its own slice's flip-flops
+was routed out through the output multiplexer without that multiplexer's
+O5 setting, so the flip-flops were enabled by their own data (Euler 58,
+which `ci_artix7_bitsim.py` does not cover). `vivado_artix7.py` is the QoR
+comparison below; Vivado's design rule checks found that the harnesses had
+put single-ended clocks on the N side of clock-capable pairs, now the P
+side. No hardware execution has been possible.
 
 ## QoR
+
+### Against Vivado
+
+`tools/vivado_artix7.py` implements each Euler solver three ways on the
+XC7A100T-CSG324 with the same pins and clock, each judged by Vivado
+2025.2's timer after routing:
+
+- **Vivado**: Vivado from RTL with its default steps (`synth_design`,
+  `opt_design`, `place_design`, `phys_opt_design`, `route_design`).
+- **netlist**: synth's synthesized netlist through the same Vivado steps,
+  comparing synthesis alone.
+- **synth**: synth's native flow from source to bitstream. fasm2bels
+  rebuilds the routed netlist from the bitstream with every cell's site and
+  every net's route as constraints; Vivado routes only the clock and the
+  few nets it cannot take as routed (those also routed inside a slice), and
+  times the result. fasm2bels has no DSP48 model: Euler 48 and 97 have only
+  synth's own estimate.
+
+Each design is constrained 20% beyond the best Fmax any flow reached at
+100 MHz, so that every flow works for timing (Vivado stops optimizing once
+a constraint is met; synth's results do not depend on the target). synth's
+figures are the median of three placement seeds, at revision `ae1dd6c`.
+Slices are occupied slices after routing.
+Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
+
+| Design | Slices: Vivado / netlist / synth | LUTs: Vivado / netlist | FFs: Vivado / netlist / synth | MHz, Vivado's timer: Vivado / netlist / synth | synth's estimate |
+|---|---:|---:|---:|---:|---:|
+| Euler 10 | 1446 / 1222 / 986 | 3760 / 3963 | 1369 / 1859 / 1859 | 112.4 / 118.3 / 106.3 | 100.0 |
+| Euler 14 | 1224 / 1081 / 958 | 3234 / 2934 | 2200 / 2212 / 2214 | 147.3 / 138.5 / 124.5 | 128.5 |
+| Euler 25 | 167 / 183 / 138 | 665 / 515 | 187 / 187 / 187 | 144.1 / 143.8 / 133.2 | 137.2 |
+| Euler 31 | 83 / 110 / 87 | 223 / 207 | 300 / 300 / 300 | 327.1 / 304.2 / 245.4 | 251.2 |
+| Euler 43 | 1329 / 1104 / 1065 | 5032 / 3637 | 1523 / 1501 / 1497 | 72.3 / 96.0 / 82.9 | 84.1 |
+| Euler 48 | 1244 / 1206 / 1092 | 4781 / 3229 | 2449 / 2400 / 2412 | 134.8 / 132.6 / - | 122.3 |
+| Euler 57 | 390 / 374 / 284 | 1562 / 1149 | 857 / 784 / 601 | 130.3 / 137.9 / 112.1 | 114.3 |
+| Euler 58 | 1029 / 1097 / 930 | 3890 / 3743 | 2023 / 2028 / 2028 | 138.8 / 144.9 / 124.5 | 128.0 |
+| Euler 92 | 823 / 536 / 477 | 1427 / 879 | 1647 / 2616 / 2616 | 158.0 / 153.8 / 133.0 | 133.0 |
+| Euler 97 | 211 / 211 / 198 | 792 / 545 | 443 / 443 / 445 | 85.6 / 83.7 / - | 82.1 |
+
+- **Area.** synth uses fewer slices than Vivado on every design but
+  Euler 31 (87 against 83), by 6–42% elsewhere, and Vivado's own
+  implementation of synth's netlist packs it into more slices than synth
+  on all ten.
+- **Synthesis.** Vivado implementing synth's netlist matches or beats its
+  own synthesis on Euler 10, 43, 57 and 58 (Euler 43 by 33%), and is within
+  3% on 25, 48, 92 and 97; Euler 14 and 31 trail by 6–7%.
+- **Placement and routing.** synth's own placement and routing remain
+  5–25% slower than Vivado's under a tight constraint (Euler 43, where
+  synth's netlist is much better, is 15% faster). Since revision `c7acb03`
+  the analytical placer and per-input setup checks gained 4% on average
+  (Euler 14 10%, 58 8%, 25 6%; 31 and 57 within 1%). Routing is no longer
+  the main gap: Vivado
+  routing synth's placement of Euler 14 reaches 121 MHz and of Euler 58
+  127, against synth's own routing at 120–125 and 122–124. Placement is:
+  on Euler 31, Vivado placing synth's slices reaches 291 MHz against 244–251
+  for synth's placement routed by Vivado; packing adds about 5% (Vivado's
+  own packing of the same netlists, 304 and on Euler 14 139 against 131).
+- **Runtime.** End to end, synth takes 3–125 s per design and Vivado 44–215
+  s (measured with other jobs on the machine); synth is faster on all but
+  Euler 10 (125 s against 86, mostly its three timing rounds of routing)
+  and on par on Euler 48 and 58.
 
 ### Synthesis
 
@@ -255,9 +402,21 @@ How to read the timing columns:
 
 ## Remaining work
 
-- Calibrate timing against vendor tools or hardware (cell corners, clock
-  skew, I/O and hold), and characterize the BRAM pips missing from the
-  upstream data.
+- Placement: Vivado placing synth's slices is still 8–17% faster than
+  synth's placement routed by Vivado (Euler 14 and 31). Annealing from the
+  analytical placement converges for its cost: its timing weight and
+  criticality exponents, more moves, a place-route iteration correcting
+  each connection's predicted delay by its routed one (0.8% for twice the
+  time), weighting rows above columns, and timing high-fanout nets were
+  tried and gained nothing measurable. The cost model, not the search,
+  is the likely limit.
+- Timing: X-Ray's SDF has one delay per arc, where Vivado's LUTs fall in
+  124 ps and rise in about 300; a transition-aware timer would rank paths
+  by Vivado's worst case.
+- Time DSP designs with Vivado: fasm2bels has no DSP48 model, so Euler 48
+  and 97 have only synth's estimate.
+- Extend timing to clock skew, I/O and hold, and characterize the BRAM pips
+  missing from the upstream data.
 - Reduce routing time on designs with wide high-fanout critical nets
   (Euler 48: three times nextpnr's). Their sinks' A* searches are loosely
   bounded by a lookahead that classes wires without their index.
