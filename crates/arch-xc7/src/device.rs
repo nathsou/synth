@@ -493,6 +493,12 @@ impl Template {
 /// --delays`).
 pub const VENDOR_SCALE: f32 = 1.144;
 
+/// The fitted delay (ps) of leaving a slice through a lane's output
+/// multiplexer (AMUX-DMUX) rather than its direct outputs. Vivado's net
+/// delays include it; its timing reports instead charge most of it to the
+/// next cell, timing LUTs read from these outputs in about 300 ps, not 124.
+pub const OUTPUT_MUX_DELAY: f32 = 185.0;
+
 /// Intrinsic delays (ps, before `VENDOR_SCALE`) of pips Project X-Ray leaves
 /// untimed, fitted to Vivado 2025.2's slow-corner net delays: the
 /// interconnect-to-slice input pips, which differ by LUT input (A6 fastest,
@@ -510,7 +516,7 @@ fn untimed_pip_delay(kind: &str, src: &str, dst: &str) -> Option<f32> {
             _ if to == "CE" => 172.0,
             _ if to == "SR" => 38.0,
             [b'A'..=b'D', b'X'] => 73.0,
-            _ if from.len() == 4 && from.ends_with("MUX") => 185.0,
+            _ if from.len() == 4 && from.ends_with("MUX") => OUTPUT_MUX_DELAY,
             _ => return None,
         }
     } else if (kind.starts_with("LIOI3") || kind.starts_with("RIOI3"))

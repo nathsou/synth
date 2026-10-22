@@ -237,7 +237,7 @@ for independent tests; the runtime reads the pinned CC0 device database.
 
 **Artix-7 has not reached iCE40 maturity.** Against Vivado 2025.2 on the Euler
 solvers, with Vivado's timer judging both, synth uses fewer slices on nine of
-ten and its synthesis is on par, but its placement and routing are 5–25%
+ten and its synthesis is on par, but its placement and routing are 5–28%
 slower under a tight clock. Physical tests compare native frames/packets
 against Project X-Ray on 35T and 100T, and netlists rebuilt from the
 bitstreams simulate correctly, but hardware behavior remains unvalidated.
