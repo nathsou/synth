@@ -140,6 +140,31 @@ fn attr(a: &Attr) -> String {
 
 /// Writes `m` as a Verilog module.
 pub fn write(m: &Module) -> String {
+    // Flattened Weft scopes may give distinct wires the same source name.
+    // References use WireId, so disambiguate a copy before rendering names.
+    // Reserve every existing name first, including ports and names that look
+    // like our generated suffixes.
+    let mut named = m.clone();
+    let mut reserved: std::collections::BTreeSet<String> =
+        m.wires.iter().map(|w| w.name.clone()).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    // Ports keep their public interface names even if an internal wire came first.
+    for w in m.wires.iter().filter(|w| w.port.is_some()) {
+        seen.insert(w.name.clone());
+    }
+    for (wi, wire) in named.wires.iter_enumerated_mut() {
+        if wire.port.is_none() && !seen.insert(wire.name.clone()) {
+            let base = format!("{}$w{}", wire.name, wi.index());
+            let mut name = base.clone();
+            let mut suffix = 0;
+            while !reserved.insert(name.clone()) {
+                suffix += 1;
+                name = format!("{base}_{suffix}");
+            }
+            wire.name = name;
+        }
+    }
+    let m = &named;
     let mut o = String::new();
     let ports = m.ports();
     let _ = writeln!(
@@ -431,4 +456,24 @@ pub fn write(m: &Module) -> String {
     }
     o.push_str("endmodule\n");
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_scoped_names_keep_distinct_references_and_ports() {
+        let mut m = Module::new("top");
+        let first = m.add_wire("value", 8);
+        let second = m.add_wire("value", 8);
+        let collision = m.add_wire("value$w1", 8);
+        m.connections.push((Sig::wire(second, 8), Sig::wire(first, 8)));
+        m.connections.push((Sig::wire(collision, 8), Sig::wire(second, 8)));
+        let text = write(&m);
+        assert!(text.contains("wire [7:0] \\value$w1_1 ;"));
+        assert!(text.contains("assign \\value$w1_1  = value;"));
+        assert!(text.contains("assign \\value$w1  = \\value$w1_1 ;"));
+        assert_eq!(m.wires[second].name, "value");
+    }
 }

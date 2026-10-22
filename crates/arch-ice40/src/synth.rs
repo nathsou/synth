@@ -291,8 +291,18 @@ fn bram_ok(mem: &Memory, opts: &SynthOptions) -> bool {
     mem.width as u64 * mem.depth as u64 >= opts.bram_min_bits
         && mem.writes.len() <= 1
         && !mem.reads.is_empty()
-        && mem.reads.iter().all(|r| r.clk.is_some_and(|c| c.posedge))
-        && mem.writes.iter().all(|w| w.clk.posedge)
+        && mem.reads.iter().all(|r| r.clk.is_some())
+}
+
+/// The block RAM primitive for read and write clock polarities: the `NR`
+/// and `NW` variants invert the read and write clocks.
+fn bram_kind(read_posedge: bool, write_posedge: bool) -> &'static str {
+    match (read_posedge, write_posedge) {
+        (true, true) => "SB_RAM40_4K",
+        (false, true) => "SB_RAM40_4KNR",
+        (true, false) => "SB_RAM40_4KNW",
+        (false, false) => "SB_RAM40_4KNRNW",
+    }
 }
 
 /// Physical `RDATA`/`WDATA`/`MASK` pin of data bit `b` in a `w`-bit mode.
@@ -328,7 +338,8 @@ fn bram_addr(word: &Sig, w: usize) -> Sig {
 }
 
 /// Replaces memory `mi` (synchronous, non-transparent reads; at most one
-/// write port) with `SB_RAM40_4K` blocks: one set per read port, in the
+/// write port) with `SB_RAM40_4K` blocks (or their inverted-clock variants):
+/// one set per read port, in the
 /// 16/8/4/2-bit mode needing the fewest blocks, banked by the address bits
 /// above the block depth. Returns the number of blocks.
 fn map_bram(m: &mut Module, mi: MemId) -> usize {
@@ -458,7 +469,8 @@ fn map_bram(m: &mut Module, mi: MemId) -> usize {
                 m.add_cell(
                     format!("{}$bram{}_{}", mem.name, bank, col),
                     CellKind::Instance(Box::new(Instance {
-                        module: "SB_RAM40_4K".into(),
+                        module: bram_kind(clk.posedge, wr.as_ref().is_none_or(|w| w.clk.posedge))
+                            .into(),
                         params,
                         conns,
                     })),
@@ -476,7 +488,7 @@ fn map_bram(m: &mut Module, mi: MemId) -> usize {
             m.add_cell(
                 format!("{}$bank", mem.name),
                 CellKind::Dff(Box::new(Dff {
-                    clk: Clock { sig: clk.sig, posedge: true },
+                    clk: Clock { sig: clk.sig, posedge: clk.posedge },
                     d: sel,
                     q: q.clone(),
                     en: if rd.en == SigBit::ONE {

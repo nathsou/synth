@@ -3,7 +3,9 @@
 //! frequencies. One timing graph serves placement and routing (with
 //! estimated net delays) and the final analysis (with routed delays).
 //! Clocks are ideal (no skew), as in `icetime`; a path between two clocks
-//! is timed against the capturing clock.
+//! is timed against the capturing clock. A path between the two edges of a
+//! clock (a rising-edge register into a falling-edge one, or the reverse)
+//! has half a period, so it counts double towards the clock's period.
 
 use synth_core::FxHashMap;
 use synth_netlist::{CellId, NetId, Netlist, Param};
@@ -295,10 +297,10 @@ pub struct TimingGraph {
     pub conns: Vec<Connection>,
     /// Connection ending at each node (`u32::MAX` if none).
     sink_conn: Vec<u32>,
-    /// Start points: node, clock-to-output delay, clock.
-    starts: Vec<(u32, f64, u16)>,
-    /// End points: node, setup time, clock.
-    ends: Vec<(u32, f64, u16)>,
+    /// Start points: node, clock-to-output delay, clock, falling edge.
+    starts: Vec<(u32, f64, u16, bool)>,
+    /// End points: node, setup time, clock, falling edge.
+    ends: Vec<(u32, f64, u16, bool)>,
     pub clocks: Vec<Clock>,
 }
 
@@ -396,8 +398,9 @@ impl TimingGraph {
                     if param(c, "DFF_ENABLE") != 0 {
                         if let Some(clk) = nl.pin_net(c, "CLK") {
                             let k = clock_index(clk, &mut clocks);
+                            let neg = param(c, "NEG_CLK") != 0;
                             if let Some(o) = o {
-                                starts.push((node(c, o), lc_arc("clk", "lcout") as f64, k));
+                                starts.push((node(c, o), lc_arc("clk", "lcout") as f64, k, neg));
                             }
                             let perm = lut_pins.get(&c).copied().unwrap_or([0, 1, 2, 3]);
                             for (j, p) in
@@ -410,11 +413,11 @@ impl TimingGraph {
                                 if let Some(i) = pin_of(c, p)
                                     && let Some(s) = setup_time(&arcs, LC, phys)
                                 {
-                                    ends.push((node(c, i), s, k));
+                                    ends.push((node(c, i), s, k, neg));
                                 }
                             }
                             if i3_is_cin && let Some(s) = setup_time(&arcs, LC, "I3") {
-                                ends.push((node(c, cin.unwrap()), s, k));
+                                ends.push((node(c, cin.unwrap()), s, k, neg));
                             }
                         }
                     } else {
@@ -434,6 +437,7 @@ impl TimingGraph {
                 RAM => {
                     let rclk = nl.pin_net(c, "RCLK").map(|n| clock_index(n, &mut clocks));
                     let wclk = nl.pin_net(c, "WCLK").map(|n| clock_index(n, &mut clocks));
+                    let (rneg, wneg) = (param(c, "NEG_CLK_R") != 0, param(c, "NEG_CLK_W") != 0);
                     for (i, pin) in nl.cells[c].pins.iter().enumerate() {
                         if pin.net.is_none() {
                             continue;
@@ -442,13 +446,18 @@ impl TimingGraph {
                         if name.starts_with("RDATA") {
                             if let Some(k) = rclk {
                                 let d = arcs.get("SB_RAM40_4K", ArcKind::IoPath, "RCLK", name);
-                                starts.push((node(c, i), d, k));
+                                starts.push((node(c, i), d, k, rneg));
                             }
                         } else if pin.dir == synth_netlist::Dir::Input
                             && let Some(s) = setup_time(&arcs, RAM, name)
                             && let Some(k) = if name.starts_with('R') { rclk } else { wclk }
                         {
-                            ends.push((node(c, i), s, k));
+                            ends.push((
+                                node(c, i),
+                                s,
+                                k,
+                                if name.starts_with('R') { rneg } else { wneg },
+                            ));
                         }
                     }
                 }
@@ -469,7 +478,7 @@ impl TimingGraph {
             }
         }
         // Register outputs start paths; nothing propagates into them.
-        for &(s, _, _) in &starts {
+        for &(s, _, _, _) in &starts {
             edges[s as usize].clear();
         }
         let mut fanin_off = Vec::with_capacity(n + 1);
@@ -543,30 +552,43 @@ impl TimingGraph {
             slack: vec![f64::INFINITY; self.conns.len()],
             paths: vec![None; self.clocks.len()],
         };
-        let mut arr = vec![f64::NEG_INFINITY; n];
-        for &(s, d, _) in &self.starts {
-            arr[s as usize] = d + CLOCK_JITTER_PS;
-        }
-        for &v in &self.order {
-            let v = v as usize;
-            for &(from, e) in fanin(v) {
-                let a = arr[from as usize] + edge_delay(e);
-                if a > arr[v] {
-                    arr[v] = a;
+        // Paths launched by each clock edge are propagated separately: a
+        // path captured by the other edge has half a period.
+        let launches: Vec<bool> = [false, true]
+            .into_iter()
+            .filter(|&neg| self.starts.iter().any(|s| s.3 == neg))
+            .collect();
+        let mut arrivals = Vec::with_capacity(launches.len());
+        let mut worst_end: Vec<Option<(usize, u32)>> = vec![None; self.clocks.len()];
+        for (li, &launch) in launches.iter().enumerate() {
+            let mut arr = vec![f64::NEG_INFINITY; n];
+            for &(s, d, _, neg) in &self.starts {
+                if neg == launch {
+                    arr[s as usize] = d + CLOCK_JITTER_PS;
                 }
             }
-        }
-        let mut worst_end: Vec<Option<u32>> = vec![None; self.clocks.len()];
-        for &(e, setup, k) in &self.ends {
-            let (k, t) = (k as usize, arr[e as usize] + setup);
-            if t.is_finite() && t > out.period[k] {
-                out.period[k] = t;
-                worst_end[k] = Some(e);
+            for &v in &self.order {
+                let v = v as usize;
+                for &(from, e) in fanin(v) {
+                    let a = arr[from as usize] + edge_delay(e);
+                    if a > arr[v] {
+                        arr[v] = a;
+                    }
+                }
             }
+            for &(e, setup, k, neg) in &self.ends {
+                let t = arr[e as usize] + setup;
+                let (k, t) = (k as usize, if neg == launch { t } else { 2.0 * t });
+                if t.is_finite() && t > out.period[k] {
+                    out.period[k] = t;
+                    worst_end[k] = Some((li, e));
+                }
+            }
+            arrivals.push(arr);
         }
         for (k, end) in worst_end.iter().enumerate() {
-            if let Some(e) = *end {
-                out.paths[k] = Some(self.trace(&arr, e, &edge_delay));
+            if let Some((li, e)) = *end {
+                out.paths[k] = Some(self.trace(&arrivals[li], e, &edge_delay));
             }
         }
         let overall = out.period.iter().copied().fold(1.0, f64::max);
@@ -578,36 +600,39 @@ impl TimingGraph {
             .zip(&out.period)
             .map(|(c, &p)| c.target_ps.map_or(overall, |t| t.max(p)).max(1.0))
             .collect();
-        // Required times, and the target each node's paths are judged by.
-        let mut req = vec![f64::INFINITY; n];
-        let mut scale = vec![overall; n];
-        for &(e, setup, k) in &self.ends {
-            let r = target[k as usize] - setup;
-            if r < req[e as usize] {
-                req[e as usize] = r;
-                scale[e as usize] = target[k as usize];
-            }
-        }
-        for &v in self.order.iter().rev() {
-            let v = v as usize;
-            if !req[v].is_finite() {
-                continue;
-            }
-            for &(from, e) in fanin(v) {
-                let d = edge_delay(e);
-                let r = req[v] - d;
-                if r < req[from as usize] {
-                    req[from as usize] = r;
-                    scale[from as usize] = scale[v];
+        for (&launch, arr) in launches.iter().zip(&arrivals) {
+            // Required times, and the target each node's paths are judged by.
+            let mut req = vec![f64::INFINITY; n];
+            let mut scale = vec![overall; n];
+            for &(e, setup, k, neg) in &self.ends {
+                let t = target[k as usize] * if neg == launch { 1.0 } else { 0.5 };
+                let r = t - setup;
+                if r < req[e as usize] {
+                    req[e as usize] = r;
+                    scale[e as usize] = t;
                 }
-                if let Edge::Net(k) = e
-                    && arr[from as usize].is_finite()
-                {
-                    let slack = req[v] - (arr[from as usize] + d);
-                    let k = k as usize;
-                    out.slack[k] = out.slack[k].min(slack);
-                    let crit = (1.0 - slack / scale[v]).clamp(0.0, 1.0);
-                    out.criticality[k] = out.criticality[k].max(crit);
+            }
+            for &v in self.order.iter().rev() {
+                let v = v as usize;
+                if !req[v].is_finite() {
+                    continue;
+                }
+                for &(from, e) in fanin(v) {
+                    let d = edge_delay(e);
+                    let r = req[v] - d;
+                    if r < req[from as usize] {
+                        req[from as usize] = r;
+                        scale[from as usize] = scale[v];
+                    }
+                    if let Edge::Net(k) = e
+                        && arr[from as usize].is_finite()
+                    {
+                        let slack = req[v] - (arr[from as usize] + d);
+                        let k = k as usize;
+                        out.slack[k] = out.slack[k].min(slack);
+                        let crit = (1.0 - slack / scale[v]).clamp(0.0, 1.0);
+                        out.criticality[k] = out.criticality[k].max(crit);
+                    }
                 }
             }
         }
@@ -697,5 +722,24 @@ mod tests {
         let a_tight = TimingGraph::new(&arch, &nl, &tight).analyse(&delays);
         let a_none = g.analyse(&delays);
         assert_eq!(a_tight.criticality, a_none.criticality);
+    }
+
+    #[test]
+    fn opposite_edge_paths_have_half_a_period() {
+        let arch = Arch::new(crate::arch::Part::Hx1k, "vq100").unwrap();
+        let mut nl = Netlist::new();
+        chain(&mut nl);
+        let delays = |g: &TimingGraph| vec![400.0; g.conns.len()];
+        let g = TimingGraph::new(&arch, &nl, &ClockConstraints::default());
+        let same = g.analyse(&delays(&g)).period[0];
+        // ff1 captures on the falling edge: ff0 -> lut -> ff1 is a half-cycle
+        // path, and so is ff1 -> ff0.
+        let ff1 = nl.live_cells().find(|&c| nl.str(nl.cells[c].name) == "ff1").unwrap();
+        nl.set_param(ff1, "NEG_CLK", Param::Int(1));
+        let g = TimingGraph::new(&arch, &nl, &ClockConstraints::default());
+        let a = g.analyse(&delays(&g));
+        assert!((a.period[0] - 2.0 * same).abs() < 1e-6, "{} vs {}", a.period[0], 2.0 * same);
+        let into_ff1 = g.conns.iter().position(|c| nl.str(nl.cells[c.sink].name) == "ff1").unwrap();
+        assert!(a.slack[into_ff1].abs() < 1e-6);
     }
 }

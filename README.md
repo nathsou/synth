@@ -76,6 +76,46 @@ tools/build_playground.sh              # or a static site, the flow in WebAssemb
 
 See [docs/PLAYGROUND.md](docs/PLAYGROUND.md).
 
+## Simulation
+
+`synth sim` simulates Verilog (four-state, as Icarus does) or Weft
+(two-state) without other tools: it compiles the elaborated design into a
+program that runs only the logic each change reaches. It drives the clock,
+sets inputs at given cycles, stops on a condition, prints signals, decodes a
+serial line and writes VCD:
+
+```sh
+target/release/synth sim tests/designs/euler/p031.v --top euler31 \
+  --set start=1 --set rst=1 --at 2:rst=0 --until done --print answer --vcd p031.vcd
+target/release/synth sim soc.v picorv32.v --top top --cycles 200000 --uart tx:8
+```
+
+For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
+`<top>.c`) to compile with a testbench of your own, like a Verilator model.
+`--attach` places external memories (a ROM on the design's address and data
+ports) inside the model. The model runs only the logic that changed, or all
+of it, as Verilator does, when most of it changes at each edge
+(`-DSIM_SETTLE_CHANGED` or `-DSIM_SETTLE_ALL` forces one). On the NES of the
+Weft examples, the C model runs twice as fast as Verilator, on the Euler
+solvers 1.1 times as fast (geometric mean, from 0.6 to 2.1 times) and on the
+PicoRV32 SoC 0.8 times as fast; the interpreter is 7 to 70 times slower than
+the C model. `--optimize` speeds up the interpreter (it is always on for C
+models), at the cost of internal signals. Rust code drives simulations
+through the `synth-sim` crate. See [ADR 0008](docs/decisions/0008-simulator.md).
+
+The same simulator checks the flow: `--level synth` simulates the iCE40
+netlist synthesis makes of a design and `--level bitstream` what its
+bitstream implements, decoded back to cells (ports named after the PCF);
+`--compare synth` or `--compare bitstream` runs one against the RTL under
+random inputs, comparing every output bit the RTL defines:
+
+```sh
+target/release/synth sim soc.v picorv32.v --top top --compare bitstream \
+  --device hx8k --package cb132 --pcf alchitry_cu.pcf --cycles 200000
+```
+
+`tools/ci_sim.sh` runs these checks on the test designs and boards in CI.
+
 ## Carry mapping
 
 `--carry-min-width <bits>` on `synth build` or `synth synth` sets the minimum

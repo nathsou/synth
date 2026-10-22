@@ -87,6 +87,7 @@ on the same netlists.
    width reduction).
 4. RTLIL word-level subset (what Amaranth emits) on top of the same lowering.
 5. `synth-sim` 4-state RTL simulator. Differential tests against Icarus.
+   (Done: ADR 0008; a compiled cycle simulator, 4- and 2-state, with a C backend.)
 6. Memory inference + `$readmemh`; DFF legalization.
 7. `synth-sat`; AIG with rewriting, balancing and fraiging; priority-cut LUT4
    mapping with area recovery; combinational equivalence checking.

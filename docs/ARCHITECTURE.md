@@ -38,8 +38,9 @@ phased plan for getting there is in [ROADMAP.md](ROADMAP.md).
   encryption.
 - Vendor IP generators (MIG, CoreGen). Users instantiate primitives directly.
 - A GUI. Reports are text, JSON and later HTML. A floorplan viewer may come later.
-- Simulation as a product feature. An internal simulator exists for verification
-  (§13) and may be exposed later as `synth sim`.
+- Simulation beyond what verification needs: `synth sim` (ADR 0008) runs designs
+  with simple stimulus, VCD output and C models, but there are no testbench
+  language constructs.
 
 ---
 
@@ -133,7 +134,7 @@ compile times stay reasonable and dependencies stay acyclic.
 | `synth-rtl` | Word-level RTL IR, the SRTL text format (read and write), the process-lowering engine shared by the Verilog and RTLIL paths, and RTL passes (opt, memory, FSM, arithmetic inference) |
 | `synth-sat` | CDCL SAT solver (incremental, with assumptions) |
 | `synth-logic` | AIG, optimization, cut enumeration, LUT mapping, equivalence checking |
-| `synth-sim` | Simulators: 4-state event-driven (RTL) and 2-state compiled cycle simulator (netlists) |
+| `synth-sim` | Compiled cycle simulator for RTL and netlists, 4- or 2-state, with an interpreter and a C backend (ADR 0008) |
 | `synth-netlist` | Mapped netlist IR shared by every backend stage |
 | `synth-chipdb` | ChipDB binary format: types, reader, queries |
 | `synth-dbgen` | Offline importers (IceStorm, Trellis, X-Ray) that write ChipDB files. Build time only |

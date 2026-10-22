@@ -12,6 +12,7 @@ pub mod bitstream;
 pub mod cells;
 pub mod checkpoint;
 pub mod chipdb;
+pub mod decode;
 pub mod device;
 pub mod flow;
 pub mod pack;
@@ -19,6 +20,7 @@ pub mod pcf;
 pub mod place;
 pub mod pll;
 pub mod route;
+pub mod sim;
 pub mod synth;
 pub mod timing;
 
