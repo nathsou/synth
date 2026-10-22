@@ -345,7 +345,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 48: Self powers",
         description: "Project Euler 48 in hardware: sends 9110846700 over the UART after 22,758 cycles",
         files: &[
-            ("top.v", euler_top!("euler48", 34, "50000000")),
+            ("top.v", euler_top!("euler48", 34, "33333333")),
             ("p048.v", include_str!("../../../tests/designs/euler/p048.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
