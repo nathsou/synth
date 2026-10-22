@@ -47,19 +47,23 @@ pub fn extract_controls(m: &mut Module) -> usize {
     for ci in dffs {
         let CellKind::Dff(dff) = &m.cells[ci].kind else { unreachable!() };
         let dff = dff.as_ref().clone();
-        let mut groups: BTreeMap<Ctrl, Vec<(usize, SigBit, Logic)>> = BTreeMap::new();
-        for j in 0..dff.q.width() {
-            let (mut ctrl, mut d, val) = analyse(m, &mux_of, dff.q.0[j], dff.d.0[j]);
-            // Holds deeper in the multiplexer tree: an extra enable term (not
-            // below a reset that the enable gates, which would reorder them).
+        let mut bits: Vec<(Ctrl, SigBit, Logic)> =
+            (0..dff.q.width()).map(|j| analyse(m, &mux_of, dff.q.0[j], dff.d.0[j])).collect();
+        // Holds deeper in the multiplexer tree: an extra enable term (not
+        // below a reset that the enable gates, which would reorder them).
+        // For bits with the same controls so far, a word at a time when
+        // their trees are the same multiplexers, else bit by bit.
+        let mut same: BTreeMap<Ctrl, Vec<usize>> = BTreeMap::new();
+        for (j, b) in bits.iter().enumerate() {
+            same.entry(b.0.clone()).or_default().push(j);
+        }
+        for (ctrl, js) in same {
             if !ctrl.en_over_srst {
-                let mut memo = FxHashMap::default();
-                let (e, nd) = deep_hold(m, &mux_of, dff.q.0[j], d, &mut memo, 0);
-                if e != SigBit::ONE && e != SigBit::ZERO {
-                    ctrl.en.push((e, true));
-                    d = nd;
-                }
+                deep_holds(m, &mux_of, &dff.q, &mut bits, &js);
             }
+        }
+        let mut groups: BTreeMap<Ctrl, Vec<(usize, SigBit, Logic)>> = BTreeMap::new();
+        for (j, (ctrl, d, val)) in bits.into_iter().enumerate() {
             if !ctrl.en.is_empty() || ctrl.srst.is_some() {
                 changed += 1;
             }
@@ -152,6 +156,97 @@ pub(crate) fn deep_hold(
     };
     memo.insert(t, r);
     r
+}
+
+/// Adds the enables of holds deeper in the trees of flip-flop bits `js`
+/// (outputs `q`; inputs and controls in `bits`): for all of them at once
+/// when their trees are alike, else for each half (a bit that differs, such
+/// as the sign kept by an arithmetic shift, only splits its own part).
+fn deep_holds(
+    m: &mut Module,
+    mux_of: &FxHashMap<SigBit, (CellId, usize)>,
+    q: &Sig,
+    bits: &mut [(Ctrl, SigBit, Logic)],
+    js: &[usize],
+) {
+    if let [j] = js {
+        let mut memo = FxHashMap::default();
+        let (e, nd) = deep_hold(m, mux_of, q.0[*j], bits[*j].1, &mut memo, 0);
+        if e != SigBit::ONE && e != SigBit::ZERO {
+            bits[*j].0.en.push((e, true));
+            bits[*j].1 = nd;
+        }
+        return;
+    }
+    let qs: Sig = js.iter().map(|&j| q.0[j]).collect();
+    let t: Sig = js.iter().map(|&j| bits[j].1).collect();
+    let mut memo = FxHashMap::default();
+    match deep_hold_word(m, mux_of, &qs, &t, &mut memo, 0) {
+        Some((e, d)) => {
+            if e != SigBit::ONE && e != SigBit::ZERO {
+                for (k, &j) in js.iter().enumerate() {
+                    bits[j].0.en.push((e, true));
+                    bits[j].1 = d.0[k];
+                }
+            }
+        }
+        None => {
+            let (a, b) = js.split_at(js.len() / 2);
+            deep_holds(m, mux_of, q, bits, a);
+            deep_holds(m, mux_of, q, bits, b);
+        }
+    }
+}
+
+/// [`deep_hold`] for the bits `q` of a flip-flop at once, with inputs `t`,
+/// when every level of their trees is one multiplexer for all of them (or
+/// they all hold, or none is a multiplexer output): one enable for the word,
+/// and word-wide data. `None` when the bits' trees differ.
+fn deep_hold_word(
+    m: &mut Module,
+    mux_of: &FxHashMap<SigBit, (CellId, usize)>,
+    q: &Sig,
+    t: &Sig,
+    memo: &mut FxHashMap<Sig, (SigBit, Sig)>,
+    depth: usize,
+) -> Option<(SigBit, Sig)> {
+    if t == q {
+        return Some((SigBit::ZERO, q.clone()));
+    }
+    if let Some(r) = memo.get(t) {
+        return Some(r.clone());
+    }
+    let from: Vec<Option<(CellId, usize)>> = t.iter().map(|b| mux_of.get(b).copied()).collect();
+    if from.iter().all(|f| f.is_none()) && t.iter().zip(q.iter()).all(|(a, b)| a != b) {
+        return Some((SigBit::ONE, t.clone()));
+    }
+    let ci = from[0]?.0;
+    if depth > 64 || from.iter().any(|f| f.map(|f| f.0) != Some(ci)) {
+        return None;
+    }
+    let CellKind::Mux { a, b, s, .. } = &m.cells[ci].kind else { unreachable!() };
+    let s = *s;
+    let a: Sig = from.iter().map(|f| a.0[f.unwrap().1]).collect();
+    let b: Sig = from.iter().map(|f| b.0[f.unwrap().1]).collect();
+    let (ea, da) = deep_hold_word(m, mux_of, q, &a, memo, depth + 1)?;
+    let (eb, db) = deep_hold_word(m, mux_of, q, &b, memo, depth + 1)?;
+    let r = if ea == SigBit::ONE && eb == SigBit::ONE {
+        (SigBit::ONE, t.clone())
+    } else {
+        let e = m.mux(s, Sig::bit(ea), Sig::bit(eb)).0[0];
+        let d = if ea == SigBit::ZERO {
+            db
+        } else if eb == SigBit::ZERO {
+            da
+        } else if da == a && db == b {
+            t.clone()
+        } else {
+            m.mux(s, da, db)
+        };
+        (e, d)
+    };
+    memo.insert(t.clone(), r.clone());
+    Some(r)
 }
 
 /// Walks the multiplexers in front of flip-flop bit `q` with input `d`.

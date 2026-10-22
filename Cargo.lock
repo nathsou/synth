@@ -25,6 +25,7 @@ dependencies = [
  "synth-playground",
  "synth-rtl",
  "synth-rtlil",
+ "synth-sim",
  "synth-verilog",
  "synth-weft",
 ]
@@ -110,6 +111,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "synth-sim"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-elab",
+ "synth-netlist",
+ "synth-rtl",
+ "synth-verilog",
+ "synth-weft",
+]
+
+[[package]]
 name = "synth-verilog"
 version = "0.1.0"
 dependencies = [
@@ -123,5 +136,6 @@ dependencies = [
  "synth-core",
  "synth-elab",
  "synth-rtl",
+ "synth-sim",
  "synth-verilog",
 ]

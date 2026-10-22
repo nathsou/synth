@@ -1381,9 +1381,12 @@ Because the source already states clock enables, resets and read-port behaviour,
 the existing RTL passes find exactly what was written. The frontend does not
 recognize patterns.
 
-**Simulation.** Until synth has its own simulator, a Weft design is simulated by
-writing the elaborated RTL as Verilog (`synth elab design.weft --verilog out.v`)
-and using Icarus Verilog or Verilator. `undef` appears as `x` there.
+**Simulation.** `synth sim` simulates a Weft design two-state, as this
+specification defines it (`undef` reads as 0): it drives the clock, sets inputs
+(`--set`, `--at`), prints signals, decodes a serial line (`--uart`) and writes
+VCD; `--emit-c` writes a C model for long runs. The elaborated RTL can also be
+written as Verilog (`synth elab design.weft --verilog out.v`) for Icarus
+Verilog or Verilator, where `undef` appears as `x`.
 
 ---
 
@@ -1470,7 +1473,8 @@ changing the meaning of existing programs.
 - Generic structs; traits or interfaces.
 - `match` guards.
 - Runtime assertions, cover properties and formal verification.
-- Testbench constructs and a native simulator (`synth sim`).
+- Testbench constructs (the simulator, `synth sim`, exists; stimulus comes
+  from its options or from Rust through `synth-sim`).
 - Asynchronous FIFO and handshake crossings in the standard library.
 - Saturating arithmetic; runtime division.
 - Packages, imports and visibility.
