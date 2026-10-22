@@ -451,3 +451,22 @@ module top(in i: uint<2>, out y: uint<8>, out n: uint<4>) {
     assert_eq!(s.peek("y"), Some(9));
     assert_eq!(s.peek("n"), Some(6));
 }
+
+/// `defaults` set a top's generic only when it declares it, and leave the
+/// choice of the top alone.
+#[test]
+fn defaults_apply_to_declared_top_generics() {
+    let run = |src: &str| {
+        let mut sm = synth_core::SourceMap::new();
+        let f = sm.add("test.weft", src);
+        let opts = synth_weft::Options {
+            defaults: vec![("CLK_HZ".into(), "100".into())],
+            ..Default::default()
+        };
+        let (m, diags) = synth_weft::compile(&mut sm, &[f], &[], None, &opts);
+        let m = m.unwrap_or_else(|| panic!("{}", diags.render(&sm)));
+        Sim::new(m).peek("y").unwrap()
+    };
+    assert_eq!(run("module top<CLK_HZ: int = 25>(out y: uint<8>) { y = CLK_HZ; }"), 100);
+    assert_eq!(run("module top<N: int = 7>(out y: uint<8>) { y = N; }"), 7);
+}

@@ -32,6 +32,7 @@ jobs:
       frontend: ${{ steps.f.outputs.frontend }}
       pnr: ${{ steps.f.outputs.pnr }}
       playground: ${{ steps.f.outputs.playground }}
+      artix7: ${{ steps.f.outputs.artix7 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -130,12 +131,14 @@ jobs:
   simulation:
     name: simulation
     needs: changes
-    if: (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pnr == 'true') && !github.event.pull_request.draft
+    if: (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pnr == 'true' || needs.changes.outputs.artix7 == 'true') && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     env:
       SYNTH: ${{ github.workspace }}/target/ci/synth
       FRONTEND: ${{ needs.changes.outputs.frontend }}
       PNR: ${{ needs.changes.outputs.pnr }}
+      ARTIX7: ${{ needs.changes.outputs.artix7 }}
+      XILINX_UNISIM: ${{ runner.temp }}/unisim
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -150,7 +153,7 @@ jobs:
       - name: Install reference tools (test oracles only)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm)
+          sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm) $([ "$ARTIX7" = true ] && echo cmake g++ python3-venv)
       - name: Build
         run: cargo build --profile ci -p synth
       - name: In-process simulation (synth sim)
@@ -170,3 +173,39 @@ jobs:
       - name: RTL and synthesised netlists give the answers
         if: env.FRONTEND == 'true'
         run: tools/ci_euler.sh
+      - name: Fetch Artix-7 simulation models
+        if: env.ARTIX7 == 'true'
+        run: tools/fetch_xc7_models.sh "$XILINX_UNISIM"
+      - name: Artix-7 primitive and Euler validation
+        if: env.ARTIX7 == 'true'
+        run: python3 tools/ci_artix7.py --out "$RUNNER_TEMP/artix7-validation"
+      - name: Cache pinned Artix-7 device data and independent oracles
+        if: env.ARTIX7 == 'true'
+        id: xc7-oracle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/prjxray-db
+            ${{ runner.temp }}/xc7-oracle
+          key: xc7-oracle-${{ runner.os }}-${{ hashFiles('tools/fetch_xc7_db.sh', 'tools/prepare_xc7_oracle.sh', 'tools/xc7-test-requirements.txt') }}
+      - name: Prepare Artix-7 physical oracles
+        if: env.ARTIX7 == 'true' && steps.xc7-oracle.outputs.cache-hit != 'true'
+        run: |
+          tools/fetch_xc7_db.sh "$RUNNER_TEMP/prjxray-db"
+          tools/prepare_xc7_oracle.sh "$RUNNER_TEMP/xc7-oracle"
+      - name: Artix-7 routed frames, packets and ECC
+        if: env.ARTIX7 == 'true'
+        run: |
+          "$RUNNER_TEMP/xc7-oracle/venv/bin/python" tools/ci_artix7_physical.py \
+            --db "$RUNNER_TEMP/prjxray-db/artix7" \
+            --xray "$RUNNER_TEMP/xc7-oracle/prjxray" \
+            --xray-tools "$RUNNER_TEMP/xc7-oracle/build/tools" \
+            --euler --full-luts --out "$RUNNER_TEMP/artix7-physical"
+      - name: Retain Artix-7 verification reports
+        if: always() && env.ARTIX7 == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artix7-validation
+          path: |
+            ${{ runner.temp }}/artix7-validation
+            ${{ runner.temp }}/artix7-physical

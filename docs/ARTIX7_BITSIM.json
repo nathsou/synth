@@ -1,0 +1,124 @@
+{
+  "checks": [
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "controls",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "counter",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "euler31",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "invert",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "lutram",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "ram",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "ram_sdp",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "ram_sdp_banked",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "sharedcarry",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "single_io",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "srl",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a100tcsg324-1",
+      "design": "yosys_wide",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "controls",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "counter",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "euler31",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "invert",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "lutram",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "ram",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "ram_sdp",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "ram_sdp_banked",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "sharedcarry",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "single_io",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "srl",
+      "cycles": 2000
+    },
+    {
+      "part": "xc7a35tftg256-1",
+      "design": "yosys_wide",
+      "cycles": 2000
+    }
+  ]
+}

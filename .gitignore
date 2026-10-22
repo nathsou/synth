@@ -2,4 +2,5 @@
 .synth/
 *.swp
 .DS_Store
+__pycache__/
 /work/

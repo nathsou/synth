@@ -1,5 +1,6 @@
 //! The iCE40 implementation flow: pack, place, route, generate bitstream.
 
+use synth_core::progress;
 use synth_core::time::Instant;
 
 use synth_netlist::Netlist;
@@ -123,6 +124,7 @@ fn run(
     detail: &mut Option<Implementation>,
 ) -> Result<(Config, bool, Option<Checkpoint>), String> {
     let t0 = Instant::now();
+    progress::step("device", "");
     let arch = Arch::new(opts.part, &opts.package)?;
     let previous = previous.filter(|c| {
         if c.compatible(&arch, opts) {
@@ -143,6 +145,7 @@ fn run(
     ));
 
     let t = Instant::now();
+    progress::step("pack", "");
     let (packed, report) = crate::pack::pack(&mut nl)?;
     log.extend(report.messages);
     let stats = nl.stats();
@@ -156,6 +159,9 @@ fn run(
     // with less weight on timing if the placement does not route (timing
     // pulls critical logic together, which can congest local routing).
     let mut fixed = crate::place::Placement::default();
+    // PLL outputs are clocks of the frequency they make.
+    let clocks = crate::pll::clock_targets(&nl, &opts.clocks);
+    crate::place::place_plls(&arch, &nl, &packed, pins, &mut fixed, log)?;
     crate::place::place_ios(&arch, &nl, pins, &mut fixed, log)?;
     crate::place::assign_globals(&arch, &mut nl, &mut fixed, log)?;
     // Each retry also leaves tiles room on their local tracks (contested
@@ -170,13 +176,14 @@ fn run(
     let mut incremental = false;
     if let Some(previous) = previous {
         let t = Instant::now();
+        progress::step("place", "incremental");
         let mut placement = fixed.clone();
         let popts = PlaceOptions {
             seed: opts.seed,
             effort: opts.place_effort,
             timing_weight: opts.timing_weight,
             max_locals: 32,
-            clocks: opts.clocks.clone(),
+            clocks: clocks.clone(),
         };
         let attempt = crate::place::place_incremental(
             &arch,
@@ -188,11 +195,12 @@ fn run(
             log,
         )
         .and_then(|()| {
+            progress::step("route", "incremental");
             crate::route::route_incremental(
                 &arch,
                 &nl,
                 &placement,
-                &opts.clocks,
+                &clocks,
                 opts.route_timing_rounds,
                 log,
                 Some(previous),
@@ -217,9 +225,15 @@ fn run(
             effort,
             timing_weight: w,
             max_locals,
-            clocks: opts.clocks.clone(),
+            clocks: clocks.clone(),
         };
         let mut placement = fixed.clone();
+        let again = if attempt > 0 {
+            format!("again ({} of {})", attempt + 1, attempts.len())
+        } else {
+            String::new()
+        };
+        progress::step("place", &again);
         crate::place::place_with_fixed(&arch, &nl, &packed, &mut placement, &popts, log)?;
         log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
         if std::env::var("SYNTH_DEBUG").is_ok() {
@@ -228,14 +242,8 @@ fn run(
             }
         }
         let t = Instant::now();
-        match crate::route::route(
-            &arch,
-            &nl,
-            &placement,
-            &opts.clocks,
-            opts.route_timing_rounds,
-            log,
-        ) {
+        progress::step("route", &again);
+        match crate::route::route(&arch, &nl, &placement, &clocks, opts.route_timing_rounds, log) {
             Ok(routing) => {
                 log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
                 result = Some((placement, routing));
@@ -263,7 +271,8 @@ fn run(
     routing.apply_lut_permutation(&mut nl);
 
     let t = Instant::now();
-    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &opts.clocks);
+    progress::step("timing", "");
+    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &clocks);
     let met = timing.clocks.iter().all(|c| c.target_mhz.is_none_or(|t| c.fmax_mhz >= t));
     for c in &timing.clocks {
         let target = match c.target_mhz {
@@ -304,6 +313,7 @@ fn run(
         c.set_periods(&timing);
     }
 
+    progress::step("bitstream", "");
     let config = crate::bitgen::generate(&arch, &nl, &placement, &routing)?;
     log.push(format!("total {:.2}s", t0.elapsed().as_secs_f64()));
     *detail = Some(Implementation { arch, netlist: nl, placement, routing, timing });

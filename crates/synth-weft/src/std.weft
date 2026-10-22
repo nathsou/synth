@@ -19,6 +19,22 @@ module reset_sync<STAGES: int = 2>(in x: bool @async, out rst: bool) {
     rst = s[STAGES - 1];
 }
 
+/// A clock of OUT_HZ made from `clk_in` (IN_HZ) by the device's PLL, or
+/// `clk_in` itself when the two are equal. `locked` rises once the clock is
+/// stable; hold the design in reset until then:
+///
+/// ```weft
+/// inst pll = synth_pll<IN_HZ: CLK_HZ, OUT_HZ: 40_000_000>(clk_in: clk);
+/// domain raw { clock: pll.clk_out }
+/// let rst = reset_sync(!pll.locked) @raw;
+/// default domain sys { clock: pll.clk_out, reset: rst }
+/// ```
+extern module synth_pll<IN_HZ: int, OUT_HZ: int>(
+    in  clk_in: clock,
+    out clk_out: clock,
+    out locked: bool @async,
+);
+
 /// High for the first CYCLES cycles after configuration.
 module power_on_reset<CYCLES: int = 16>(out rst: bool) {
     assert(CYCLES >= 1, "the reset lasts at least one cycle");

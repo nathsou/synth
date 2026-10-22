@@ -45,6 +45,11 @@ module top(in clk: clock, in btn: bool, out led: bool) {
 target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf -o top.bin
 ```
 
+On a terminal, `synth build`, `synth synth` and `synth pnr` show their
+progress on the last line: the step of the flow, a bar for the whole run,
+what the step is doing (the annealing round, the routing iteration and the
+wires still congested) and the time so far, with the log above it.
+
 See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
 modules can be used from Weft through `extern module` declarations.
 
@@ -60,7 +65,9 @@ files that would change).
 `synth playground` opens the whole flow in the browser: edit Weft or Verilog
 and see the design after every pass as a schematic, from the module level down
 to gates and LUTs, then the cells and routed wires on the actual iCE40 die,
-the critical paths and every configuration bit, decoded.
+the critical paths and every configuration bit, decoded. Its examples (the
+Project Euler solvers among them) build for the Nandland Go, the Alchitry Cu
+and Au and the Nexys A7, with `--xc7-db` for the Artix-7 boards.
 
 ```sh
 target/release/synth playground        # http://127.0.0.1:8080/
@@ -181,7 +188,9 @@ sequential clean-up; LUT mapping with remapping and don't-care optimisation,
 timing through carry chains, block RAM inference), packing, timing-driven
 placement and routing (with LUT input permutation), static timing analysis
 against clock constraints (`set_frequency` in the PCF or `--freq`) and
-bitstream generation are implemented for the iCE40 HX1K and HX8K.
+bitstream generation are implemented for the iCE40 HX1K and HX8K, PLLs
+included: `synth_pll<IN_HZ, OUT_HZ>` (Weft or Verilog) makes a clock with the
+device's PLL on iCE40 and Artix-7 alike ([docs/WEFT.md](docs/WEFT.md) §8.7).
 [examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
 (Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
 
@@ -250,7 +259,32 @@ on every design, and the processors and four of the nine solvers end up with
 a higher Fmax, Euler 48 level with nextpnr; Euler 14, 25, 43 and 57 still
 trail by 4 to 7%.
 
-Artix-7 is next.
+### Experimental native Artix-7 flow
+
+The Rust backend supports synthesis, slice/carry/RAM/DSP packing, placement,
+routing and configuration-frame generation:
+
+```sh
+tools/fetch_xc7_db.sh /tmp/prjxray-db
+target/release/synth build design.v --top top --family artix7 \
+  --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
+  --xdc design.xdc -o design.bit --timing-allow-fail
+```
+
+`--family xc7` is an alias; omitting `--family` keeps iCE40. `synth` can emit
+mapped Verilog, and `pnr` accepts mapped RTLIL. External tools are used only
+for independent tests; the runtime reads the pinned CC0 device database.
+
+**Artix-7 has not reached iCE40 maturity.** Against Vivado 2025.2 on the Euler
+solvers, with Vivado's timer judging both, synth uses fewer slices on nine of
+ten and its synthesis is on par, but its placement and routing are 5–28%
+slower under a tight clock. Physical tests compare native frames/packets
+against Project X-Ray on 35T and 100T, and netlists rebuilt from the
+bitstreams simulate correctly, but hardware behavior remains unvalidated.
+Builds require the explicit timing override. Advanced clocks/I/O, RAMB36, DSP
+cascades and incremental checkpoints remain unsupported. See [the detailed
+status and validation report](docs/ARTIX7.md) for the supported XDC subset and
+remaining criteria.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.

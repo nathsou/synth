@@ -147,6 +147,53 @@ pub fn simplify_carries(net: &mut LogicNet) -> usize {
     removed
 }
 
+/// Share identical arithmetic boxes before their unused sum/carry outputs
+/// are trimmed. A subtract and its comparison can then use the same chain.
+/// Sorting each operand pair also catches commuted additions.
+pub fn merge_duplicate_carries(net: &mut LogicNet) -> usize {
+    let mut seen = FxHashMap::default();
+    let mut chains: Vec<crate::net::Carry> = Vec::new();
+    let mut subst = FxHashMap::default();
+    let mut removed = 0;
+    for ch in std::mem::take(&mut net.carries) {
+        let operands: Vec<_> =
+            ch.a.iter()
+                .zip(&ch.b)
+                .map(|(&a, &b)| {
+                    let (a, b) = (net.aig.outputs[a], net.aig.outputs[b]);
+                    (a.min(b), a.max(b))
+                })
+                .collect();
+        let key = (operands, net.aig.outputs[ch.cin]);
+        if let Some(&index) = seen.get(&key) {
+            let existing: &mut crate::net::Carry = &mut chains[index];
+            for (&old, &new) in ch.sum.iter().zip(&existing.sum) {
+                subst.insert(old, Lit::new(net.aig.inputs[new as usize], false));
+            }
+            // A comparison has no sum; retain the sum of the other chain.
+            if ch.sum.len() > existing.sum.len() {
+                existing.sum.extend_from_slice(&ch.sum[existing.sum.len()..]);
+            }
+            match (ch.cout, existing.cout) {
+                (Some(old), Some(new)) => {
+                    subst.insert(old, Lit::new(net.aig.inputs[new as usize], false));
+                }
+                (Some(new), None) => existing.cout = Some(new),
+                _ => {}
+            }
+            removed += ch.a.len();
+        } else {
+            seen.insert(key, chains.len());
+            chains.push(ch);
+        }
+    }
+    net.carries = chains;
+    if !subst.is_empty() {
+        net.aig = substitute_inputs(&net.aig, &subst);
+    }
+    removed
+}
+
 /// Lower carry boxes whose entire input support fits in a LUT. Every
 /// sum and carry output then needs at most one LUT, with no dedicated
 /// carry entry/exit cells or placement constraints. `k` is the target LUT
@@ -197,6 +244,44 @@ pub fn lower_lut_sized_carries(net: &mut LogicNet, k: usize) -> usize {
 mod tests {
     use super::*;
     use crate::net::Carry;
+
+    #[test]
+    fn shares_commuted_operands_but_not_different_carry_inputs() {
+        let mut net = LogicNet::default();
+        let a: Vec<_> = (0..4).map(|_| net.aig.input()).collect();
+        let b: Vec<_> = (0..4).map(|_| net.aig.input()).collect();
+        let cin = net.aig.input();
+        let ca: Vec<_> = a.iter().map(|&a| net.aig.output(a)).collect();
+        let cb: Vec<_> = b.iter().map(|&b| net.aig.output(b)).collect();
+        let zero = net.aig.output(Lit::FALSE);
+        let cin = net.aig.output(cin);
+        let mut watched = Vec::new();
+        for i in 0..3 {
+            let cout = net.aig.inputs.len() as u32;
+            let out = net.aig.input();
+            watched.push(net.aig.output(out));
+            // Comparison comes first; the second chain supplies its sum.
+            let mut sum = Vec::new();
+            if i == 1 {
+                for _ in 0..4 {
+                    sum.push(net.aig.inputs.len() as u32);
+                    net.aig.input();
+                }
+            }
+            net.carries.push(Carry {
+                a: if i == 1 { cb.clone() } else { ca.clone() },
+                b: if i == 1 { ca.clone() } else { cb.clone() },
+                cin: if i == 2 { cin } else { zero },
+                sum,
+                cout: Some(cout),
+            });
+        }
+        assert_eq!(merge_duplicate_carries(&mut net), 4);
+        assert_eq!(net.carries.len(), 2);
+        assert_eq!(net.carries[0].sum.len(), 4);
+        assert_eq!(net.aig.outputs[watched[0]], net.aig.outputs[watched[1]]);
+        assert_ne!(net.aig.outputs[watched[0]], net.aig.outputs[watched[2]]);
+    }
 
     #[test]
     fn folds_constant_low_bits_and_identity_chains() {

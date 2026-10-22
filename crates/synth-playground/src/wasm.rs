@@ -1,11 +1,18 @@
 //! The WebAssembly interface: the page writes a request into memory it
 //! allocated with `pg_alloc`, calls `pg_call` and reads the response at the
 //! returned pointer (`pg_result_len` bytes). After a trap, `pg_panic`
-//! points at the panic message (`pg_result_len` bytes).
+//! points at the panic message (`pg_result_len` bytes). While the flow
+//! runs, it reports its progress through the import `env.synth_progress`
+//! (JSON text, see [`crate::handle_observed`]).
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn synth_progress(ptr: *const u8, len: usize);
+}
 
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -47,7 +54,15 @@ pub unsafe extern "C" fn pg_call(
     // SAFETY: the caller guarantees the buffers.
     let (method, body) =
         unsafe { (std::slice::from_raw_parts(m, m_len), std::slice::from_raw_parts(b, b_len)) };
-    let out = crate::handle(&String::from_utf8_lossy(method), &String::from_utf8_lossy(body));
+    let out = crate::handle_observed(
+        &String::from_utf8_lossy(method),
+        &String::from_utf8_lossy(body),
+        |p| {
+            let text = p.dump();
+            // SAFETY: the import reads `len` bytes at `ptr`.
+            unsafe { synth_progress(text.as_ptr(), text.len()) }
+        },
+    );
     RESULT.with(|r| {
         let mut r = r.borrow_mut();
         *r = out.into_bytes();

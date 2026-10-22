@@ -1,6 +1,9 @@
 // Small helpers shared by the views.
 
 /** Creates an element: h('div', {class: 'x', onclick}, child, 'text', ...). */
+/** A pin constraints file: iCE40 `.pcf` or Artix-7 `.xdc`. */
+export const isPins = (name) => name.endsWith('.pcf') || name.endsWith('.xdc');
+
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {

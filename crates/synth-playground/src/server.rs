@@ -1,6 +1,7 @@
 //! A minimal HTTP server for the playground: the web app's files, and its
 //! requests under `/api/<method>` answered natively instead of by the
-//! WebAssembly build. With `SYNTH_PLAYGROUND_DIR` set, files are read from
+//! WebAssembly build (`/api/<method>?progress` streams the progress of the
+//! run before its result). With `SYNTH_PLAYGROUND_DIR` set, files are read from
 //! that directory instead of the embedded copies (for working on the app).
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,6 +23,7 @@ pub const ASSETS: &[(&str, &[u8])] = &[
     ("panels.js", include_bytes!("../web/panels.js")),
     ("settings.js", include_bytes!("../web/settings.js")),
     ("util.js", include_bytes!("../web/util.js")),
+    ("progress.js", include_bytes!("../web/progress.js")),
     ("favicon.svg", include_bytes!("../web/favicon.svg")),
 ];
 
@@ -60,9 +62,26 @@ fn connection(stream: TcpStream) -> std::io::Result<()> {
     }
     let mut body = vec![0; len.min(64 << 20)];
     reader.read_exact(&mut body)?;
-    let path = target.split('?').next().unwrap_or("/").trim_start_matches('/');
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let path = path.trim_start_matches('/');
     let mut out = stream;
     match (method, path) {
+        // With `?progress`, the response streams the flow's progress, one
+        // JSON object per line, then the result on the last line.
+        ("POST", p) if p.starts_with("api/") && query == "progress" => {
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+            )?;
+            out.flush()?;
+            let mut lines = out.try_clone()?;
+            let resp = crate::handle_observed(&p[4..], &String::from_utf8_lossy(&body), move |j| {
+                // A client that went away no longer reads: the run goes on.
+                let _ = writeln!(lines, "{}", j.dump()).and_then(|()| lines.flush());
+            });
+            out.write_all(resp.as_bytes())?;
+            out.flush()
+        }
         ("POST", p) if p.starts_with("api/") => {
             let resp = crate::handle(&p[4..], &String::from_utf8_lossy(&body));
             respond(&mut out, "200 OK", "application/json", resp.as_bytes())

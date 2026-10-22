@@ -5,10 +5,9 @@ use synth_core::time::Instant;
 
 use synth_core::{FxHashMap, FxHashSet, Logic, LogicVec};
 use synth_logic::aig::{Lit, Node};
-use synth_logic::choice::ChoiceAig;
 use synth_logic::ff::FfRules;
 use synth_logic::lower::LowerOptions;
-use synth_logic::lutmap::{self, MapOptions, Tiebreak};
+use synth_logic::lutmap::{self, MapOptions};
 use synth_logic::net::{Bit, LogicNet};
 use synth_netlist::{Bit as PBit, CellId, Const, Dir, NetId, Netlist, Param};
 use synth_rtl::{
@@ -181,127 +180,15 @@ pub fn synthesize_observed(
         v.truncate(25);
         log.push(format!("exclusive input cones: {v:?}"));
     }
-    let t = Instant::now();
-    let before = net.aig.num_ands();
-    let mut merged = 0;
-    let mut chain_bits = 0;
-    let mut lut_chains = 0;
-    let mut const_ffs = 0;
-    // Merging equivalent logic can make carry-chain operands constant;
-    // simplifying the chains feeds their sums back into the graph.
-    // The graph before the last fraiging: alternative structures for
-    // choices, if nothing outside the graph changed after it.
-    let mut unfraiged = None;
-    for _ in 0..4 {
-        unfraiged = Some(net.aig.clone());
-        let (aig, st) = synth_logic::fraig::fraig(&net.aig, &Default::default());
-        net.aig = aig;
-        merged += st.proved;
-        let removed = synth_logic::carry::simplify_carries(&mut net);
-        chain_bits += removed;
-        let lowered = synth_logic::carry::lower_lut_sized_carries(&mut net, opts.map.k);
-        lut_chains += lowered;
-        let ffs = synth_logic::seq::remove_constant_ffs(&mut net)
-            + synth_logic::seq::merge_duplicate_ffs(&mut net);
-        const_ffs += ffs;
-        net.cleanup();
-        if removed + ffs + lowered == 0 {
-            break;
-        }
-        unfraiged = None;
-    }
-    if lut_chains > 0 {
-        log.push(format!("{lut_chains} carry chains mapped to LUTs (boundary inputs fit a LUT)"));
-    }
-    // Snapshots for structural choices: the fraiged graph, its balanced
-    // form, rounds of rewriting scripts (the last is the mapped graph) and
-    // rounds of refactoring.
-    let fraiged = net.aig.clone();
-    let balanced = synth_logic::opt::balance(&fraiged).cleanup();
-    let compressed = synth_logic::opt::compress(&fraiged);
-    let compressed2 = synth_logic::opt::compress2(&compressed);
-    let main = synth_logic::opt::compress2(&compressed2);
-    let mut refactored = fraiged.clone();
-    for _ in 0..3 {
-        let o = synth_logic::refactor::RefactorOptions::default();
-        refactored =
-            synth_logic::opt::balance(&synth_logic::refactor::refactor(&refactored, &o)).cleanup();
-    }
-    net.aig = main;
-    net.cleanup();
-    observe(SynthStage::Logic("optimised", &net));
-    log.push(format!(
-        "optimised in {:.2}s: {} -> {} AND nodes ({} merged), {} carry bits and {} flip-flops removed",
-        t.elapsed().as_secs_f64(),
-        before,
-        net.aig.num_ands(),
-        merged,
-        chain_bits,
-        const_ffs
-    ));
-    if let Ok(path) = std::env::var("SYNTH_DUMP_AIG") {
-        // Debugging aid: the graph about to be mapped, for other tools.
-        let _ = std::fs::write(path, net.aig.to_aiger());
-    }
-    let t = Instant::now();
-    let mut snapshots = vec![&net.aig, &balanced, &fraiged];
-    snapshots.extend(unfraiged.as_ref());
-    snapshots.extend([&compressed, &compressed2, &refactored]);
-    let choices = synth_logic::choice::build(&snapshots, &Default::default());
-    log.push(format!(
-        "{} structural choices in {:.2}s",
-        choices.num_choices(),
-        t.elapsed().as_secs_f64()
-    ));
-    // Candidate mappings are compared on their netlists: shallower, then
-    // fewer LUTs. Choices usually help, but not always.
-    let t = Instant::now();
-    let main = std::mem::take(&mut net.aig);
-    let mut best = map_best(&net, choices, &opts.map)?;
-    let plain = map_best(&net, ChoiceAig::plain(main.clone()), &opts.map)?;
-    if (plain.mapping.depth, plain.luts) < (best.mapping.depth, best.luts) {
-        best = plain;
-    }
-    log.push(format!(
-        "first mapping: {} LUTs, delay {:.2} LUT levels",
-        best.mapping.luts.len(),
-        best.mapping.depth as f64 / LEVEL as f64
-    ));
-    // Remapping: the mapped LUTs as a graph, restructured, with the previous
-    // structure as choices; kept while the netlist shrinks without getting
-    // deeper, or gets shallower without growing.
-    let mut prev = main;
-    for round in 1..=opts.remap_rounds {
-        let lg = lutmap::lut_graph(&best.graph, &best.mapping);
-        let restructured = synth_logic::opt::compress2(&lg);
-        let choices = synth_logic::choice::build(&[&restructured, &lg, &prev], &Default::default());
-        let c = map_best(&net, choices, &opts.map)?;
-        let (d, bd) = (c.mapping.depth, best.mapping.depth);
-        if !(c.luts < best.luts && d <= bd || c.luts <= best.luts && d < bd) {
-            break;
-        }
-        log.push(format!(
-            "remapping round {round}: {} LUTs, delay {:.2} LUT levels",
-            c.mapping.luts.len(),
-            c.mapping.depth as f64 / LEVEL as f64
-        ));
-        // Rounds saving less than 0.1% are not worth their time.
-        let last = (best.luts - c.luts) * 1024 < best.luts;
-        (best, prev) = (c, restructured);
-        if last {
-            break;
-        }
-    }
-    best = polish(&net, best, &opts.map)?;
-    log.push(format!(
-        "mapped in {:.2}s: {} LUTs, delay {:.2} LUT levels",
-        t.elapsed().as_secs_f64(),
-        best.mapping.luts.len(),
-        best.mapping.depth as f64 / LEVEL as f64
-    ));
-    let mapping = best.mapping;
-    // The mapping refers to the nodes of the graph with choices.
-    net.aig = best.graph;
+    let mapping = synth_logic::mapping::optimize_observed(
+        &mut net,
+        &opts.map,
+        opts.remap_rounds,
+        chain_timing,
+        netlist_luts,
+        &mut log,
+        |net| observe(SynthStage::Logic("optimised", net)),
+    )?;
     if std::env::var("SYNTH_DEBUG").is_ok() {
         // The deepest sinks after mapping.
         let mut level: FxHashMap<u32, u32> = FxHashMap::default();
@@ -327,16 +214,10 @@ pub fn synthesize_observed(
         deep.truncate(8);
         log.push(format!("deepest sinks: {deep:?}"));
     }
-    let nl = emit(&net, &mapping)?;
+    let mut nl = emit(&net, &mapping)?;
+    crate::pll::lower(&mut nl, &mut log)?;
     observe(SynthStage::Mapped(&nl));
     Ok((nl, log))
-}
-
-/// A mapping, the graph it maps and the LUTs of its netlist.
-struct Candidate {
-    graph: synth_logic::Aig,
-    mapping: lutmap::Mapping,
-    luts: usize,
 }
 
 /// Delays of the paths through carry chains, in units of a hundredth of a
@@ -381,37 +262,6 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
         }
     }
     t
-}
-
-/// The best mapping of `c` for `net` with either delay tie-break.
-fn map_best(net: &LogicNet, c: ChoiceAig, opts: &MapOptions) -> Result<Candidate, String> {
-    let timing = chain_timing(net);
-    let mut best: Option<(lutmap::Mapping, usize)> = None;
-    for delay_tiebreak in [Tiebreak::Size, Tiebreak::AreaFlow] {
-        let m =
-            lutmap::map_choices_timed(&c, &MapOptions { delay_tiebreak, ..opts.clone() }, &timing);
-        let luts = netlist_luts(net, &c.aig, &m)?;
-        if best.as_ref().is_none_or(|(b, l)| (m.depth, luts) < (b.depth, *l)) {
-            best = Some((m, luts));
-        }
-    }
-    let (mapping, luts) = best.expect("two mappings tried");
-    Ok(Candidate { graph: c.aig, mapping, luts })
-}
-
-/// `c` after don't-care optimisation, if that shrinks its netlist.
-fn polish(net: &LogicNet, c: Candidate, opts: &MapOptions) -> Result<Candidate, String> {
-    let (mut graph, mut mapping) = (c.graph.clone(), c.mapping.clone());
-    let o =
-        synth_logic::mfs::MfsOptions { k: opts.k, lut_delay: opts.lut_delay, ..Default::default() };
-    let timing = lutmap::resolved_timing(&graph, &mapping, &chain_timing(net), opts.lut_delay);
-    synth_logic::mfs::optimize(&mut graph, &mut mapping, &o, &timing);
-    let luts = netlist_luts(net, &graph, &mapping)?;
-    if luts < c.luts && mapping.depth <= c.mapping.depth {
-        Ok(Candidate { graph, mapping, luts })
-    } else {
-        Ok(c)
-    }
 }
 
 /// Number of LUTs in the netlist of a mapping of `aig` (the graph of
@@ -738,7 +588,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     }
     for l in &mapping.luts {
         let o = e.nl.add_net(&format!("$n{}", l.node));
-        e.lut_of.insert(l.node, (o, l.leaves.clone(), l.truth));
+        e.lut_of.insert(l.node, (o, l.leaves.clone(), l.truth6()));
         let (pos, neg) = refs.get(&l.node).copied().unwrap_or_default();
         e.phase.insert(l.node, neg > pos);
     }
@@ -773,7 +623,7 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
     for l in &mapping.luts {
         let out = e.lut_of[&l.node].0;
         let ins: Vec<NetId> = l.leaves.iter().map(|&x| e.node_net(x)).collect::<Result<_, _>>()?;
-        let truth = e.net_truth(l.node, &l.leaves, l.truth, false);
+        let truth = e.net_truth(l.node, &l.leaves, l.truth6(), false);
         e.lut(&format!("$lut{}", l.node), &ins, truth, out)?;
     }
     // Ports.

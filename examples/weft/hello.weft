@@ -8,10 +8,11 @@ const MESSAGE: [uint<8>; 14] = [
     0x0D, 0x0A,                               // "\r\n"
 ];
 
-/// PERIOD and CLKS_PER_BIT are in clock cycles (25 MHz on the Go Board).
-module top<PERIOD: int = 25_000_000, CLKS_PER_BIT: int = 217>(in clk: clock, out tx: bool, out led: uint<4>) {
+/// CLK_HZ: the clock frequency (25 MHz on the Go Board). PERIOD (a second)
+/// and CLKS_PER_BIT (115200 baud) are in clock cycles.
+module top<CLK_HZ: int = 25_000_000, PERIOD: int = CLK_HZ, CLKS_PER_BIT: int = CLK_HZ / 115200>(in clk: clock, out tx: bool, out led: uint<4>) {
     inst second = divider<PERIOD>();
-    inst uart = uart_tx<CLKS_PER_BIT>(); // 25 MHz / 115200
+    inst uart = uart_tx<CLKS_PER_BIT>();
 
     reg sending: bool = false;
     reg pos: index<14> = 0;

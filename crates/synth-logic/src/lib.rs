@@ -15,6 +15,7 @@ pub mod ff;
 pub mod fraig;
 pub mod lower;
 pub mod lutmap;
+pub mod mapping;
 pub mod mfs;
 pub mod net;
 pub mod opt;

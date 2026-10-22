@@ -82,6 +82,52 @@ pub enum BelKind {
     Ram,
     /// Global buffer driven from the fabric.
     Gb,
+    /// Phase-locked loop (`SB_PLL40_CORE`).
+    Pll,
+}
+
+/// A PLL site: its bel, the IO block its output A goes through (that IO is
+/// then unusable), the global network the output drives, the tile its
+/// `LOCK` output can reach (only that tile's logic cells), and its
+/// configuration fields.
+#[derive(Clone, Debug)]
+pub struct PllSite {
+    pub bel: BelId,
+    pub out_io: (u8, u8, u8),
+    pub global: u8,
+    pub lock_tile: (u8, u8),
+    /// The `PLL.PLLCONFIG_<n>` bit of each field bit (`DIVR_0`, ...), by
+    /// tile.
+    pub config: Vec<(String, u8, u8, String)>,
+}
+
+/// Netlist pin names of the PLL's fabric ports, by the IceStorm names of
+/// their wires.
+fn pll_pin(key: &str) -> Option<&'static str> {
+    const PINS: [&str; 17] = [
+        "REFERENCECLK",
+        "RESETB",
+        "BYPASS",
+        "EXTFEEDBACK",
+        "LATCHINPUTVALUE",
+        "SCLK",
+        "SDI",
+        "SDO",
+        "LOCK",
+        "DYNAMICDELAY[0]",
+        "DYNAMICDELAY[1]",
+        "DYNAMICDELAY[2]",
+        "DYNAMICDELAY[3]",
+        "DYNAMICDELAY[4]",
+        "DYNAMICDELAY[5]",
+        "DYNAMICDELAY[6]",
+        "DYNAMICDELAY[7]",
+    ];
+    let name = match key.strip_prefix("DYNAMICDELAY_") {
+        Some(i) => format!("DYNAMICDELAY[{i}]"),
+        None => key.to_string(),
+    };
+    PINS.iter().copied().find(|&p| p == name)
 }
 
 synth_core::define_id!(
@@ -222,6 +268,8 @@ pub struct Arch {
     pub package: &'static Package,
     pub bels: Vec<Bel>,
     bel_at: FxHashMap<(u8, u8, u8, BelKind), BelId>,
+    /// The PLLs usable in this package.
+    pub plls: Vec<PllSite>,
     pub graph: RoutingGraph,
     /// Per template: delay of each template pip (ps), and the span kind it
     /// drives.
@@ -287,6 +335,7 @@ impl Arch {
             package: pkg,
             bels: Vec::new(),
             bel_at: FxHashMap::default(),
+            plls: Vec::new(),
             graph: RoutingGraph {
                 offsets: vec![],
                 edge_dst: vec![],
@@ -479,6 +528,47 @@ impl Arch {
                 },
             ];
             self.add_bel(BelKind::Gb, x, y, 2 + g as u8, pins);
+        }
+        for ec in db.extra_cells.iter().filter(|e| e.kind == "PLL") {
+            if ec.locked.contains(&self.package.name) {
+                continue;
+            }
+            let mut pins = Vec::new();
+            let (mut out_io, mut lock_tile, mut config) = (None, None, Vec::new());
+            for e in &ec.entries {
+                if e.name.starts_with("PLLCONFIG_") {
+                    config.push((e.key.clone(), e.x, e.y, e.name.clone()));
+                } else if e.key == "PLLOUT_A" {
+                    let z: u8 = e.name.parse().map_err(|_| "bad PLL output IO")?;
+                    out_io = Some((e.x, e.y, z));
+                    pins.push(BelPin {
+                        name: "PLLOUTCORE",
+                        node: self.node(e.x, e.y, &format!("io_{z}/D_IN_0"))?,
+                    });
+                } else if let Some(name) = pll_pin(&e.key) {
+                    if name == "LOCK" {
+                        lock_tile = Some((e.x, e.y));
+                    }
+                    pins.push(BelPin { name, node: self.node(e.x, e.y, &e.name)? });
+                }
+            }
+            let out_io = out_io.ok_or("PLL without output A")?;
+            let Some(global) = db.globals.iter().position(|g| g.pad == out_io) else {
+                continue;
+            };
+            pins.push(BelPin {
+                name: "PLLOUTGLOBAL",
+                node: self.node(out_io.0, out_io.1, &format!("glb_netwk_{global}"))?,
+            });
+            let bel = BelId::new(self.bels.len());
+            self.add_bel(BelKind::Pll, ec.x, ec.y, 0, pins);
+            self.plls.push(PllSite {
+                bel,
+                out_io,
+                global: global as u8,
+                lock_tile: lock_tile.ok_or("PLL without LOCK")?,
+                config,
+            });
         }
         Ok(())
     }

@@ -1,0 +1,335 @@
+{
+  "part": "xc7a100tcsg324-1",
+  "versions": {
+    "yosys": "Yosys 0.52 (git sha1 fee39a328, ccache clang 18.1.3 -O3 -flto -flto)",
+    "synth": "synth 0.1.0",
+    "revision": "46b82d1"
+  },
+  "timing_certified": false,
+  "designs": [
+    {
+      "design": "euler14",
+      "synth": {
+        "seconds": 59.433,
+        "slices": 964,
+        "lut_sites": 3778,
+        "ffs": 2214,
+        "bram18": 4,
+        "dsp48": 0,
+        "int_pips": 49407,
+        "fabric_mhz": 105.7,
+        "fmax_mhz": 105.7
+      },
+      "nextpnr": {
+        "seconds": 50.851,
+        "slices": 2266,
+        "lut_sites": 5660,
+        "ffs": 2201,
+        "bram18": 4,
+        "dsp48": 0,
+        "int_pips": 68048,
+        "fmax_mhz": 89.9,
+        "fabric_mhz": 89.9
+      },
+      "matched": {
+        "seconds": 56.808,
+        "slices": 1178,
+        "lut_sites": 4574,
+        "ffs": 2201,
+        "bram18": 4,
+        "dsp48": 0,
+        "int_pips": 55324,
+        "fabric_mhz": 114.0,
+        "fmax_mhz": 114.0
+      }
+    },
+    {
+      "design": "euler25",
+      "synth": {
+        "seconds": 22.169,
+        "slices": 147,
+        "lut_sites": 546,
+        "ffs": 187,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 8770,
+        "fabric_mhz": 117.5,
+        "fmax_mhz": 117.5
+      },
+      "nextpnr": {
+        "seconds": 12.751,
+        "slices": 380,
+        "lut_sites": 843,
+        "ffs": 187,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 7229,
+        "fmax_mhz": 90.38,
+        "fabric_mhz": 90.38
+      },
+      "matched": {
+        "seconds": 16.929,
+        "slices": 215,
+        "lut_sites": 781,
+        "ffs": 187,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 8365,
+        "fabric_mhz": 90.0,
+        "fmax_mhz": 90.0
+      }
+    },
+    {
+      "design": "euler31",
+      "synth": {
+        "seconds": 8.783,
+        "slices": 104,
+        "lut_sites": 380,
+        "ffs": 402,
+        "bram18": 6,
+        "dsp48": 0,
+        "int_pips": 4552,
+        "fabric_mhz": 254.8,
+        "fmax_mhz": 254.8
+      },
+      "nextpnr": {
+        "seconds": 10.542,
+        "slices": 254,
+        "lut_sites": 337,
+        "ffs": 404,
+        "bram18": 6,
+        "dsp48": 0,
+        "int_pips": 7266,
+        "fmax_mhz": 232.72,
+        "fabric_mhz": 232.72
+      },
+      "matched": {
+        "seconds": 16.849,
+        "slices": 179,
+        "lut_sites": 369,
+        "ffs": 404,
+        "bram18": 6,
+        "dsp48": 0,
+        "int_pips": 5440,
+        "fabric_mhz": 253.4,
+        "fmax_mhz": 253.4
+      }
+    },
+    {
+      "design": "euler43",
+      "synth": {
+        "seconds": 124.773,
+        "slices": 922,
+        "lut_sites": 3675,
+        "ffs": 1497,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 50641,
+        "fabric_mhz": 82.9,
+        "fmax_mhz": 82.9
+      },
+      "nextpnr": {
+        "seconds": 84.336,
+        "slices": 1398,
+        "lut_sites": 3912,
+        "ffs": 1517,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 49108,
+        "fmax_mhz": 76.2,
+        "fabric_mhz": 76.2
+      },
+      "matched": {
+        "seconds": 90.393,
+        "slices": 901,
+        "lut_sites": 3367,
+        "ffs": 1517,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 48004,
+        "fabric_mhz": 76.3,
+        "fmax_mhz": 76.3
+      }
+    },
+    {
+      "design": "euler48",
+      "synth": {
+        "seconds": 116.512,
+        "slices": 1095,
+        "lut_sites": 4322,
+        "ffs": 2412,
+        "bram18": 0,
+        "dsp48": 13,
+        "int_pips": 56647,
+        "fabric_mhz": 129.8,
+        "fmax_mhz": 125.6
+      },
+      "nextpnr": {
+        "seconds": 37.787,
+        "slices": 2364,
+        "lut_sites": 4678,
+        "ffs": 2438,
+        "bram18": 0,
+        "dsp48": 13,
+        "int_pips": 58139,
+        "fmax_mhz": 133.9,
+        "fabric_mhz": 133.9
+      },
+      "matched": {
+        "seconds": 48.065,
+        "slices": 1061,
+        "lut_sites": 4203,
+        "ffs": 2438,
+        "bram18": 0,
+        "dsp48": 13,
+        "int_pips": 51862,
+        "fabric_mhz": 117.2,
+        "fmax_mhz": 111.2
+      }
+    },
+    {
+      "design": "euler57",
+      "synth": {
+        "seconds": 27.704,
+        "slices": 406,
+        "lut_sites": 1551,
+        "ffs": 1113,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 22094,
+        "fabric_mhz": 106.0,
+        "fmax_mhz": 106.0
+      },
+      "nextpnr": {
+        "seconds": 19.078,
+        "slices": 784,
+        "lut_sites": 1707,
+        "ffs": 1114,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 21300,
+        "fmax_mhz": 107.98,
+        "fabric_mhz": 107.98
+      },
+      "matched": {
+        "seconds": 36.776,
+        "slices": 483,
+        "lut_sites": 1772,
+        "ffs": 1114,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 18978,
+        "fabric_mhz": 100.0,
+        "fmax_mhz": 100.0
+      }
+    },
+    {
+      "design": "euler58",
+      "synth": {
+        "seconds": 77.073,
+        "slices": 1010,
+        "lut_sites": 4014,
+        "ffs": 2028,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 55820,
+        "fabric_mhz": 115.3,
+        "fmax_mhz": 115.3
+      },
+      "nextpnr": {
+        "seconds": 56.032,
+        "slices": 2152,
+        "lut_sites": 4946,
+        "ffs": 2030,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 71300,
+        "fmax_mhz": 90.57,
+        "fabric_mhz": 90.57
+      },
+      "matched": {
+        "seconds": 96.93,
+        "slices": 1200,
+        "lut_sites": 4614,
+        "ffs": 2030,
+        "bram18": 0,
+        "dsp48": 0,
+        "int_pips": 67874,
+        "fabric_mhz": 84.4,
+        "fmax_mhz": 84.4
+      }
+    },
+    {
+      "design": "euler92",
+      "synth": {
+        "seconds": 20.964,
+        "slices": 481,
+        "lut_sites": 1908,
+        "ffs": 2616,
+        "bram18": 7,
+        "dsp48": 0,
+        "int_pips": 19624,
+        "fabric_mhz": 135.0,
+        "fmax_mhz": 135.0
+      },
+      "nextpnr": {
+        "seconds": 28.092,
+        "slices": 926,
+        "lut_sites": 1135,
+        "ffs": 2660,
+        "bram18": 7,
+        "dsp48": 1,
+        "int_pips": 28446,
+        "fmax_mhz": 116.62,
+        "fabric_mhz": 116.62
+      },
+      "matched": {
+        "seconds": 25.016,
+        "slices": 516,
+        "lut_sites": 2040,
+        "ffs": 2660,
+        "bram18": 7,
+        "dsp48": 1,
+        "int_pips": 21241,
+        "fabric_mhz": 110.9,
+        "fmax_mhz": 110.9
+      }
+    },
+    {
+      "design": "euler97",
+      "synth": {
+        "seconds": 16.724,
+        "slices": 195,
+        "lut_sites": 769,
+        "ffs": 445,
+        "bram18": 0,
+        "dsp48": 3,
+        "int_pips": 9213,
+        "fabric_mhz": 162.6,
+        "fmax_mhz": 78.4
+      },
+      "nextpnr": {
+        "seconds": 11.805,
+        "slices": 446,
+        "lut_sites": 798,
+        "ffs": 445,
+        "bram18": 0,
+        "dsp48": 3,
+        "int_pips": 10539,
+        "fmax_mhz": 141.76,
+        "fabric_mhz": 141.76
+      },
+      "matched": {
+        "seconds": 19.128,
+        "slices": 185,
+        "lut_sites": 731,
+        "ffs": 445,
+        "bram18": 0,
+        "dsp48": 3,
+        "int_pips": 9004,
+        "fabric_mhz": 139.9,
+        "fmax_mhz": 71.6
+      }
+    }
+  ]
+}

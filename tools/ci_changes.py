@@ -13,6 +13,7 @@ GitHub Actions outputs:
   pnr         the bitstream simulations (Yosys or synth synthesis, synth
               place and route): the frontend crates too, plus RTLIL, routing
               and the iCE40 backend
+  artix7      the Artix-7 primitive and physical encoding suites
   playground  the WebAssembly build and the web app's checks
 
 Usage: git diff --name-only BASE...HEAD | tools/ci_changes.py
@@ -31,6 +32,9 @@ FRONTEND_FILES = ('crates/arch-ice40/src/synth.rs', 'crates/arch-ice40/src/cells
                   'tools/ci_rtlsim.sh', 'tools/rtlsim.py', 'tools/ci_euler.sh', 'tools/ci_sim.sh', 'tests/designs/')
 PNR_CRATES = FRONTEND_CRATES | {'synth-rtlil', 'synth-route', 'arch-ice40'}
 PNR_FILES = ('tools/ci_bitsim.sh', 'tools/ci_incremental.sh', 'tools/bitsim.py', 'tools/ci_sim.sh', 'tests/designs/')
+
+ARTIX7_CRATES = FRONTEND_CRATES | {'synth-rtlil', 'synth-route', 'arch-xc7'}
+ARTIX7_FILES = ('tools/ci_artix7', 'tools/fetch_xc7', 'tools/prepare_xc7', 'tools/xc7-test-requirements.txt')
 
 PLAYGROUND_FILES = ('editors/', 'tools/build_playground.sh')
 
@@ -74,7 +78,8 @@ def decide(paths, crates):
     frontend = everything or bool(changed & FRONTEND_CRATES) or any(p.startswith(FRONTEND_FILES) for p in paths)
     pnr = everything or bool(changed & PNR_CRATES) or any(p.startswith(PNR_FILES) for p in paths)
     playground = everything or 'synth-playground' in affected or any(p.startswith(PLAYGROUND_FILES) for p in paths)
-    return {'packages': packages, 'frontend': frontend, 'pnr': pnr, 'playground': playground}
+    artix7 = everything or bool(changed & ARTIX7_CRATES) or any(p.startswith(ARTIX7_FILES) for p in paths)
+    return {'artix7': artix7, 'packages': packages, 'frontend': frontend, 'pnr': pnr, 'playground': playground}
 
 
 def main():

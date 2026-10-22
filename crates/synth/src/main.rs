@@ -1,7 +1,16 @@
 //! The `synth` command-line tool.
 
+/// Prints `info: …` to stderr, above any progress line.
+macro_rules! info {
+    ($($t:tt)*) => {
+        synth_core::progress::info(&format!($($t)*))
+    };
+}
+
 mod args;
+mod progress;
 mod sim;
+mod xc7;
 
 use std::process::ExitCode;
 
@@ -15,16 +24,19 @@ USAGE:
 
 COMMANDS:
     check      Check Verilog or Weft sources and report errors
-    build      Synthesise, place and route a design into an iCE40 bitstream
-    synth      Synthesise a design to iCE40 primitives (--verilog <out.v>)
+    build      Synthesise, place and route a design into a bitstream
+    synth      Synthesise a design to iCE40 or Artix-7 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
     sim        Simulate a design (or write it as a C model with --emit-c)
-    pnr        Place and route a mapped netlist (RTLIL) for iCE40
+    pnr        Place and route a mapped netlist (RTLIL)
+    pack-fasm  Assemble Artix-7 FASM into a bitstream
+    unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
-    playground Serve the playground web app (--port <n>, default 8080)
+    playground Serve the playground web app (--port <n>, default 8080;
+               --xc7-db <prjxray-db/artix7> for the Artix-7 boards)
     help       Print this message
     version    Print version information
 
@@ -52,6 +64,24 @@ BUILD OPTIONS:
               or incompatible checkpoints start fresh. Synthesis still runs.
               Without a path, select .synth/checkpoints/<design-key>.chk.
               Put bare --incremental after input files or before another option.
+
+SYNTH OPTIONS:
+    synth synth <files.v|.weft...> [--family <ice40|artix7|xc7>] [--top <module>]
+              [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
+              [--verilog <out.v>] [--rename <module>] [--pack-stats]
+              --pack-stats reports native Artix-7 packing resource counts.
+
+ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
+    synth build <files.v...> --family artix7 --top <module>
+              --device <xc7a35tftg256-1|xc7a100tcsg324-1|...>
+              --db <prjxray-db/artix7> --xdc <file> [-o <out.bit>]
+              [--fasm <out.fasm>] [--seed <n>] [--effort <n>] --timing-allow-fail
+              pnr accepts the same physical options with a mapped RTLIL input;
+              pnr --pack-stats reports its native packing (alone without --db).
+              Native Rust packing, placement, routing and frame generation.
+              Timing closure is not certified; --timing-allow-fail is required.
+    synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
+    synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -101,6 +131,12 @@ PNR OPTIONS:
               [--incremental [<checkpoint>]]
 ";
 
+/// Whether the command line selects the Artix-7 flow.
+fn xc7_family(argv: &[String]) -> bool {
+    argv.windows(2).any(|w| w[0] == "--family" && matches!(w[1].as_str(), "artix7" | "xc7"))
+        || argv.iter().any(|a| matches!(a.as_str(), "--family=artix7" | "--family=xc7"))
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
@@ -115,9 +151,12 @@ fn main() -> ExitCode {
         Some("check") => cmd_check(&argv[1..]),
         Some("elab") => cmd_elab(&argv[1..]),
         Some("sim") => sim::cmd_sim(&argv[1..]),
-        Some("build") => cmd_build(&argv[1..]),
-        Some("synth") => cmd_synth(&argv[1..]),
-        Some("pnr") => cmd_pnr(&argv[1..]),
+        // The flows show their progress on a terminal.
+        Some("build") => progress::run(xc7_family(&argv), || cmd_build(&argv[1..])),
+        Some("synth") => progress::run(xc7_family(&argv), || cmd_synth(&argv[1..])),
+        Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
+        Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
+        Some("unpack-xc7") => xc7::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),
@@ -161,29 +200,39 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
     }
 }
 
-/// Elaborates and synthesises the design named by `a` for iCE40.
+/// Elaborates and synthesises the design for the selected architecture.
 fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
-    let t = std::time::Instant::now();
-    let m = load_rtl(a)?;
-    eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
-    let mut synth_opts = arch_ice40::synth::SynthOptions::default();
-    if let Some(value) = a.value("--carry-min-width") {
-        let width = value
-            .parse::<usize>()
-            .ok()
-            .filter(|&w| w > 0 && w.checked_add(2).is_some())
-            .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
-        synth_opts.lower.carry_min_width = Some(width);
+    let family = a.value("--family").unwrap_or_else(|| "ice40".into());
+    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7") {
+        return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
     }
-    let (nl, log) = arch_ice40::synth::synthesize(m, &synth_opts)?;
+    let t = std::time::Instant::now();
+    synth_core::progress::step("elaborate", "");
+    let m = load_rtl(a)?;
+    info!("elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    synth_core::progress::step("synthesize", "");
+    let (nl, log) = if family == "ice40" {
+        let mut synth_opts = arch_ice40::synth::SynthOptions::default();
+        if let Some(value) = a.value("--carry-min-width") {
+            let width = value
+                .parse::<usize>()
+                .ok()
+                .filter(|&w| w > 0 && w.checked_add(2).is_some())
+                .ok_or("--carry-min-width must be a positive integer with room for the comparator offset (+2)")?;
+            synth_opts.lower.carry_min_width = Some(width);
+        }
+        arch_ice40::synth::synthesize(m, &synth_opts)?
+    } else {
+        if a.value("--carry-min-width").is_some() {
+            return Err("--carry-min-width currently requires --family ice40".into());
+        }
+        arch_xc7::synth::synthesize(m)?
+    };
     for l in &log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     let stats = nl.stats();
-    eprintln!(
-        "info: {}",
-        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
-    );
+    info!("{}", stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
     Ok(nl)
 }
 
@@ -213,10 +262,16 @@ pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
 fn cmd_synth(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
-        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--carry-min-width"],
-        &[],
+        &["-I", "-D", "-P", "--top", "--verilog", "--rename", "--family", "--carry-min-width"],
+        &["--pack-stats"],
     )?;
+    if a.flag("--pack-stats") && !matches!(a.value("--family").as_deref(), Some("artix7" | "xc7")) {
+        return Err("--pack-stats currently requires --family artix7".into());
+    }
     let nl = synthesize(&mut a)?;
+    if a.flag("--pack-stats") {
+        xc7::pack_stats(&nl)?;
+    }
     if let Some(out) = a.value("--verilog") {
         let name = a.value("--rename").unwrap_or_else(|| {
             nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into())
@@ -250,9 +305,12 @@ fn cmd_fmt(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_playground(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let mut a = Args::parse(argv, &["--port", "--host", "--xc7-db"], &[])?;
     let port = a.value("--port").unwrap_or_else(|| "8080".into());
     let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    if let Some(db) = a.value("--xc7-db") {
+        synth_playground::XC7_DB.set(db.into()).ok();
+    }
     a.finish()?;
     synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
@@ -266,6 +324,10 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "-P",
             "--top",
             "--device",
+            "--family",
+            "--db",
+            "--xdc",
+            "--fasm",
             "--package",
             "--pcf",
             "-o",
@@ -281,6 +343,20 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
         &["--timing-allow-fail"],
         &["--incremental"],
     )?;
+    if let Some(f) = a.value("--family")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+    {
+        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+    }
+    if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
+        let nl = synthesize(&mut a)?;
+        return xc7::finish(nl, &mut a);
+    }
+    for option in ["--db", "--xdc", "--fasm"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family artix7"));
+        }
+    }
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
     let pcf = match a.value("--pcf") {
@@ -318,6 +394,10 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
         argv,
         &[
             "--device",
+            "--family",
+            "--db",
+            "--xdc",
+            "--fasm",
             "--package",
             "--pcf",
             "-o",
@@ -329,10 +409,31 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--route-timing-rounds",
             "--incremental",
         ],
-        &["--timing-allow-fail"],
+        &["--timing-allow-fail", "--pack-stats"],
         &["--incremental"],
     )?;
     let input = a.positional(0, "netlist")?;
+    if let Some(f) = a.value("--family")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+    {
+        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+    }
+    if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
+        let design = synth_rtlil::parse(&read(&input)?).map_err(|e| e.to_string())?;
+        let nl = synth_rtlil::to_netlist(&design, &xc7::Library)?;
+        if a.flag("--pack-stats") {
+            xc7::pack_stats(&nl)?;
+            if a.value("--db").is_none() {
+                return Ok(());
+            }
+        }
+        return xc7::finish(nl, &mut a);
+    }
+    for option in ["--db", "--xdc", "--fasm"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family artix7"));
+        }
+    }
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
     let pcf = match a.value("--pcf") {
@@ -381,7 +482,7 @@ fn implement(
         Ok(bytes) => match arch_ice40::checkpoint::Checkpoint::decode(&bytes) {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("info: ignoring checkpoint {path}: {e}; using fresh PnR");
+                info!("ignoring checkpoint {path}: {e}; using fresh PnR");
                 None
             }
         },
@@ -427,7 +528,7 @@ fn checkpoint_path(
     std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
     let path = format!("{dir}/{}-{}-{:016x}.chk", opts.part, opts.package, key.finish());
     a.set_value("--incremental", path.clone());
-    eprintln!("info: incremental checkpoint: {path}");
+    info!("incremental checkpoint: {path}");
     Ok(Some(path))
 }
 
@@ -454,7 +555,7 @@ fn write_checkpoint(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// and never replaces the previous checkpoint.
 fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), String> {
     for l in &res.log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     if let Some(out) = a.value("-o") {
         write(&out, &res.config.to_bin())?;
@@ -509,9 +610,9 @@ pub(crate) fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
         let (sm, src) = load_verilog(a)?;
         let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
-        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::StdBlackBoxes);
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         return m.ok_or_else(|| format!("{} error(s)", diags.error_count()));
     }
@@ -532,7 +633,7 @@ pub(crate) fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     } else {
         let (src, diags) = synth_verilog::parse_files(&mut sm, &verilog, &preproc_options(a));
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         if diags.has_errors() {
             return Err(format!("{} error(s)", diags.error_count()));
@@ -543,14 +644,14 @@ pub(crate) fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     let warnings =
         diags.items.iter().filter(|d| d.severity == synth_core::Severity::Warning).count();
     match m {
         Some(m) => {
             if warnings > 0 {
-                eprintln!("info: {warnings} warning(s)");
+                info!("{warnings} warning(s)");
             }
             Ok(m)
         }
@@ -593,7 +694,7 @@ fn load_verilog(
     }
     let (src, diags) = synth_verilog::parse_files(&mut sm, &files, &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     if diags.has_errors() {
         return Err(format!("{} error(s)", diags.error_count()));
@@ -611,31 +712,31 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         "two-state" => opt::two_state(m),
         "merge" => {
             let n = opt::merge_identical(m);
-            eprintln!("info: merge: {n} duplicate cells");
+            info!("merge: {n} duplicate cells");
         }
         "fsm" => {
             let n = synth_rtl::fsm::simplify_state_compares(m);
-            eprintln!("info: fsm: {n} state comparisons simplified");
+            info!("fsm: {n} state comparisons simplified");
         }
         "trees" => {
             let n = opt::chains_to_trees(m);
-            eprintln!("info: trees: {n} multiplexer chains as trees");
+            info!("trees: {n} multiplexer chains as trees");
         }
         "share" => {
             let n = opt::share_arith(m);
-            eprintln!("info: share: {n} multiplexed operations shared");
+            info!("share: {n} multiplexed operations shared");
         }
         "wreduce" => {
             let n = opt::reduce_widths(m);
-            eprintln!("info: wreduce: {n} result bits constant");
+            info!("wreduce: {n} result bits constant");
         }
         "shiftmul" => {
             let n = opt::shift_by_multiple(m);
-            eprintln!("info: shiftmul: {n} shifts by multiples as multiplexers");
+            info!("shiftmul: {n} shifts by multiples as multiplexers");
         }
         "dff" => {
             let n = synth_rtl::dff::extract_controls(m);
-            eprintln!("info: dff: {n} flip-flop bits gained controls");
+            info!("dff: {n} flip-flop bits gained controls");
         }
         "memff" => {
             if mem::remove_feedback_writes(m) > 0 {
@@ -643,7 +744,7 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             }
             mem::merge_write_ports(m);
             let n = mem::merge_read_ffs(m);
-            eprintln!("info: memff: {n} read ports made synchronous");
+            info!("memff: {n} read ports made synchronous");
         }
         "memtrans" => {
             for mi in mems() {
@@ -693,11 +794,11 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top"], &[])?;
     if input_files(&a).iter().any(|p| is_weft(p)) {
         let m = load_rtl(&mut a)?;
-        eprintln!("info: `{}` checked: no errors", m.name);
+        info!("`{}` checked: no errors", m.name);
         return Ok(());
     }
     let (_, src) = load_verilog(&mut a)?;
-    eprintln!("info: parsed {} module(s)", src.modules.len());
+    info!("parsed {} module(s)", src.modules.len());
     Ok(())
 }
 
@@ -710,8 +811,8 @@ fn cmd_elab(argv: &[String]) -> Result<(), String> {
         run_rtl_pass(&mut m, p)?;
     }
     let stats = m.stats();
-    eprintln!(
-        "info: {} wires, cells: {}",
+    info!(
+        "{} wires, cells: {}",
         m.wires.len(),
         stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     );

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Native Artix-7 flow vs independent X-Ray frame/packet oracles.
+
+Python, FASM and X-Ray are TEST dependencies only. The synth executable never
+invokes them. This checks configuration encoding, not hardware functionality
+or timing closure. See docs/ARTIX7.md for the remaining acceptance criteria.
+"""
+import argparse
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import random
+import re
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+PARTS = ["xc7a35tftg256-1", "xc7a100tcsg324-1"]
+DB_REV = "0a0addedd73e7e4139d52a6d8db4258763e0f1f3"
+XRAY_REV = "c9f02d8576042325425824647ab5555b1bc77833"
+
+
+def run(args, log, expected=0):
+    with log.open("w") as f:
+        p = subprocess.run([str(a) for a in args], cwd=ROOT, stdout=f,
+                           stderr=subprocess.STDOUT, timeout=300)
+    if p.returncode != expected:
+        raise RuntimeError(f"{args[0]} exited {p.returncode}, expected {expected}; see {log}")
+
+
+def frames(path):
+    result = {}
+    for line in path.read_text().splitlines():
+        a, data = line.split()
+        words = [int(w, 16) for w in data.split(",")]
+        assert len(words) == 101
+        words[50] &= ~0x1fff  # ECC is checked separately in packet comparison.
+        result[int(a, 16)] = words
+    return result
+
+
+def oracle(a, part, fasm, bit, prefix):
+    from prjxray.db import Database
+    from prjxray.fasm_assembler import FasmAssembler
+    asm = FasmAssembler(Database(str(a.db), part))
+    asm.parse_fasm_filename(str(fasm))
+    ref = asm.get_frames()
+    native = prefix.with_suffix(".native.frm")
+    run([a.synth, "unpack-xc7", bit, "--db", a.db, "--device", part, "-o", native],
+        prefix.with_suffix(".decode.log"))
+    actual = frames(native)
+    assert set(ref) <= set(actual), "reference contains unexpected frames"
+    for addr, data in actual.items():
+        assert data == ref.get(addr, [0] * 101), f"frame mismatch at {addr:08x}"
+    # Independently encode all native frame addresses, including blank frames.
+    frm = prefix.with_suffix(".reference.frm")
+    frm.write_text("".join(f"0x{k:08x} " + ",".join(f"0x{w:08x}" for w in v) + "\n"
+                           for k, v in actual.items()))
+    refbit = prefix.with_suffix(".reference.bit")
+    run([a.xray_tools / "xc7frames2bit", "--part_file", a.db / part / "part.yaml",
+         "--part_name", part, "--frm_file", frm, "--output_file", refbit],
+        prefix.with_suffix(".encode.log"))
+    # Compare C++ decoder output for native CRC-enabled and reference streams,
+    # including frame ECC. This is independent of synth's own packet decoder.
+    bits = []
+    for tag, source in [("native", bit), ("reference", refbit)]:
+        output = prefix.with_suffix(f".{tag}.bits")
+        run([a.xray_tools / "bitread", "--part_file", a.db / part / "part.yaml",
+             "-C", "-y", "-o", output, source], prefix.with_suffix(f".{tag}.bitread.log"))
+        bits.append(output.read_bytes())
+    assert bits[0] == bits[1], "independent packet/ECC readback differs"
+    return len(actual)
+
+
+def constraints(a, part, ports, clocks=(), single_io=False):
+    with (a.db / part / "package_pins.csv").open() as f:
+        pins = list(csv.DictReader(f))
+    # The package CSV also lists dedicated XADC VP/VN pads. They are not
+    # LVCMOS user I/O; wider test interfaces can reach them in CSV order.
+    pins = [p for p in pins if p["site"].startswith("IOB_")]
+    if single_io:
+        pins = [p for p in pins if "_SING_" in p["tile"]]
+    chosen = {}
+    for clock in clocks:
+        # A single-ended clock enters a clock-capable pair on its P side.
+        pin = next(p for p in pins if re.search(r"_L\d+P_.*MRCC", p["pin_function"])
+                   and p["pin"] not in chosen.values())
+        chosen[clock] = pin["pin"]
+    for port in ports:
+        if port not in chosen:
+            chosen[port] = next(p["pin"] for p in pins if p["pin"] not in chosen.values())
+    return "".join(f"set_property -dict {{ PACKAGE_PIN {pin} IOSTANDARD LVCMOS33 }} [get_ports {{{p}}}]\n"
+                   for p, pin in chosen.items()) + "".join(
+                       f"create_clock -period 10 [get_ports {{{p}}}]\n" for p in clocks)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--db", type=Path, required=True, help="prjxray-db/artix7")
+    p.add_argument("--xray", type=Path, required=True, help="Project X-Ray checkout")
+    p.add_argument("--xray-tools", type=Path, required=True, help="C++ build/tools directory")
+    p.add_argument("--synth", type=Path, default=Path(os.environ.get("SYNTH", ROOT / "target/release/synth")))
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--part", choices=PARTS, action="append")
+    p.add_argument("--design", action="append", help="select a routed case by name; repeat to select several")
+    p.add_argument("--euler", action="store_true", help="also implement the Euler 31 and 97 solvers")
+    p.add_argument("--full-luts", action="store_true", help="randomize every LUT in the fabric")
+    p.add_argument("--yosys", action="store_true", help="also place and route Yosys-mapped netlists")
+    a = p.parse_args()
+    for key in ["db", "xray", "xray_tools", "synth", "out"]:
+        setattr(a, key, getattr(a, key).resolve())
+    a.out.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(a.xray))
+    versions = {}
+    for name, path, want in [("database", a.db.parent, DB_REV), ("xray", a.xray, XRAY_REV)]:
+        rev = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+        if rev != want:
+            raise RuntimeError(f"{name} revision {rev}, expected {want}")
+        dirty = subprocess.check_output(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"], text=True)
+        if dirty.strip():
+            raise RuntimeError(f"{name} checkout has tracked modifications")
+        versions[name] = rev
+    for name in ["xc7frames2bit", "bitread"]:
+        versions[name + "_sha256"] = hashlib.sha256((a.xray_tools / name).read_bytes()).hexdigest()
+    versions["synth_sha256"] = hashlib.sha256(a.synth.read_bytes()).hexdigest()
+    report = {"versions": versions, "checks": [], "hardware_validated": False,
+              "timing_validated": False}
+    cases = [
+        ("invert", "module top(input a,output y); assign y=~a; endmodule", ["a", "y"], []),
+        ("single_io", "module top(input a,b,output y,z); assign y=~a; assign z=~b; endmodule", ["a","y","b","z"], []),
+        ("counter", "module top(input clk,output y); reg [16:0] q=17'h12345; always @(posedge clk) q<=q+1; assign y=q[16]; endmodule", ["clk", "y"], ["clk"]),
+        ("controls", "module top(input clk,rst,ce,d,output reg [3:0] q=4'h6); always @(posedge clk) if(rst) q[0]<=0; else if(ce) q[0]<=d; always @(negedge clk) if(rst) q[1]<=1; else if(ce) q[1]<=d; always @(posedge clk or posedge rst) if(rst) q[2]<=0; else q[2]<=d; always @(negedge clk or posedge rst) if(rst) q[3]<=1; else q[3]<=d; endmodule", ["clk","rst","ce","d"]+[f"q[{i}]" for i in range(4)], ["clk"]),
+        ("sharedcarry", "module top(input [7:0] a,b,input cin,output [7:0] x,y,d,output lt); assign x=a+b; assign y=(~a)+(~b)+cin; assign d=a-b; assign lt=a<b; endmodule", ["cin","lt"]+[f"{p}[{i}]" for p in ["a","b","x","y","d"] for i in range(8)], []),
+        ("dsp", "module top(input [11:0] a,b,c,d,output [23:0] y); assign y=a*b+c*d; endmodule", [f"{p}[{i}]" for p,n in [("a",12),("b",12),("c",12),("d",12),("y",24)] for i in range(n)], []),
+        ("ram", "module top(input clk,we,input [8:0] addr,input [7:0] din,output reg [7:0] q=8'h93); reg [7:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^8'hA5; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",8),("q",8)] for i in range(n)], ["clk"]),
+        ("ram_sdp", "module top(input clk,we,input [8:0] addr,input [36:0] din,output reg [36:0] q=37'h179abcde01); reg [36:0] mem[0:511]; integer i; initial for(i=0;i<512;i=i+1) mem[i]=i^37'h12a5b3c6d7; always @(negedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",9),("din",37),("q",37)] for i in range(n)], ["clk"]),
+        ("ram_sdp_banked", "module top(input clk,we,input [10:0] addr,input [35:0] din,output reg [35:0] q=36'h79abcde01); reg [35:0] mem[0:1099]; integer i; initial for(i=0;i<1100;i=i+1) mem[i]=i^36'h2a5b3c6d7; always @(posedge clk) begin if(we) mem[addr]<=din; q<=mem[addr]; end endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("addr",11),("din",36),("q",36)] for i in range(n)], ["clk"]),
+        ("lutram", "module top(input clk,we,input [4:0] wa,ra,input [5:0] wa6,ra6,input [3:0] d,output reg [3:0] q,output [3:0] q6); reg [3:0] m32[0:31]; reg [3:0] m64[0:63]; integer i; initial for(i=0;i<64;i=i+1) begin m64[i]=i^4'h9; if(i<32) m32[i]=i^4'h5; end always @(posedge clk) begin if(we) m32[wa]<=d; q<=m32[ra]; if(we) m64[wa6]<=~d; end assign q6=m64[ra6]; endmodule", ["clk","we"]+[f"{p}[{i}]" for p,n in [("wa",5),("ra",5),("wa6",6),("ra6",6),("d",4),("q",4),("q6",4)] for i in range(n)], ["clk"]),
+        ("srl", "module top(input clk,ce,d,e,output y,z,w); reg [4:0] a=5'b10110; reg [39:0] b=0; reg [2:0] c=3'b101; always @(posedge clk) begin a<={a[3:0],d}; if(ce) b<={b[38:0],e}; end always @(negedge clk) c<={c[1:0],d^e}; assign y=a[4]; assign z=b[39]; assign w=c[2]; endmodule", ["clk","ce","d","e","y","z","w"], ["clk"]),
+    ]
+    # A Yosys-mapped netlist (MUXF7/MUXF8 and SRL16E) through native PnR.
+    yosys_cases = [
+        ("yosys_wide", "module top(input clk,input [3:0] s,input [15:0] d,input [7:0] a,output reg y,output z,output r); reg [255:0] rom=256'h0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0; reg [4:0] sh=0; always @(posedge clk) begin y<=d[s]; sh<={sh[3:0],d[0]}; end assign z=rom[a]; assign r=sh[4]; endmodule", ["clk","y","z","r"]+[f"{p}[{i}]" for p,n in [("s",4),("d",16),("a",8)] for i in range(n)], ["clk"]),
+        # Registered DSP48E1 inputs and output, plus a constant post-add.
+        ("yosys_dsp", "module top(input clk,input [11:0] a,b,output reg [23:0] y); reg [11:0] ra=0,rb=0; always @(posedge clk) begin ra<=a; rb<=b; y<=ra*rb+24'd7; end endmodule", ["clk"]+[f"{p}[{i}]" for p,n in [("a",12),("b",12),("y",24)] for i in range(n)], ["clk"]),
+    ]
+    cases += [c + (True,) for c in yosys_cases] if a.yosys else []
+    if a.euler:
+        for n, width in [(31, 17), (97, 34)]:
+            source = (ROOT / f"tests/designs/euler/p0{n}.v").read_text().replace(f"module euler{n}", "module top")
+            cases.append((f"euler{n}",source,["clk","rst","start","done"]+[f"answer[{i}]" for i in range(width)],["clk"]))
+    if a.design:
+        unknown = set(a.design) - {c[0] for c in cases}
+        if unknown:
+            p.error(f"unknown or disabled designs: {sorted(unknown)}")
+        cases = [c for c in cases if c[0] in a.design]
+    for part in a.part or PARTS:
+        out = a.out / part
+        out.mkdir(exist_ok=True)
+        for name, source, ports, clocks, *mapped in cases:
+            start = time.monotonic()
+            prefix = out / name
+            v, xdc, fasm, bit = [prefix.with_suffix(s) for s in [".v", ".xdc", ".fasm", ".bit"]]
+            v.write_text(source + "\n")
+            xdc.write_text(constraints(a, part, ports, clocks, name == "single_io"))
+            if mapped:
+                il = prefix.with_suffix(".il")
+                run(["yosys", "-Q", "-p", f'read_verilog "{v}"; synth_xilinx -family xc7 -flatten '
+                     f'-top top -noiopad -noclkbuf; write_rtlil "{il}"'], prefix.with_suffix(".yosys.log"))
+                cmd = [a.synth,"pnr",il,"--family","artix7","--db",a.db,
+                       "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
+            else:
+                cmd = [a.synth,"build",v,"--family","artix7","--top","top","--db",a.db,
+                       "--device",part,"--xdc",xdc,"--fasm",fasm,"-o",bit]
+            run(cmd + ["--timing-allow-fail"], prefix.with_suffix(".log"))
+            features = fasm.read_text()
+            for required in {"lutram": ["LUT.RAM", "LUT.SMALL", "FFMUX.O5"], "srl": ["LUT.SRL", "CLKINV"],
+                             "yosys_wide": ["OUTMUX.F8", "LUT.SRL"]}.get(name, []):
+                assert required in features, f"{name}: no {required}"
+            if name == "yosys_dsp":
+                assert "DSP48.DSP_" in features and "AREG_0" not in features, f"{name}: no registered DSP"
+            if name.startswith("ram_sdp"):
+                assert "SDP_READ_WIDTH_36" in fasm.read_text()
+                assert "SDP_WRITE_WIDTH_36" in fasm.read_text()
+            count = oracle(a, part, fasm, bit, prefix)
+            if name == "invert":
+                invalid = prefix.with_suffix(".invalid.xdc")
+                invalid.write_text(xdc.read_text().replace("PACKAGE_PIN ", "PACKAGE_PIN INVALID_", 1))
+                bad = cmd.copy()
+                bad[bad.index("--xdc") + 1] = invalid
+                run(bad + ["--timing-allow-fail"], prefix.with_suffix(".invalid-pin.log"), expected=1)
+                assert "not a user IO" in prefix.with_suffix(".invalid-pin.log").read_text()
+                corrupt = prefix.with_suffix(".corrupt.bit")
+                data = bytearray(bit.read_bytes())
+                pos = data.index(bytes.fromhex("30018001"))
+                data[pos+7] ^= 1
+                corrupt.write_bytes(data)
+                run([a.synth,"unpack-xc7",corrupt,"--db",a.db,"--device",part,"-o",prefix.with_suffix(".corrupt.frm")],prefix.with_suffix(".corrupt.log"),expected=1)
+                assert "IDCODE" in prefix.with_suffix(".corrupt.log").read_text()
+            if name == "counter":
+                original = bit.read_bytes()
+                run(cmd + ["--timing-allow-fail"], prefix.with_suffix(".repeat.log"))
+                assert bit.read_bytes() == original, "same-seed build is not deterministic"
+                run(cmd, prefix.with_suffix(".timing-gate.log"), expected=1)
+                assert "timing acceptance failed" in prefix.with_suffix(".timing-gate.log").read_text()
+            report["checks"].append(dict(part=part,design=name,frames=count,
+                sha256=hashlib.sha256(bit.read_bytes()).hexdigest(),
+                source_sha256=hashlib.sha256(v.read_bytes()).hexdigest(),
+                constraints_sha256=hashlib.sha256(xdc.read_bytes()).hexdigest(),seconds=time.monotonic()-start))
+            print(f"PASS {part} {name}: {count} frames", flush=True)
+        if a.full_luts:
+            grid = json.loads((a.db / ("xc7a50t" if "35t" in part else "xc7a100t") / "tilegrid.json").read_text())
+            rand = random.Random(7)
+            prefix = out / "all-luts"
+            fasm, bit = prefix.with_suffix(".fasm"), prefix.with_suffix(".bit")
+            with fasm.open("w") as f:
+                for tile,t in sorted(grid.items()):
+                    if not t["type"].startswith("CLB"): continue
+                    for x in range(2):
+                        kind = "SLICEM" if "CLBLM" in t["type"] and x == 0 else "SLICEL"
+                        for lane in "ABCD":
+                            f.write(f"{tile}.{kind}_X{x}.{lane}LUT.INIT[63:0] = 64'h{rand.getrandbits(64):016x}\n")
+            run([a.synth,"pack-fasm",fasm,"--db",a.db,"--device",part,"-o",bit],prefix.with_suffix(".log"))
+            count = oracle(a,part,fasm,bit,prefix)
+            report["checks"].append(dict(part=part,design="all-luts",frames=count))
+            print(f"PASS {part} all LUTs", flush=True)
+    (a.out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

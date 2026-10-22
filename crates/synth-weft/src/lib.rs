@@ -106,9 +106,10 @@ fn run(
         return (None, diags, Vec::new(), false);
     }
     let refs: Vec<(FileId, &ast::File)> = parsed.iter().map(|(f, a)| (*f, a)).collect();
+    // The standard library's externs (`synth_pll`) are primitives too.
     let mut quiet = vec![std_id];
     quiet.extend(&prelude_ids);
-    let (m, d, index) = elab::elaborate(sm, &refs, &quiet, &prelude_ids, verilog, opts);
+    let (m, d, index) = elab::elaborate(sm, &refs, &quiet, &quiet, verilog, opts);
     diags.extend(d);
     (m, diags, index, true)
 }

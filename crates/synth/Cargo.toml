@@ -20,6 +20,7 @@ synth-weft.workspace = true
 synth-lsp.workspace = true
 synth-playground.workspace = true
 arch-ice40.workspace = true
+arch-xc7.workspace = true
 
 [lints]
 workspace = true
