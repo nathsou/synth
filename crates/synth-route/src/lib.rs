@@ -996,13 +996,15 @@ fn route_net(
     }
     let mut margin = margin;
 
-    // Route the farthest sinks first.
+    // Route the most critical sinks first, so that they take direct paths
+    // before the others branch off the tree, then the farthest.
     let mut order: Vec<usize> = (0..net.sinks.len()).collect();
     let sx = graph.node_x[net.source as usize];
     let sy = graph.node_y[net.source as usize];
     order.sort_by_key(|&k| {
         let s = net.sinks[k] as usize;
-        std::cmp::Reverse((graph.node_x[s] - sx).abs() + (graph.node_y[s] - sy).abs())
+        let crit = (criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 1000.0) as i32;
+        std::cmp::Reverse((crit, (graph.node_x[s] - sx).abs() + (graph.node_y[s] - sy).abs()))
     });
     let mut heap = BinaryHeap::new();
     for k in order {
