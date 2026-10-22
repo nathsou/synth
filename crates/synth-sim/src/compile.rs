@@ -29,8 +29,9 @@ pub struct Options {
     /// (`synth_rtl::opt::remove_dead`); such signals then read as unknown.
     pub prune: bool,
     /// Runs the RTL optimizations of synthesis first (narrower arithmetic,
-    /// merged duplicates, flip-flop enables and resets instead of feedback
-    /// multiplexers, merged memory write ports), and merges bit-level
+    /// merged duplicates, arrays only indexed by constants as registers,
+    /// flip-flop enables and resets instead of feedback multiplexers,
+    /// merged memory write ports), and merges bit-level
     /// multiplexers into words ([`crate::words`]). Not registered reads
     /// into synchronous ports: that changes initial values. Ports
     /// behave the same in two-state simulation; internal signals may be
@@ -56,6 +57,11 @@ fn optimize(m: &mut Module) -> Result<(), String> {
     }
     opt::merge_identical(m);
     opt::clean(m)?;
+    // Arrays only ever indexed by constants: registers, not memories (as
+    // synthesis does), before their enables are extracted.
+    if mem::constant_index_to_registers(m)? > 0 {
+        opt::clean(m)?;
+    }
     dff::extract_controls(m);
     if mem::remove_feedback_writes(m) > 0 {
         opt::clean(m)?;
