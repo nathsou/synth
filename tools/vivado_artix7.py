@@ -262,7 +262,7 @@ def timed_attempt(a, prefix, xdc, skip):
 def native(files, top, prefix, xdc, a):
     """synth from source to bitstream, the run with the median estimate over seeds."""
     runs = []
-    for seed in range(1, a.seeds + 1):
+    for seed in range(a.first_seed, a.first_seed + a.seeds):
         log = Path(f"{prefix}.seed{seed}.log")
         env = {"SYNTH_XC7_DELAYS": f"{prefix}.delays.txt"} if a.delays else {}
         os.environ.update(env)
@@ -296,7 +296,8 @@ def main():
     p.add_argument("--design", action="append", help="Euler number; repeat to select a subset")
     p.add_argument("--flow", action="append", choices=["vivado", "netlist", "synth"],
                    help="run only these flows; repeat to select several")
-    p.add_argument("--seeds", type=int, default=1, help="native runs with seeds 1..N; the median is reported")
+    p.add_argument("--seeds", type=int, default=1, help="native runs with N seeds; the median is reported")
+    p.add_argument("--first-seed", type=int, default=1, help="the first native seed")
     p.add_argument("--threads", type=int, default=8, help="Vivado general.maxThreads")
     p.add_argument("--fasm2bels", type=Path, help="Python with fasm2bels: time native results in Vivado")
     p.add_argument("--bitread", type=Path, help="Project X-Ray bitread (with --fasm2bels)")
