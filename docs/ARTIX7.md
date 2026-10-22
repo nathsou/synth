@@ -117,17 +117,32 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   left. The first-fit packing this replaced spread connected logic over the
   design and about doubled the wirelength of any placement of it, Vivado's
   included.
-- **Placement.** Deterministic simulated annealing of half-perimeter
-  wirelength over slice macros, block RAMs and DSPs together, with I/O
-  fixed by the XDC, on VPR's schedule: the initial temperature from the
-  cost changes of random moves, N^(4/3) moves per temperature within a
+- **Placement.** Analytical global placement (HeAP, as in nextpnr) over
+  slice macros, block RAMs and DSPs together, with I/O fixed by the XDC:
+  quadratic wirelength under the bound-to-bound net model, solved per axis
+  by conjugate gradients, is spread over the sites of each kind by
+  recursive cuts of the regions that overflow, and each spread placement
+  anchors the next solution with a weight growing every iteration. Every
+  five iterations the spread placement is legalized (each macro onto the
+  free site nearest its position) and timed, and connections pull in
+  proportion to their criticality to the fourth power. Simulated annealing
+  then refines the legalized placement on VPR's schedule from a local
+  window and a low temperature: N^(4/3) moves per temperature within a
   window adapting toward 44% acceptance, cooling by acceptance rate, and a
-  greedy finish. A carry chain moving onto single slices displaces them
-  into the sites it leaves, chains of one length may swap, and a move tries
-  several targets before giving up (most offsets land on a chain). Clock
-  nets use BUFGs and global routing and are left out of the wirelength
-  cost. Timing-driven placement predicts each connection's delay from its
-  distance, fitted to the calibrated delays of routed connections.
+  greedy finish, minimizing half-perimeter wirelength and each
+  connection's predicted delay (from its distance, fitted to the
+  calibrated delays of routed connections) weighted by its criticality.
+  A carry chain moving onto single slices displaces them into the sites it
+  leaves, chains of one length may swap, and a move tries several targets
+  before giving up (most offsets land on a chain). Clock nets use BUFGs
+  and global routing and are left out of the costs; slices go only where a
+  global clock reaches (under X-Ray's U-turn clock rows, two columns of
+  fifty slices per part have none). Spreading counts a row as two tile
+  columns, as the routed delays do, so that a design pressed into a corner
+  by its pins spreads wide rather than tall. Against annealing from a
+  random placement, the analytical start raised synth's estimate by 3%
+  (geometric mean of the medians of five seeds of Euler 14, 25, 31, 57, 58
+  and 92), and 1.6% by Vivado's timer of the median seed of each.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in

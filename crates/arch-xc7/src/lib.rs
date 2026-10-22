@@ -1,4 +1,5 @@
 //! Native Artix-7 synthesis and experimental physical implementation.
+mod analytic;
 pub mod bitstream;
 mod bram;
 mod detail;

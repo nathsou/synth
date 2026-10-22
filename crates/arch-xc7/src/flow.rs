@@ -49,8 +49,10 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    let graph = RoutingGraph::new(&db)?;
+    let clocked = graph.clocked(&db)?;
     let placement =
-        place::place(&db, &nl, &p, xdc, opts.seed, opts.effort, Some(&mut criticality))?;
+        place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     // Detailed placement: lanes move between the placed slices, with
     // criticalities from the delays the new slice contents predict.
@@ -69,7 +71,6 @@ pub fn implement(
     if let Ok(path) = std::env::var("SYNTH_XC7_MACROS") {
         std::fs::write(&path, packing_macros(&nl, &p)).map_err(|e| e.to_string())?;
     }
-    let graph = RoutingGraph::new(&db)?;
     let (mut requests, names, request_nets, owners, blocked_edges) =
         requests(&db, &nl, &p, &placement, &graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
