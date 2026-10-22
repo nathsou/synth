@@ -13,6 +13,7 @@
 pub mod bigint;
 pub mod bin;
 pub mod diag;
+pub mod fs;
 pub mod hash;
 pub mod id;
 pub mod intern;

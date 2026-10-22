@@ -10,9 +10,9 @@ fn gamma() -> [uint<8>; 64] {
     t
 }
 
-/// STEP: the cycles between two of the 128 brightness steps of a breath
-/// (25 MHz on the Go Board: a breath every 2 s).
-module top<STEP: int = 390_625>(in clk: clock, out led: uint<4>) {
+/// CLK_HZ: the clock frequency (25 MHz on the Go Board). STEP: the cycles
+/// between two of the 128 brightness steps of a breath (a breath every 2 s).
+module top<CLK_HZ: int = 25_000_000, STEP: int = CLK_HZ / 64>(in clk: clock, out led: uint<4>) {
     const GAMMA: [uint<8>; 64] = gamma();
     inst step = divider<STEP>();
 

@@ -65,9 +65,9 @@ const HOME: [uint<8>; 3] = [0x1B, 0x5B, 0x48];
 
 enum Phase { Home, Cells, Pause }
 
-/// CLKS_PER_BIT: the clock frequency divided by 115200. PAUSE: the cycles
-/// between two generations (25 MHz on the Go Board).
-module top<CLKS_PER_BIT: int = 217, PAUSE: int = 12_500_000>(in clk: clock, out tx: bool, out led: uint<4>) {
+/// CLK_HZ: the clock frequency (25 MHz on the Go Board). CLKS_PER_BIT: for
+/// 115200 baud. PAUSE: the cycles between two generations (half a second).
+module top<CLK_HZ: int = 25_000_000, CLKS_PER_BIT: int = CLK_HZ / 115200, PAUSE: int = CLK_HZ / 2>(in clk: clock, out tx: bool, out led: uint<4>) {
     reg grid: [[bool; SIZE]; SIZE] = first();
     reg generation: uint<4> = 0;
     inst uart = uart_tx<CLKS_PER_BIT>();

@@ -190,7 +190,7 @@ pub fn coverage(
     }
     for kind in used {
         let path = root.join("timings").join(format!("{kind}.sdf"));
-        match std::fs::read_to_string(&path) {
+        match synth_core::fs::read_to_string(&path) {
             Ok(s) => {
                 let model = Sdf::parse(&s).map_err(|e| format!("{}: {e}", path.display()))?;
                 result.characterized_cells += model.cells.len();

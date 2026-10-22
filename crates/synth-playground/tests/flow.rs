@@ -1,11 +1,11 @@
-//! Every example through the playground's whole flow.
+//! Every example through the playground's whole flow, and on every board.
 
 use synth_core::Json;
 
 fn request(ex: &Json) -> Json {
     Json::obj()
         .with("files", ex.at(&["files"]).clone())
-        .with("pcf", ex.at(&["pcf"]).clone())
+        .with("pins", ex.at(&["pins"]).clone())
         .with("part", ex.at(&["part"]).clone())
         .with("package", ex.at(&["package"]).clone())
         // Less placement effort: the test checks the data, not its quality.
@@ -90,4 +90,72 @@ fn errors_come_back_as_diagnostics() {
     assert!(a.at(&["refs"]).as_array().iter().any(|r| r.at(&["kind"]).as_str() == Some("Port")));
     let dev = Json::parse(&synth_playground::handle("devices", "")).unwrap();
     assert!(dev.as_array().iter().any(|d| d.at(&["part"]).as_str() == Some("hx8k")));
+}
+
+/// A request for an example on a board: its pins and clock, as the page
+/// sends them.
+fn board_request(ex: &Json, part: &str, package: &str) -> Json {
+    let dev = synth_playground::devices();
+    let dev = dev.as_array().iter().find(|d| d.at(&["part"]).as_str() == Some(part)).unwrap();
+    Json::obj()
+        .with("files", ex.at(&["files"]).clone())
+        .with("pins", dev.at(&["pins", package]).clone())
+        .with("clock_hz", dev.at(&["clock_hz", package]).clone())
+        .with("part", part)
+        .with("package", package)
+        .with("effort", 0.3)
+}
+
+/// Runs every example on each board, expecting a bitstream, except for the
+/// examples that are known not to fit.
+fn run_on_boards(boards: &[(&str, &str, &[&str])]) {
+    let exs = synth_playground::examples();
+    for &(part, package, too_big) in boards {
+        for ex in exs.as_array() {
+            let id = ex.at(&["id"]).as_str().unwrap();
+            let t = std::time::Instant::now();
+            let req = board_request(ex, part, package);
+            let out = Json::parse(&synth_playground::handle("run", &req.dump())).unwrap();
+            if too_big.contains(&id) {
+                let err = out.at(&["error"]).as_str().unwrap_or_default();
+                assert!(err.contains("does not fit"), "{id} on {part}: {}", out.dump());
+                continue;
+            }
+            assert_eq!(
+                out.at(&["ok"]).as_bool(),
+                Some(true),
+                "{id} on {part}: {}",
+                out.at(&["error"]).dump()
+            );
+            let bin = out.at(&["bin"]).as_str().unwrap_or_default();
+            assert!(bin.len() > 1000, "{id} on {part}: no bitstream");
+            let clocks = out.at(&["timing", "clocks"]).as_array();
+            assert!(!clocks.is_empty(), "{id} on {part}: no clock");
+            eprintln!(
+                "{id} on {part}: {:.1}s, {:.0} MHz",
+                t.elapsed().as_secs_f64(),
+                clocks[0].at(&["fmax_mhz"]).as_f64().unwrap_or(0.0)
+            );
+        }
+    }
+}
+
+/// The iCE40 boards: the Nandland Go and the Alchitry Cu.
+#[test]
+fn examples_build_for_ice40_boards() {
+    let go_too_big: &[&str] = &["rv_single", "rv_multi", "rv_pipe"];
+    run_on_boards(&[("hx1k", "vq100", go_too_big), ("hx8k", "cb132", &[])]);
+}
+
+/// The Artix-7 boards: the Alchitry Au and the Nexys A7-100T. They need the
+/// Project X-Ray database (`SYNTH_XC7_DB`) and take a while:
+/// `SYNTH_XC7_DB=<dir>/artix7 cargo test --release -p synth-playground -- --ignored`.
+#[test]
+#[ignore]
+fn examples_build_for_artix7_boards() {
+    if std::env::var_os("SYNTH_XC7_DB").is_none() {
+        eprintln!("SYNTH_XC7_DB is not set: skipped");
+        return;
+    }
+    run_on_boards(&[("xc7a35t", "ftg256", &[]), ("xc7a100t", "csg324", &[])]);
 }

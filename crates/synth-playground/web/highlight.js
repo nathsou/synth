@@ -6,12 +6,13 @@ export const WEFT_KW = new Set(['module', 'extern', 'fn', 'struct', 'enum', 'con
 export const WEFT_TYPES = new Set(['bool', 'uint', 'sint', 'index', 'clock', 'int', 'string']);
 export const WEFT_BUILTINS = new Set(['concat', 'from_bits', 'unsafe_cross', 'hex_file', 'bin_file', 'clog2', 'bits_for', 'min', 'max', 'sync', 'reset_sync', 'power_on_reset', 'rising', 'falling', 'divider', 'count_ones', 'onehot_to_index', 'priority']);
 export const V_KW = new Set('module endmodule input output inout wire reg logic always always_ff always_comb assign begin end if else case casez casex endcase default posedge negedge or and not parameter localparam integer genvar generate endgenerate for while initial function endfunction task endtask signed unsigned'.split(' '));
-const PCF_KW = new Set(['set_io', 'set_frequency', '-nowarn', '-pullup', '-pullup_resistor']);
+// PCF, and the XDC subset the Artix-7 flow reads (both comment with `#`).
+const PCF_KW = new Set(['set_io', 'set_frequency', '-nowarn', '-pullup', '-pullup_resistor', 'set_property', 'create_clock', 'get_ports', '-dict', '-period', '-name', '-waveform', 'PACKAGE_PIN', 'IOSTANDARD', 'PULLTYPE', 'DRIVE', 'SLEW']);
 
 export function langOf(name) {
   if (name.endsWith('.weft')) return 'weft';
   if (name.endsWith('.v') || name.endsWith('.sv')) return 'verilog';
-  if (name.endsWith('.pcf')) return 'pcf';
+  if (name.endsWith('.pcf') || name.endsWith('.xdc')) return 'pcf';
   return 'text';
 }
 

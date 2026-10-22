@@ -730,23 +730,29 @@ fn parallel(
             }
             None => true,
         });
-        let results: Vec<Result<Vec<usize>, RouteError>> = std::thread::scope(|s| {
-            let workers: Vec<_> = scratch
-                .iter_mut()
-                .enumerate()
-                .map(|(t, sc)| {
-                    let (buckets, cells) = (&buckets, &cells);
-                    s.spawn(move || {
-                        let mut later = Vec::new();
-                        for q in (t..parts.len()).step_by(threads) {
-                            route_region(pass, st, sc, cells, &buckets[q], parts[q], &mut later)?;
-                        }
-                        Ok(later)
+        let work = |t: usize, sc: &mut Scratch| {
+            let mut later = Vec::new();
+            for q in (t..parts.len()).step_by(threads) {
+                route_region(pass, st, sc, &cells, &buckets[q], parts[q], &mut later)?;
+            }
+            Ok(later)
+        };
+        // One thread runs in place (WebAssembly cannot spawn any).
+        let results: Vec<Result<Vec<usize>, RouteError>> = if threads == 1 {
+            vec![work(0, &mut scratch[0])]
+        } else {
+            std::thread::scope(|s| {
+                let workers: Vec<_> = scratch
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(t, sc)| {
+                        let work = &work;
+                        s.spawn(move || work(t, sc))
                     })
-                })
-                .collect();
-            workers.into_iter().map(|w| w.join().expect("router thread panicked")).collect()
-        });
+                    .collect();
+                workers.into_iter().map(|w| w.join().expect("router thread panicked")).collect()
+            })
+        };
         for r in results {
             match r {
                 Ok(l) => later.extend(l),

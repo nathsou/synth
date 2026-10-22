@@ -9,9 +9,9 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    time::Instant,
 };
 use synth_core::FxHashMap;
+use synth_core::time::Instant;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
 #[derive(Clone, Debug)]
@@ -38,6 +38,24 @@ pub fn implement(
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
     let mut log = Vec::new();
+    // As in Vivado, constraints of ports the design does not have are
+    // dropped, so one board's file serves every design on it.
+    let ports: BTreeSet<&str> = nl
+        .live_cells()
+        .filter(|&c| matches!(nl.cell_kind(c), "$input" | "$output"))
+        .map(|c| nl.str(nl.cells[c].name))
+        .collect();
+    let mut xdc = xdc.clone();
+    let unused: Vec<String> =
+        xdc.ports.keys().filter(|n| !ports.contains(n.as_str())).cloned().collect();
+    for n in &unused {
+        xdc.ports.remove(n);
+        xdc.clocks.remove(n);
+    }
+    if !unused.is_empty() {
+        log.push(format!("XDC constrains ports the design does not have: {}", unused.join(", ")));
+    }
+    let xdc = &xdc;
     let mut p = pack::pack(&mut nl)?;
     log.push(format!("packed {} slices, {} carry chains", p.slices.len(), p.chains.len()));
     let db = Device::load(root, &opts.part)?;

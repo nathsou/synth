@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: CERN-OHL-W-2.0
-// Counts in binary on the Go Board's four LEDs, about twice a second.
-module top(in clk: clock, out led: uint<4>) {
-    reg count: uint<26> = 0;
+// Counts in binary on four LEDs, a few times a second.
+
+/// CLK_HZ: the clock frequency (25 MHz on the Go Board); W: the counter's
+/// width, so that its top four bits count at about the same speed on every
+/// board.
+module top<CLK_HZ: int = 25_000_000, W: int = bits_for(CLK_HZ) + 1>(in clk: clock, out led: uint<4>) {
+    reg count: uint<W> = 0;
     count := count +% 1;
-    led = count[25:22];
+    led = count[W - 1:W - 4];
 }

@@ -15,9 +15,10 @@
 //   instruction that writes it at the same time is forwarded from a sixth,
 //   bookkeeping stage (`done`).
 
-/// CLKS_PER_BIT: the clock frequency divided by 115200. DELAY: the pause
-/// between two runs of the program (see rv_program.weft).
-module top<CLKS_PER_BIT: int = 104, DELAY: int = 600>(in clk: clock, out tx: bool, out led: uint<8>) {
+/// CLK_HZ: the clock frequency (12 MHz on the iCE40-HX8K Breakout Board).
+/// CLKS_PER_BIT: for 115200 baud. DELAY: the pause between two runs of the
+/// program (see rv_program.weft).
+module top<CLK_HZ: int = 12_000_000, CLKS_PER_BIT: int = CLK_HZ / 115200, DELAY: int = 600>(in clk: clock, out tx: bool, out led: uint<8>) {
     mem rom: [uint<32>; 128] init program<128>(DELAY);
     mem regs1: [uint<32>; 32]; // two copies of the register file, one per read port
     mem regs2: [uint<32>; 32];

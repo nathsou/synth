@@ -2,7 +2,7 @@
 
 import { Renderer, zoomBar } from './gl.js';
 import { settings } from './settings.js';
-import { h, fill, icon, rgb, cssVar, mix, esc, fmtNum, hsl, showTooltip, hideTooltip, download, fromBase64 } from './util.js';
+import { h, fill, icon, rgb, cssVar, mix, esc, fmtNum, hsl, showTooltip, hideTooltip, download, fromBase64, isPins } from './util.js';
 
 // ----- pipeline -----
 
@@ -13,6 +13,7 @@ const STAGE_INFO = {
   gates_lowered: ['Lower to gates', 'Word-level cells become an and-inverter graph, flip-flops and carry chains.'],
   gates_optimised: ['Optimise gates', 'Rewriting, refactoring and SAT sweeping shrink the graph.'],
   mapped: ['Map to LUTs', 'The gates are covered by 4-input LUTs; flip-flops and carries become iCE40 primitives.'],
+  mapped_xc7: ['Synthesise', 'Optimisation, then 6-input LUTs, MUXF7/MUXF8, carry chains, block RAMs, DSPs and shift registers: Artix-7 primitives.'],
   packed: ['Pack', 'LUTs, flip-flops and carries are paired into logic cells; IOs and global buffers are added.'],
 };
 
@@ -37,14 +38,15 @@ export function renderPipeline(el, result, app) {
       h('div', {}, h('div', { class: 'title' }, title), h('div', { class: 'desc' }, desc), h('div', { class: 'stats' }, stats)),
       h('div', { class: 'open' }, opts.ms ? h('span', { class: 'ms', title: opts.msTitle }, `${opts.ms} ms`) : null, opts.open ? icon(opts.icon || 'graph') : null)));
   };
-  const files = app.project.files.filter((f) => !f.name.endsWith('.pcf'));
+  const files = app.project.files.filter((f) => !isPins(f.name));
   const lines = files.reduce((a, f) => a + f.text.split('\n').length, 0);
   step('Source', `${files.map((f) => f.name).join(', ')}`, [h('span', {}, h('b', {}, files.length), ' files'), h('span', {}, h('b', {}, lines), ' lines')], { failed: !stages.length && !result.ok });
   let prev = null;
   for (const s of stages) {
     const [title, desc] = STAGE_INFO[s.id] || [s.title, ''];
-    const ms = s.id === 'elaborated' ? times.elaborate : s.id === 'mapped' ? times.synthesise : undefined;
-    step(title, desc, statChips(s.stats, prev), { open: s.graph ? () => app.openSchematic(s.id) : undefined, ms, msTitle: s.id === 'mapped' ? 'all of synthesis' : undefined });
+    const mapped = s.id === 'mapped' || s.id === 'mapped_xc7';
+    const ms = s.id === 'elaborated' ? times.elaborate : mapped ? times.synthesise : undefined;
+    step(title, desc, statChips(s.stats, prev), { open: s.graph ? () => app.openSchematic(s.id) : undefined, ms, msTitle: mapped ? 'all of synthesis' : undefined });
     prev = s.stats;
   }
   if (chip) {
@@ -53,6 +55,12 @@ export function renderPipeline(el, result, app) {
       [h('span', {}, h('b', {}, chip.cells.length), ' sites'), h('span', {}, h('b', {}, chip.usage.lc), ` of ${chip.usage.lc_total} logic cells`)], { open: () => app.openView('chip'), icon: 'chip' });
     step('Route', 'A negotiated-congestion router connects every net through the programmable switches.',
       [h('span', {}, h('b', {}, chip.nets.length), ' nets'), h('span', {}, h('b', {}, fmtNum(pips)), ' switches'), h('span', {}, h('b', {}, chip.nodes.length), ' wires')], { open: () => app.openView('chip'), icon: 'chip', ms: times['place and route'], msTitle: 'packing, placement, routing and timing' });
+  }
+  if (result.placed) {
+    const p = result.placed;
+    step('Place and route', 'Packing into slices, placement and routing on the Artix-7 fabric, then the bitstream (no die view yet).',
+      [h('span', {}, h('b', {}, fmtNum(p.slices)), ' slices'), h('span', {}, h('b', {}, p.block_rams), ' block RAMs'), h('span', {}, h('b', {}, p.dsps), ' DSPs'), h('span', {}, h('b', {}, p.ios), ' IOs')],
+      { ms: times['place and route'], msTitle: 'packing, placement, routing, timing and the bitstream' });
   }
   if (result.timing) {
     const clocks = result.timing.clocks;
@@ -73,7 +81,7 @@ export function renderPipeline(el, result, app) {
   ] : [];
   const fmax = result.timing?.clocks?.[0];
   fill(el, h('div', { class: 'pipeline' },
-    h('h2', {}, result.ok ? `${result.top || 'design'} on iCE40 ${(chip?.part || '').toUpperCase()}` : 'The flow stopped'),
+    h('h2', {}, result.ok ? `${result.top || 'design'} on ${result.family || 'iCE40'} ${(chip?.part || app.project.part || '').toUpperCase()}` : 'The flow stopped'),
     h('div', { class: 'summary' }, result.ok
       ? `${chip ? `${chip.package}, ` : ''}${stages.length} synthesis stages${fmax ? `, ${fmax.fmax_mhz.toFixed(1)} MHz on ${fmax.clock}` : ''}. Click a step to inspect it.`
       : (result.error || '')),
@@ -104,12 +112,12 @@ export function renderTiming(el, result, app) {
         h('span', { class: 'muted' }, `period ${c.period_ns.toFixed(3)} ns`),
         c.target_mhz ? h('span', { class: `pill ${c.met ? 'ok' : 'bad'}` }, `${c.met ? 'meets' : 'misses'} ${c.target_mhz} MHz`) : h('span', { class: 'pill', style: { background: 'var(--bg-3)' } }, 'no target'),
         h('span', { class: 'spacer', style: { flex: 1 } }),
-        h('button', { onclick: () => app.showCriticalPath(ci) }, icon('chip'), 'Show on chip')),
+        result.chip ? h('button', { onclick: () => app.showCriticalPath(ci) }, icon('chip'), 'Show on chip') : null),
       h('div', { class: 'pathbar', title: 'Delay of each step of the critical path' },
         steps.map((s, i) => h('i', { title: `${s.cell}.${s.pin}: +${s.d.toFixed(2)} ns`, style: { width: `${(100 * s.d) / totalT}%`, background: css(color(i)) } }))),
       h('table', { class: 'path' },
         h('tr', {}, h('th', {}, 'Cell'), h('th', {}, 'Pin'), h('th', { style: { textAlign: 'right' } }, 'Step'), h('th', { style: { textAlign: 'right' } }, 'Arrival')),
-        steps.map((s, i) => h('tr', { onclick: () => app.focusChipCell(s.ci, ci) },
+        steps.map((s, i) => h('tr', { onclick: result.chip ? () => app.focusChipCell(s.ci, ci) : null },
           h('td', {}, h('i', { class: 'sw', style: { background: css(color(i)) } }), s.cell),
           h('td', {}, s.pin),
           h('td', { class: 'num' }, `+${s.d.toFixed(2)}`),

@@ -36,51 +36,114 @@ pub struct Example {
     pub package: &'static str,
 }
 
-/// A board, and the pins of every port the examples use on it.
+/// A board, and the pins of every port the examples use on it, in its
+/// family's constraints format.
 #[derive(Debug)]
 pub struct Board {
     pub name: &'static str,
     pub part: &'static str,
     pub package: &'static str,
-    pub pcf: &'static str,
+    /// The frequency of the clock on `clk`, given to designs whose top has a
+    /// `CLK_HZ` parameter.
+    pub clock_hz: u64,
+    pub pins: &'static str,
 }
+
+/// The FPGA families the playground implements designs for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    Ice40,
+    Artix7,
+}
+
+impl Family {
+    pub fn of(part: &str) -> Family {
+        if part.starts_with("xc7") { Family::Artix7 } else { Family::Ice40 }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Family::Ice40 => "iCE40",
+            Family::Artix7 => "Artix-7",
+        }
+    }
+    /// The constraints file of a project for this family.
+    pub fn pins_file(self) -> &'static str {
+        match self {
+            Family::Ice40 => "pins.pcf",
+            Family::Artix7 => "pins.xdc",
+        }
+    }
+}
+
+/// The Artix-7 parts offered (those of the boards), with their packages.
+/// The playground uses speed grade -1.
+pub const XC7_PARTS: &[(&str, &[&str])] = &[("xc7a35t", &["ftg256"]), ("xc7a100t", &["csg324"])];
 
 pub const BOARDS: &[Board] = &[
     Board {
         name: "Nandland Go Board",
         part: "hx1k",
         package: "vq100",
-        pcf: "# Nandland Go Board (iCE40 HX1K VQ100)\nset_io clk 15\nset_io sw1 53\nset_io btn 53\nset_io led[0] 56\nset_io led[1] 57\nset_io led[2] 59\nset_io led[3] 60\n# The seven-segment display's segments, for 8-bit outputs.\nset_io led[4] 3\nset_io led[5] 4\nset_io led[6] 7\nset_io led[7] 8\nset_io rx 73\nset_io tx 74\n",
+        clock_hz: 25_000_000,
+        pins: "# Nandland Go Board (iCE40 HX1K VQ100, 25 MHz)\nset_io clk 15\nset_frequency clk 25\nset_io sw1 53\nset_io btn 53\nset_io led[0] 56\nset_io led[1] 57\nset_io led[2] 59\nset_io led[3] 60\n# The seven-segment display's segments, for 8-bit outputs.\nset_io led[4] 3\nset_io led[5] 4\nset_io led[6] 7\nset_io led[7] 8\nset_io rx 73\nset_io tx 74\n",
     },
     Board {
         name: "Lattice iCEstick",
         part: "hx1k",
         package: "tq144",
-        pcf: "# Lattice iCEstick (iCE40 HX1K TQ144)\nset_io clk 21\nset_io led[0] 99\nset_io led[1] 98\nset_io led[2] 97\nset_io led[3] 96\nset_io led[4] 95\nset_io rx 9\nset_io tx 8\n",
+        clock_hz: 12_000_000,
+        pins: "# Lattice iCEstick (iCE40 HX1K TQ144, 12 MHz)\nset_io clk 21\nset_frequency clk 12\nset_io led[0] 99\nset_io led[1] 98\nset_io led[2] 97\nset_io led[3] 96\nset_io led[4] 95\nset_io rx 9\nset_io tx 8\n",
     },
     Board {
         name: "Lattice iCE40-HX8K Breakout Board",
         part: "hx8k",
         package: "ct256",
-        pcf: "# Lattice iCE40-HX8K Breakout Board (iCE40 HX8K CT256, 12 MHz)\nset_io clk J3\nset_io led[0] B5\nset_io led[1] B4\nset_io led[2] A2\nset_io led[3] A1\nset_io led[4] C5\nset_io led[5] C4\nset_io led[6] B3\nset_io led[7] C3\nset_io rx B10\nset_io tx B12\n",
+        clock_hz: 12_000_000,
+        pins: "# Lattice iCE40-HX8K Breakout Board (iCE40 HX8K CT256, 12 MHz)\nset_io clk J3\nset_frequency clk 12\nset_io led[0] B5\nset_io led[1] B4\nset_io led[2] A2\nset_io led[3] A1\nset_io led[4] C5\nset_io led[5] C4\nset_io led[6] B3\nset_io led[7] C3\nset_io rx B10\nset_io tx B12\n",
     },
     Board {
         name: "Alchitry Cu",
         part: "hx8k",
         package: "cb132",
-        pcf: "# Alchitry Cu (iCE40 HX8K CB132)\nset_io clk P7\nset_io sw1 P8\nset_io btn P8\nset_io led[0] J11\nset_io led[1] K11\nset_io led[2] K12\nset_io led[3] K14\nset_io led[4] L12\nset_io led[5] L14\nset_io led[6] M12\nset_io led[7] N14\nset_io rx P14\nset_io tx M9\n",
+        clock_hz: 100_000_000,
+        pins: "# Alchitry Cu (iCE40 HX8K CB132, 100 MHz)\nset_io clk P7\nset_frequency clk 100\nset_io sw1 P8\nset_io btn P8\nset_io led[0] J11\nset_io led[1] K11\nset_io led[2] K12\nset_io led[3] K14\nset_io led[4] L12\nset_io led[5] L14\nset_io led[6] M12\nset_io led[7] N14\nset_io rx P14\nset_io tx M9\n",
+    },
+    Board {
+        name: "Alchitry Au",
+        part: "xc7a35t",
+        package: "ftg256",
+        clock_hz: 100_000_000,
+        pins: include_str!("boards/alchitry_au.xdc"),
+    },
+    Board {
+        name: "Digilent Nexys A7-100T",
+        part: "xc7a100t",
+        package: "csg324",
+        clock_hz: 100_000_000,
+        pins: include_str!("boards/nexys_a7.xdc"),
     },
 ];
 
+/// The board of a device, if one is known.
+pub fn board(part: &str, package: &str) -> Option<&'static Board> {
+    BOARDS.iter().find(|b| b.part == part && b.package == package)
+}
+
 /// The pin constraints for a device: its board's, or none (the placer then
 /// chooses the pins).
-pub fn board_pcf(part: &str, package: &str) -> String {
-    match BOARDS.iter().find(|b| b.part == part && b.package == package) {
-        Some(b) => b.pcf.to_string(),
-        None => format!(
-            "# No board is known for the {} {package}: the placer chooses the pins.\n# Add `set_io <port> <pin>` lines to fix them.\n",
-            part.to_uppercase()
-        ),
+pub fn board_pins(part: &str, package: &str) -> String {
+    match board(part, package) {
+        Some(b) => b.pins.to_string(),
+        None => match Family::of(part) {
+            Family::Ice40 => format!(
+                "# No board is known for the {} {package}: the placer chooses the pins.\n# Add `set_io <port> <pin>` lines to fix them.\n",
+                part.to_uppercase()
+            ),
+            Family::Artix7 => format!(
+                "# No board is known for the {} {package}: give every port a pin with\n# set_property -dict {{PACKAGE_PIN <pin> IOSTANDARD LVCMOS33}} [get_ports {{<port>}}]\n",
+                part.to_uppercase()
+            ),
+        },
     }
 }
 
@@ -193,7 +256,162 @@ pub const EXAMPLES: &[Example] = &[
         part: "hx1k",
         package: "vq100",
     },
+    Example {
+        id: "euler10",
+        title: "Euler 10: Summation of primes",
+        description: "Project Euler 10 in hardware: sends 142913828922 over the UART after 131,016 cycles",
+        files: &[
+            ("top.v", euler_top!("euler10", 38)),
+            ("p010.v", include_str!("../../../tests/designs/euler/p010.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler14",
+        title: "Euler 14: Longest Collatz sequence",
+        description: "Project Euler 14 in hardware: sends 837799 over the UART after 364,431 cycles",
+        files: &[
+            ("top.v", euler_top!("euler14", 20)),
+            ("p014.v", include_str!("../../../tests/designs/euler/p014.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler25",
+        title: "Euler 25: 1000-digit Fibonacci number",
+        description: "Project Euler 25 in hardware: sends 4782 over the UART after 2,390 cycles",
+        files: &[
+            ("top.v", euler_top!("euler25", 16)),
+            ("p025.v", include_str!("../../../tests/designs/euler/p025.v")),
+            ("bcd.v", EULER_BCD),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler31",
+        title: "Euler 31: Coin sums",
+        description: "Project Euler 31 in hardware: sends 73682 over the UART after 209 cycles",
+        files: &[
+            ("top.v", euler_top!("euler31", 17)),
+            ("p031.v", include_str!("../../../tests/designs/euler/p031.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler43",
+        title: "Euler 43: Sub-string divisibility",
+        description: "Project Euler 43 in hardware: sends 16695334890 over the UART after 363 cycles",
+        files: &[
+            ("top.v", euler_top!("euler43", 36)),
+            ("p043.v", include_str!("../../../tests/designs/euler/p043.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler48",
+        title: "Euler 48: Self powers",
+        description: "Project Euler 48 in hardware: sends 9110846700 over the UART after 22,758 cycles",
+        files: &[
+            ("top.v", euler_top!("euler48", 34)),
+            ("p048.v", include_str!("../../../tests/designs/euler/p048.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler57",
+        title: "Euler 57: Square root convergents",
+        description: "Project Euler 57 in hardware: sends 153 over the UART after 8,571 cycles",
+        files: &[
+            ("top.v", euler_top!("euler57", 10)),
+            ("p057.v", include_str!("../../../tests/designs/euler/p057.v")),
+            ("bcd.v", EULER_BCD),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler58",
+        title: "Euler 58: Spiral primes",
+        description: "Project Euler 58 in hardware: sends 26241 over the UART after 2,628,585 cycles",
+        files: &[
+            ("top.v", euler_top!("euler58", 16)),
+            ("p058.v", include_str!("../../../tests/designs/euler/p058.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler92",
+        title: "Euler 92: Square digit chains",
+        description: "Project Euler 92 in hardware: sends 8581146 over the UART after 1,201 cycles",
+        files: &[
+            ("top.v", euler_top!("euler92", 24)),
+            ("p092.v", include_str!("../../../tests/designs/euler/p092.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
+    Example {
+        id: "euler97",
+        title: "Euler 97: Large non-Mersenne prime",
+        description: "Project Euler 97 in hardware: sends 8739992577 over the UART after 389 cycles",
+        files: &[
+            ("top.v", euler_top!("euler97", 34)),
+            ("p097.v", include_str!("../../../tests/designs/euler/p097.v")),
+            ("euler_board.v", EULER_BOARD),
+            ("report.v", EULER_REPORT),
+        ],
+        part: "hx8k",
+        package: "cb132",
+    },
 ];
+
+/// The playground's top for a Project Euler solver: the solver with the
+/// board-neutral shell of `tests/designs/euler/euler_board.v`.
+macro_rules! euler_top {
+    ($solver:literal, $width:literal) => {
+        concat!(
+            "// Project Euler in hardware: ", $solver, " with a board-neutral shell (euler_board.v).\n",
+            "// \"<answer> <cycles>\" on the UART at 115200 baud; the answer's low byte on the LEDs.\n",
+            "module top #(parameter CLK_HZ = 100000000) (input clk, output tx, output [7:0] led);\n",
+            "  wire rst, done;\n",
+            "  wire [", $width, "-1:0] answer;\n",
+            "  ", $solver, " solver (.clk(clk), .rst(rst), .start(1'b1), .done(done), .answer(answer));\n",
+            "  euler_board #(.CLK_HZ(CLK_HZ), .ANSWER_WIDTH(", $width, ")) board (.clk(clk), .rst(rst),\n",
+            "    .done(done), .answer(answer), .tx(tx), .led(led));\n",
+            "endmodule\n",
+        )
+    };
+}
+use euler_top;
+
+const EULER_BOARD: &str = include_str!("../../../tests/designs/euler/euler_board.v");
+const EULER_REPORT: &str = include_str!("../../../tests/designs/euler/report.v");
+const EULER_BCD: &str = include_str!("../../../tests/designs/euler/bcd.v");
 
 /// Answers one request of the web app. Unknown methods and malformed
 /// requests give `{"error": ...}`.
@@ -232,7 +450,8 @@ pub fn examples() -> Json {
                     .with("title", e.title)
                     .with("description", e.description)
                     .with("files", files)
-                    .with("pcf", board_pcf(e.part, e.package))
+                    .with("pins", board_pins(e.part, e.package))
+                    .with("pins_file", Family::of(e.part).pins_file())
                     .with("part", e.part)
                     .with("package", e.package)
             })
@@ -240,39 +459,42 @@ pub fn examples() -> Json {
     )
 }
 
-/// The supported parts, their packages, and the pins and board of each.
+/// The supported parts, their packages, and the pins, board and clock of
+/// each.
 pub fn devices() -> Json {
     use arch_ice40::arch::Part;
-    Json::Arr(
-        Part::ALL
-            .iter()
-            .map(|p| {
-                let db = arch_ice40::chipdb::ChipDb::get(p.die());
-                let names: Vec<&str> = db
-                    .packages
-                    .iter()
-                    .filter(|k| arch_ice40::arch::Arch::new(*p, &k.name).is_ok())
-                    .map(|k| k.name.as_str())
-                    .collect();
-                let pcf = Json::Obj(
-                    names.iter().map(|k| (k.to_string(), board_pcf(p.name(), k).into())).collect(),
-                );
-                let boards = Json::Obj(
-                    BOARDS
-                        .iter()
-                        .filter(|b| b.part == p.name())
-                        .map(|b| (b.package.to_string(), b.name.into()))
-                        .collect(),
-                );
-                Json::obj()
-                    .with("part", p.name())
-                    .with("die", p.die().name())
-                    .with("packages", names)
-                    .with("pcf", pcf)
-                    .with("boards", boards)
-            })
-            .collect(),
-    )
+    let device = |part: &str, die: &str, packages: Vec<&str>| {
+        let family = Family::of(part);
+        let per = |f: &dyn Fn(&str) -> Option<Json>| {
+            Json::Obj(packages.iter().filter_map(|k| Some((k.to_string(), f(k)?))).collect())
+        };
+        Json::obj()
+            .with("part", part)
+            .with("family", family.name())
+            .with("die", die)
+            .with("pins_file", family.pins_file())
+            .with("pins", per(&|k| Some(board_pins(part, k).into())))
+            .with("boards", per(&|k| board(part, k).map(|b| b.name.into())))
+            .with("clock_hz", per(&|k| board(part, k).map(|b| (b.clock_hz as i64).into())))
+            .with("packages", packages.clone())
+    };
+    let mut out: Vec<Json> = Part::ALL
+        .iter()
+        .map(|p| {
+            let db = arch_ice40::chipdb::ChipDb::get(p.die());
+            let names: Vec<&str> = db
+                .packages
+                .iter()
+                .filter(|k| arch_ice40::arch::Arch::new(*p, &k.name).is_ok())
+                .map(|k| k.name.as_str())
+                .collect();
+            device(p.name(), p.die().name(), names)
+        })
+        .collect();
+    for (part, packages) in XC7_PARTS {
+        out.push(device(part, part, packages.to_vec()));
+    }
+    Json::Arr(out)
 }
 
 fn is_weft(name: &str) -> bool {
@@ -416,7 +638,23 @@ fn options(req: &Json) -> synth_weft::Options {
         _ => Vec::new(),
     };
     let top = req.at(&["top"]).as_str().filter(|t| !t.is_empty()).map(String::from);
-    synth_weft::Options { top, params, ..Default::default() }
+    let defaults = clock_hz(req).map(|hz| vec![("CLK_HZ".to_string(), hz.to_string())]);
+    synth_weft::Options {
+        top,
+        params,
+        defaults: defaults.unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// The board's clock frequency, given to a top with a `CLK_HZ` parameter.
+fn clock_hz(req: &Json) -> Option<u64> {
+    req.at(&["clock_hz"]).as_i64().filter(|&hz| hz > 0).map(|hz| hz as u64)
+}
+
+/// The pin constraints of a request (`pcf` before Artix-7 support).
+fn pins(req: &Json) -> &str {
+    req.at(&["pins"]).as_str().or_else(|| req.at(&["pcf"]).as_str()).unwrap_or("")
 }
 
 /// Above this many AND nodes the gate-level graph is left out.
@@ -487,7 +725,11 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         m
     } else {
         let top = req.at(&["top"]).as_str().filter(|t| !t.is_empty()).map(String::from);
-        let opts = synth_elab::ElabOptions { top, top_params: Vec::new() };
+        // Verilog ignores parameters the top does not declare.
+        let top_params = clock_hz(req)
+            .map(|hz| vec![("CLK_HZ".to_string(), synth_core::LogicVec::from_u64(hz, 32))])
+            .unwrap_or_default();
+        let opts = synth_elab::ElabOptions { top, top_params };
         let (m, d) =
             synth_elab::elaborate(src.as_ref().unwrap(), &sm, &opts, &synth_elab::NoBlackBoxes);
         diags.extend(d);
@@ -499,6 +741,10 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         return Err(format!("{} error(s)", diags.error_count().max(1)));
     };
     out.set("top", module.name.as_str());
+    let part = req.at(&["part"]).as_str().unwrap_or("hx1k").to_string();
+    if Family::of(&part) == Family::Artix7 {
+        return run_xc7(module, &part, req, r, out);
+    }
 
     // Synthesis, observed pass by pass.
     let t = Instant::now();
@@ -555,9 +801,9 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
 
     // Place and route.
     let t = Instant::now();
-    let part: arch_ice40::arch::Part = req.at(&["part"]).as_str().unwrap_or("hx1k").parse()?;
+    let part: arch_ice40::arch::Part = part.parse()?;
     let package = req.at(&["package"]).as_str().unwrap_or("vq100").to_string();
-    let pcf = arch_ice40::pcf::parse_pcf(req.at(&["pcf"]).as_str().unwrap_or(""))?;
+    let pcf = arch_ice40::pcf::parse_pcf(pins(req))?;
     let mut clocks = pcf.clocks.clone();
     clocks.default_mhz = req.at(&["freq"]).as_f64().filter(|f| *f > 0.0);
     let opts = arch_ice40::flow::FlowOptions {
@@ -596,6 +842,137 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     out.set("timing", timing.with("met", res.timing_met));
     out.set("bitstream", chip::bitstream(&imp.arch, &res.config));
     out.set("bin", base64(&res.config.to_bin()));
+    out.set("bin_name", format!("{}.bin", out.at(&["top"]).as_str().unwrap_or("design")));
+    out.set("family", Family::Ice40.name());
+    r.time("export", t);
+    Ok(())
+}
+
+/// Where the Project X-Ray database is: set by `synth playground --xc7-db`
+/// or `SYNTH_XC7_DB`.
+pub static XC7_DB: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+fn xc7_root() -> Result<std::path::PathBuf, String> {
+    // On WebAssembly, the worker serves the database's files from the
+    // part's bundle (see `tools/build_playground.sh`).
+    if cfg!(target_arch = "wasm32") {
+        return Ok("xc7db".into());
+    }
+    if let Some(p) = XC7_DB.get() {
+        return Ok(p.clone());
+    }
+    match std::env::var_os("SYNTH_XC7_DB") {
+        Some(p) => Ok(p.into()),
+        None => Err("Artix-7 needs the Project X-Ray database: run `tools/fetch_xc7_db.sh <dir>`, then start `synth playground --xc7-db <dir>/artix7` (or set SYNTH_XC7_DB)".into()),
+    }
+}
+
+/// The Artix-7 flow: synthesis, then packing, placement, routing, timing and
+/// the bitstream in one step (it does not expose its intermediate states).
+fn run_xc7(
+    module: synth_rtl::Module,
+    part: &str,
+    req: &Json,
+    r: &mut Run,
+    out: &mut Json,
+) -> Result<(), String> {
+    let t = Instant::now();
+    r.stages.push(
+        Json::obj()
+            .with("id", "elaborated")
+            .with("title", "RTL, elaborated")
+            .with("kind", "rtl")
+            .with("stats", stats_json(module.stats()))
+            .with("graph", graph::rtl_graph(&module)),
+    );
+    let (nl, log) = arch_xc7::synth::synthesize(module)?;
+    r.log.extend(log);
+    r.stages.push(
+        Json::obj()
+            .with("id", "mapped_xc7")
+            .with("title", "Mapped to Artix-7 cells")
+            .with("kind", "netlist")
+            .with("stats", stats_json(nl.stats()))
+            .with("graph", graph::netlist_graph(&nl)),
+    );
+    r.time("synthesise", t);
+    if req.at(&["stop"]).as_str() == Some("synth") {
+        return Ok(());
+    }
+
+    let t = Instant::now();
+    let package = req.at(&["package"]).as_str().unwrap_or("");
+    let device = format!("{part}{package}-1");
+    let xdc = arch_xc7::xdc::Constraints::parse(pins(req))?;
+    let root = xc7_root()?;
+    let opts = arch_xc7::flow::FlowOptions {
+        part: device.clone(),
+        seed: req.at(&["seed"]).as_i64().unwrap_or(1).max(0) as u64,
+        effort: req.at(&["effort"]).as_f64().unwrap_or(1.0),
+    };
+    let top = nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into());
+    let names = nl.clone();
+    let res = arch_xc7::flow::implement(nl, &root, &xdc, &opts)?;
+    r.log.extend(res.log.iter().cloned());
+    r.time("place and route", t);
+    out.set(
+        "placed",
+        Json::obj()
+            .with("slices", res.placement.slices.len())
+            .with("block_rams", res.placement.rams.len())
+            .with("dsps", res.placement.dsps.len())
+            .with("ios", res.placement.ports.len()),
+    );
+
+    // Timing: each clock's period and critical path (cell outputs with
+    // their arrival times).
+    let target = req.at(&["freq"]).as_f64().filter(|f| *f > 0.0);
+    let clocks: Vec<Json> = res
+        .timing
+        .iter()
+        .map(|c| {
+            // A clock is named by its input port, as the XDC names it.
+            let name = names
+                .live_cells()
+                .find(|&p| names.cell_kind(p) == "$input" && names.pin_net(p, "PAD") == Some(c.net))
+                .map(|p| names.str(names.cells[p].name))
+                .unwrap_or_else(|| names.str(names.nets[c.net].name))
+                .to_string();
+            let period_ns = c.period / 1000.0;
+            let target_mhz =
+                xdc.clocks.get(&name).map(|ns| 1000.0 / ns).or(target).filter(|f| *f > 0.0);
+            let path: Vec<Json> = c
+                .path
+                .iter()
+                .filter_map(|step| {
+                    let (pin, rest) = step.split_once(' ')?;
+                    let (cell, pin) = pin.rsplit_once('.')?;
+                    let ps: f64 = rest.rsplit_once('@')?.1.trim().parse().ok()?;
+                    Some(Json::obj().with("cell", cell).with("pin", pin).with("t", ps / 1000.0))
+                })
+                .collect();
+            let mut j = Json::obj()
+                .with("clock", name)
+                .with("period_ns", period_ns)
+                .with("fmax_mhz", 1e3 / period_ns.max(1e-3))
+                .with("path", path);
+            if let Some(f) = target_mhz {
+                j.set("target_mhz", (f * 1000.0).round() / 1000.0);
+                j.set("met", period_ns <= 1000.0 / f);
+            }
+            j
+        })
+        .collect();
+    out.set("timing", Json::obj().with("clocks", clocks).with("certified", false));
+    let t = Instant::now();
+    let bit = arch_xc7::bitstream::bit_file(
+        &arch_xc7::device::Part::load(&root, &device)?,
+        &top,
+        &res.bitstream,
+    )?;
+    out.set("bin", base64(&bit));
+    out.set("bin_name", format!("{top}.bit"));
+    out.set("family", Family::Artix7.name());
     r.time("export", t);
     Ok(())
 }

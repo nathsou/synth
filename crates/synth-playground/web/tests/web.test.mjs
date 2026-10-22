@@ -70,3 +70,10 @@ test('highlighting: semantic kinds and languages', () => {
   assert.equal(pcf[0][2], 'tok-kw');
   assert.equal(pcf[pcf.length - 1][2], 'tok-com');
 });
+
+test('highlight: XDC constraints read as pin files', () => {
+  assert.equal(langOf('pins.xdc'), 'pcf');
+  const toks = tokenize('set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports {clk}] # c', 'pcf');
+  const kw = toks.filter((t) => t[2] === 'tok-kw').length;
+  assert.ok(kw >= 4, `keywords: ${kw}`);
+});

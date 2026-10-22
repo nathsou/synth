@@ -92,6 +92,7 @@ name = "synth-playground"
 version = "0.1.0"
 dependencies = [
  "arch-ice40",
+ "arch-xc7",
  "synth-core",
  "synth-elab",
  "synth-logic",

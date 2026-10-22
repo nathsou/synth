@@ -37,8 +37,8 @@ impl Arcs {
         let mut sdf = Vec::new();
         for f in ["slicel.sdf", "slicem.sdf", "BRAM_L.sdf", "DSP_L.sdf"] {
             let path = root.join("timings").join(f);
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let text = synth_core::fs::read_to_string(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
             sdf.push(Sdf::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?);
         }
         Ok(Arcs { sdf })

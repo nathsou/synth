@@ -25,7 +25,8 @@ COMMANDS:
     unpack     Convert a binary bitstream to an IceStorm .asc file
     fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
-    playground Serve the playground web app (--port <n>, default 8080)
+    playground Serve the playground web app (--port <n>, default 8080;
+               --xc7-db <prjxray-db/artix7> for the Artix-7 boards)
     help       Print this message
     version    Print version information
 
@@ -251,9 +252,12 @@ fn cmd_fmt(argv: &[String]) -> Result<(), String> {
 }
 
 fn cmd_playground(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["--port", "--host"], &[])?;
+    let mut a = Args::parse(argv, &["--port", "--host", "--xc7-db"], &[])?;
     let port = a.value("--port").unwrap_or_else(|| "8080".into());
     let host = a.value("--host").unwrap_or_else(|| "127.0.0.1".into());
+    if let Some(db) = a.value("--xc7-db") {
+        synth_playground::XC7_DB.set(db.into()).ok();
+    }
     a.finish()?;
     synth_playground::server::serve(&format!("{host}:{port}")).map_err(|e| e.to_string())
 }
