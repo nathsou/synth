@@ -921,7 +921,10 @@ fn random_designs_in_c() {
         std::fs::write(dir.join("main.c"), main).unwrap();
         let exe = dir.join("sim");
         let out = std::process::Command::new(&cc)
-            .args(["-O1", "-w", "-o"])
+            .args(["-O1", "-w"])
+            // Odd seeds with all the logic run at every settle.
+            .args((seed % 2 == 1).then_some("-DSIM_SETTLE_ALL"))
+            .arg("-o")
             .arg(&exe)
             .arg(dir.join("main.c"))
             .arg(dir.join("top.c"))

@@ -13,6 +13,12 @@
 //! bit: it runs only after one of its inputs changed, and marks the
 //! partitions reading its output when that changes. Inputs, state updates
 //! and memory writes mark the partitions reading them.
+//!
+//! When much of the logic changes at each edge, testing dirty bits and
+//! comparing results costs more than it saves (mispredicted branches, most
+//! of all): as Verilator does, it is cheaper to run all of it. `settle`
+//! measures the work done running only what changed and switches between
+//! the two (`-DSIM_SETTLE_ALL` or `-DSIM_SETTLE_CHANGED` forces one).
 
 use std::fmt::Write as _;
 
@@ -319,6 +325,15 @@ fn plan(p: &Program) -> Plan {
     }
     Plan { local, parts, part_of, children }
 }
+
+/// `settle` runs all the logic, not only what changed, once the changed
+/// logic's size times `.0 / .1` exceeds the whole's: tests, comparisons
+/// and their mispredicted branches make changed logic dearer.
+const ALL_RATIO: (u64, u64) = (2, 1);
+
+/// While running all the logic, `settle` runs only what changed again
+/// every this many times, to measure.
+const PROBE: u32 = 64;
 
 /// Partitions of at most this many instructions run whenever their group
 /// of dirty bits is dirty, without a test of their own: a mispredicted
@@ -1001,63 +1016,148 @@ impl Emitter<'_> {
         let p = self.p;
         let plan = self.plan;
         let pre = self.prefix.clone();
-        writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
+        let np = plan.parts.len() as u32;
+        let cost = |q: u32| plan.parts[q as usize].len();
+        // Only what changed: returns the work done (instructions run).
+        writeln!(self.out, "static uint64_t settle_changed({pre}_t *m) {{").unwrap();
         self.indent = 1;
-        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
+        self.line("uint64_t *v = m->v, *D = m->dirty, work = 0; (void)v;");
         // The dirty bits live in locals (registers) while partitions run in
         // order: a partition only marks later ones, so none needs clearing
         // once run, and all are clear at the end.
-        let np = plan.parts.len() as u32;
         for w in 0..np.div_ceil(64) {
             self.line(&format!("uint64_t d{w} = D[{w}]; D[{w}] = 0;"));
         }
-        let own_test = |k: u32| {
-            let units = &plan.parts[k as usize];
-            units.len() > SMALL || p.ops[*units.last().unwrap() as usize].k == K::Loop
+        let own_test = |q: u32| {
+            cost(q) > SMALL || p.ops[*plan.parts[q as usize].last().unwrap() as usize].k == K::Loop
         };
-        self.under_dirty("d", np, own_test, |e, k| {
-            let units = &plan.parts[k as usize];
-            let root = *units.last().unwrap();
-            let ins = p.ops[root as usize];
-            // Locals of the partition.
-            let locals: Vec<String> = units
-                .iter()
-                .filter(|&&u| {
-                    p.ops[u as usize].k != K::Loop && plan.local[p.ops[u as usize].d as usize]
-                })
-                .map(|&u| format!("t{}", p.ops[u as usize].d))
-                .collect();
-            if !locals.is_empty() {
-                e.line(&format!("uint64_t {};", locals.join(", ")));
-            }
-            if ins.k == K::Decode {
-                return e.decode(root, k);
-            }
-            // What it writes to the state and is read, before.
-            let outs: Vec<(u32, Vec<String>)> = match ins.k {
-                K::Loop => p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec(),
-                K::Decode => p.aux.decoders[ins.x as usize].entries.iter().map(|e| e.1).collect(),
-                _ => (0..p.out[root as usize].n).map(|j| ins.d + j).collect(),
-            }
-            .into_iter()
-            .map(|o| (o, e.mark_readers(o, "d", k)))
-            .filter(|(_, ms)| !ms.is_empty())
-            .collect();
-            for (j, (o, _)) in outs.iter().enumerate() {
-                e.line(&format!("uint64_t o{j} = v[{o}];"));
-            }
-            if ins.k == K::Loop {
-                e.looped(root)?;
-            } else {
-                e.tree(root)?;
-            }
-            for (j, (o, ms)) in outs.iter().enumerate() {
-                e.line(&format!("if (o{j} != v[{o}]) {{ {} }}", ms.join(" ")));
-            }
-            Ok(())
+        self.under_dirty("d", np, own_test, |e, q| {
+            e.line(&format!("work += {};", cost(q)));
+            e.partition(q)
         })?;
+        self.line("return work;");
         self.indent = 0;
         self.out.push_str("}\n\n");
+        // Everything, without tests or comparisons.
+        writeln!(self.out, "static void settle_all({pre}_t *m) {{").unwrap();
+        self.indent = 1;
+        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
+        for w in 0..np.div_ceil(64) {
+            self.line(&format!("D[{w}] = 0;"));
+        }
+        for q in 0..np {
+            self.line("{");
+            self.indent += 1;
+            self.partition_all(q)?;
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent = 0;
+        self.out.push_str("}\n\n");
+        // Which: the changed logic while it is a small part of the whole
+        // (with a margin for its tests and comparisons, and their branches),
+        // all of it otherwise, measuring again now and then.
+        let total: usize = (0..np).map(cost).sum();
+        writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
+        self.indent = 1;
+        let any: Vec<String> = (0..np.div_ceil(64)).map(|w| format!("m->dirty[{w}]")).collect();
+        self.line(&format!(
+            "if (!({})) return;",
+            if any.is_empty() { "0".into() } else { any.join(" | ") }
+        ));
+        // Either schedule can be forced when compiling the model.
+        self.out.push_str(
+            "#if defined(SIM_SETTLE_ALL)\n    settle_all(m); return;\n#elif defined(SIM_SETTLE_CHANGED)\n    settle_changed(m); return;\n#endif\n",
+        );
+        self.line(&format!("if (!m->all || ++m->probe >= {PROBE}) {{"));
+        self.line("    m->probe = 0;");
+        self.line("    m->work = m->work - (m->work >> 3) + settle_changed(m);");
+        self.line(&format!(
+            "    m->all = m->work * {} > {}ull;",
+            ALL_RATIO.0,
+            total as u64 * 8 * ALL_RATIO.1
+        ));
+        self.line("} else {");
+        self.line("    settle_all(m);");
+        self.line("}");
+        self.indent = 0;
+        self.out.push_str("}\n\n");
+        Ok(())
+    }
+
+    /// Emits partition `q` to run unconditionally (in `settle_all`).
+    fn partition_all(&mut self, q: u32) -> Result<(), String> {
+        let p = self.p;
+        let plan = self.plan;
+        let units = &plan.parts[q as usize];
+        let root = *units.last().unwrap();
+        let ins = p.ops[root as usize];
+        let locals: Vec<String> = units
+            .iter()
+            .filter(|&&u| {
+                p.ops[u as usize].k != K::Loop && plan.local[p.ops[u as usize].d as usize]
+            })
+            .map(|&u| format!("t{}", p.ops[u as usize].d))
+            .collect();
+        if !locals.is_empty() {
+            self.line(&format!("uint64_t {};", locals.join(", ")));
+        }
+        match ins.k {
+            K::Loop => self.looped(root),
+            K::Decode => {
+                // All comparisons, and the value they are of (for the next
+                // incremental update).
+                self.tree(root)?;
+                let line = format!("v[{}] = {}; v[{}] = 1;", ins.d, self.w(ins.a), ins.d + 1);
+                self.line(&line);
+                Ok(())
+            }
+            _ => self.tree(root),
+        }
+    }
+
+    /// Emits partition `q`, marking the partitions that read what it
+    /// changed.
+    fn partition(&mut self, q: u32) -> Result<(), String> {
+        let p = self.p;
+        let plan = self.plan;
+        let units = &plan.parts[q as usize];
+        let root = *units.last().unwrap();
+        let ins = p.ops[root as usize];
+        // Locals of the partition.
+        let locals: Vec<String> = units
+            .iter()
+            .filter(|&&u| {
+                p.ops[u as usize].k != K::Loop && plan.local[p.ops[u as usize].d as usize]
+            })
+            .map(|&u| format!("t{}", p.ops[u as usize].d))
+            .collect();
+        if !locals.is_empty() {
+            self.line(&format!("uint64_t {};", locals.join(", ")));
+        }
+        if ins.k == K::Decode {
+            return self.decode(root, q);
+        }
+        // What it writes to the state and other partitions read, before.
+        let outs: Vec<(u32, Vec<String>)> = match ins.k {
+            K::Loop => p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec(),
+            _ => (0..p.out[root as usize].n).map(|j| ins.d + j).collect(),
+        }
+        .into_iter()
+        .map(|o| (o, self.mark_readers(o, "d", q)))
+        .filter(|(_, ms)| !ms.is_empty())
+        .collect();
+        for (j, (o, _)) in outs.iter().enumerate() {
+            self.line(&format!("uint64_t o{j} = v[{o}];"));
+        }
+        if ins.k == K::Loop {
+            self.looped(root)?;
+        } else {
+            self.tree(root)?;
+        }
+        for (j, (o, ms)) in outs.iter().enumerate() {
+            self.line(&format!("if (o{j} != v[{o}]) {{ {} }}", ms.join(" ")));
+        }
         Ok(())
     }
 
@@ -1129,7 +1229,10 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         .unwrap();
     }
     writeln!(h, "    uint8_t clk[{}];", p.clocks.len().max(1)).unwrap();
-    writeln!(h, "    /* Partitions of the logic to run. */\n    uint64_t dirty[{dirty_words}];")
+    writeln!(
+        h,
+        "    /* Partitions of the logic to run; recent work when running only\n       those (times 8), whether running all, settles until measuring again. */\n    uint64_t dirty[{dirty_words}], work;\n    uint32_t all, probe;"
+    )
         .unwrap();
     writeln!(h, "}} {pre}_t;\n").unwrap();
     writeln!(h, "/* Sets the initial state and settles it. */\nvoid {pre}_init({pre}_t *m);")
