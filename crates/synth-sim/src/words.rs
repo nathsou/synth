@@ -138,7 +138,48 @@ pub fn merge_bit_muxes(m: &mut Module) -> usize {
                 _ => unreachable!(),
             }
         };
+        // Or by where another input, or the output, sits: whichever order
+        // leaves the fewest runs of consecutive bits to gather.
+        let inputs = |c: &CellKind| -> Vec<SigBit> {
+            match c {
+                CellKind::Mux { a, b, y, .. } => vec![a.0[0], b.0[0], y.0[0]],
+                CellKind::Pmux { default, cases, y, .. } => std::iter::once(default)
+                    .chain(cases)
+                    .chain(std::iter::once(y))
+                    .map(|s| s.0[0])
+                    .collect(),
+                _ => unreachable!(),
+            }
+        };
+        let runs = |cells: &[CellId]| -> usize {
+            let ins: Vec<Vec<SigBit>> = cells.iter().map(|&c| inputs(&m.cells[c].kind)).collect();
+            let mut n = 0;
+            for j in 0..ins[0].len() {
+                let mut prev: Option<(u64, u64, u64)> = None;
+                for v in &ins {
+                    if v[j].is_const() {
+                        prev = None;
+                        continue;
+                    }
+                    let p = pos(v[j]);
+                    if prev.is_none_or(|q| (q.0, q.1, q.2 + 1) != p) {
+                        n += 1;
+                    }
+                    prev = Some(p);
+                }
+            }
+            n
+        };
         cells.sort_by_key(|&c| pos(first(&m.cells[c].kind)));
+        let mut best = runs(&cells);
+        for j in 0..inputs(&m.cells[cells[0]].kind).len() {
+            let mut other = cells.clone();
+            other.sort_by_key(|&c| pos(inputs(&m.cells[c].kind)[j]));
+            let r = runs(&other);
+            if r < best {
+                (cells, best) = (other, r);
+            }
+        }
         for chunk in cells.chunks(64) {
             if chunk.len() < 2 {
                 continue;

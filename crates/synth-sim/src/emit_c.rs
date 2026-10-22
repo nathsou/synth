@@ -246,7 +246,14 @@ fn marks(parts: impl IntoIterator<Item = u32>, dirty: &str) -> Vec<String> {
     for q in parts {
         *words.entry(q / 64).or_default() |= 1 << (q % 64);
     }
-    words.into_iter().map(|(w, m)| format!("{dirty}[{w}] |= {};", hex(m))).collect()
+    words
+        .into_iter()
+        .map(|(w, m)| match dirty {
+            // The locals `settle` keeps the dirty bits in.
+            "d" => format!("{dirty}{w} |= {};", hex(m)),
+            _ => format!("{dirty}[{w}] |= {};", hex(m)),
+        })
+        .collect()
 }
 
 struct Emitter<'p> {
@@ -289,6 +296,12 @@ impl Emitter<'_> {
             .map(|&r| self.plan.part_of[r as usize])
             .filter(|&q| q != NONE)
             .collect()
+    }
+
+    /// Statements marking the partitions reading the slot holding `word`
+    /// (except `skip`) in dirty words `dirty`.
+    fn mark_readers(&self, word: u32, dirty: &str, skip: u32) -> Vec<String> {
+        marks(self.reader_parts(word).into_iter().filter(|&q| q != skip), dirty)
     }
 
     fn copy(&mut self, d: u32, a: u32, w: u32) {
@@ -754,19 +767,17 @@ impl Emitter<'_> {
 
     /// Emits the partitions: each runs when its bit is set and marks the
     /// partitions reading what it changed.
-    fn settle(&mut self) -> Result<(), String> {
-        let p = self.p;
-        let plan = self.plan;
-        let pre = self.prefix.clone();
-        writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
-        self.indent = 1;
-        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
-        // Nested tests skip runs of clean partitions: a word of dirty bits,
-        // then groups within it (most partitions are clean at any time).
-        let np = plan.parts.len() as u32;
+    /// Emits `body(i)` for each `i` in `0..n` whose dirty bit (bit `i % 64`
+    /// of local `{var}{i / 64}`) is set, under nested tests that skip runs of
+    /// clean ones: a word, then groups within it (see [`LEVELS`]).
+    fn under_dirty(
+        &mut self,
+        var: &str,
+        n: u32,
+        mut body: impl FnMut(&mut Self, u32) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut open = 0;
-        for (k, units) in plan.parts.iter().enumerate() {
-            let k = k as u32;
+        for k in 0..n {
             for (l, &size) in LEVELS.iter().enumerate() {
                 if !k.is_multiple_of(size) {
                     continue;
@@ -777,24 +788,50 @@ impl Emitter<'_> {
                     self.line("}");
                     open -= 1;
                 }
-                let n = size.min(np - k);
-                let bits = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << (k % 64) };
+                let c = size.min(n - k);
+                let bits = if c == 64 { u64::MAX } else { ((1u64 << c) - 1) << (k % 64) };
                 if size == 64 {
-                    self.line(&format!("if (D[{}]) {{", k / 64));
-                } else if n > 1 {
-                    self.line(&format!("if (D[{}] & {}) {{", k / 64, hex(bits)));
+                    self.line(&format!("if ({var}{}) {{", k / 64));
+                } else if c > 1 {
+                    self.line(&format!("if ({var}{} & {}) {{", k / 64, hex(bits)));
                 } else {
-                    // A single partition: its own test suffices.
+                    // A single one: its own test suffices.
                     self.line("{");
                 }
                 self.indent += 1;
                 open += 1;
             }
+            self.line(&format!("if ({var}{} & {}) {{", k / 64, hex(1u64 << (k % 64))));
+            self.indent += 1;
+            body(self, k)?;
+            self.indent -= 1;
+            self.line("}");
+        }
+        for _ in 0..open {
+            self.indent -= 1;
+            self.line("}");
+        }
+        Ok(())
+    }
+
+    fn settle(&mut self) -> Result<(), String> {
+        let p = self.p;
+        let plan = self.plan;
+        let pre = self.prefix.clone();
+        writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
+        self.indent = 1;
+        self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
+        // The dirty bits live in locals (registers) while partitions run in
+        // order: a partition only marks later ones, so none needs clearing
+        // once run, and all are clear at the end.
+        let np = plan.parts.len() as u32;
+        for w in 0..np.div_ceil(64) {
+            self.line(&format!("uint64_t d{w} = D[{w}]; D[{w}] = 0;"));
+        }
+        self.under_dirty("d", np, |e, k| {
+            let units = &plan.parts[k as usize];
             let root = *units.last().unwrap();
             let ins = p.ops[root as usize];
-            self.line(&format!("if (D[{}] & {}) {{", k / 64, hex(1u64 << (k % 64))));
-            self.indent += 1;
-            self.line(&format!("D[{}] &= ~{};", k / 64, hex(1u64 << (k % 64))));
             // Locals of the partition.
             let locals: Vec<String> = units
                 .iter()
@@ -804,37 +841,31 @@ impl Emitter<'_> {
                 .map(|&u| format!("t{}", p.ops[u as usize].d))
                 .collect();
             if !locals.is_empty() {
-                self.line(&format!("uint64_t {};", locals.join(", ")));
+                e.line(&format!("uint64_t {};", locals.join(", ")));
             }
-            // What it writes to the state, before.
-            let outs: Vec<u32> = match ins.k {
+            // What it writes to the state and is read, before.
+            let outs: Vec<(u32, Vec<String>)> = match ins.k {
                 K::Loop => p.aux.lists[ins.b as usize..(ins.b + ins.c) as usize].to_vec(),
                 K::Decode => p.aux.decoders[ins.x as usize].entries.iter().map(|e| e.1).collect(),
                 _ => (0..p.out[root as usize].n).map(|j| ins.d + j).collect(),
-            };
-            for (j, &o) in outs.iter().enumerate() {
-                self.line(&format!("uint64_t o{j} = v[{o}];"));
+            }
+            .into_iter()
+            .map(|o| (o, e.mark_readers(o, "d", k)))
+            .filter(|(_, ms)| !ms.is_empty())
+            .collect();
+            for (j, (o, _)) in outs.iter().enumerate() {
+                e.line(&format!("uint64_t o{j} = v[{o}];"));
             }
             if ins.k == K::Loop {
-                self.looped(root)?;
+                e.looped(root)?;
             } else {
-                self.tree(root)?;
+                e.tree(root)?;
             }
-            for (j, &o) in outs.iter().enumerate() {
-                let parts: Vec<u32> =
-                    self.reader_parts(o).into_iter().filter(|&q| q != k).collect();
-                let ms = marks(parts, "D");
-                if !ms.is_empty() {
-                    self.line(&format!("if (o{j} != v[{o}]) {{ {} }}", ms.join(" ")));
-                }
+            for (j, (o, ms)) in outs.iter().enumerate() {
+                e.line(&format!("if (o{j} != v[{o}]) {{ {} }}", ms.join(" ")));
             }
-            self.indent -= 1;
-            self.line("}");
-        }
-        for _ in 0..open {
-            self.indent -= 1;
-            self.line("}");
-        }
+            Ok(())
+        })?;
         self.indent = 0;
         self.out.push_str("}\n\n");
         Ok(())
@@ -981,7 +1012,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
             && p.word_kind[*word as usize] == SlotKind::Input
             && p.slot_of[*word as usize] == *word
         {
-            let ms = marks(e.reader_parts(*word), "m->dirty");
+            let ms = e.mark_readers(*word, "m->dirty", NONE);
             writeln!(
                 h,
                 "static inline void {pre}_set_{id}({pre}_t *m, uint64_t x) {{ x &= {}; if (m->v[{word}] != x) {{ m->v[{word}] = x; {} }} }}",
@@ -1053,12 +1084,12 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
             Ok(())
         })?;
         e.function(&format!("commit{k}"), |e| {
-            for ins in d.commit.iter().chain(&d.gated) {
+            // Updates `ins`, marking the readers of its result if it changed.
+            let update = |e: &mut Emitter, ins: &Ins| -> Result<(), String> {
                 let n = nwords(ins.w);
-                let ms = marks(e.reader_parts(ins.d), "D");
+                let ms = e.mark_readers(ins.d, "D", NONE);
                 if ms.is_empty() {
-                    e.ins(ins)?;
-                    continue;
+                    return e.ins(ins);
                 }
                 e.line("{");
                 for j in 0..n {
@@ -1069,8 +1100,12 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
                     (0..n).map(|j| format!("o{j} != v[{}]", ins.d + j)).collect();
                 e.line(&format!("if ({}) {{ {} }}", diff.join(" || "), ms.join(" ")));
                 e.line("}");
-            }
-            Ok(())
+                Ok(())
+            };
+            // (Gated flip-flops too: most have a changed input at every
+            // edge, and their dirty bits would cost every value they read a
+            // comparison.)
+            d.commit.iter().chain(&d.gated).try_for_each(|ins| update(e, ins))
         })?;
     }
 
