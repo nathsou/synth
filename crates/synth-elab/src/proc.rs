@@ -966,7 +966,9 @@ impl<'a> Elab<'a> {
             let keeps = d.0[j] == ks[j] || differ.iter().any(|&i| vs[i].0[j] == ks[j]);
             (differ, keeps)
         };
-        let mut groups: Vec<((Vec<usize>, bool), Vec<usize>)> = Vec::new();
+        // (Shape, bits of that shape.)
+        type Group = ((Vec<usize>, bool), Vec<usize>);
+        let mut groups: Vec<Group> = Vec::new();
         for j in 0..ks.len() {
             let sh = shape(j);
             match groups.iter_mut().find(|g| g.0 == sh) {
