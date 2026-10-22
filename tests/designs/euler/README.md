@@ -44,3 +44,34 @@ synth build euler_top.v report.v p031.v --top euler_top \
   -D SOLVER=euler31 -D ANSWER_WIDTH=17 \
   --device hx8k --package cb132 --pcf alchitry_cu.pcf -o euler31.bin
 ```
+
+## Alchitry Au with the Io shield
+
+`euler_au_io.v` and `alchitry_au_io.xdc` are the shell for the Alchitry Au
+(V1, XC7A35T) with the Io V1 shield. The pins come from Alchitry Labs' Au
+pinout and Io V1 constraints, with the buttons and switches pulled down.
+The solver runs as on the Cu and the same UART report goes to the USB
+serial port. The shield shows the result in decimal, four digits at a
+time from the least significant: any button pages through the rest (the
+Au's LEDs show the page, one-hot). The first DIP switch shows the cycle
+count instead, and the 24 shield LEDs show the low 24 bits in binary.
+
+The Artix-7 flow is experimental: its timing estimate is uncalibrated, so
+builds need `--timing-allow-fail`, and its bitstreams have not been run on
+hardware yet. Load to SRAM first (it is lost at power-off). The database
+comes from `tools/fetch_xc7_db.sh` (see `docs/ARTIX7.md`).
+
+```sh
+tools/fetch_xc7_db.sh /tmp/prjxray-db
+cd tests/designs/euler
+synth build euler_au_io.v report.v p031.v --top euler_au_io \
+  -D SOLVER=euler31 -D ANSWER_WIDTH=17 \
+  --family artix7 --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
+  --xdc alchitry_au_io.xdc --timing-allow-fail -o euler31_au.bit
+openFPGALoader -b alchitry_au euler31_au.bit   # to SRAM
+picocom -b 115200 /dev/ttyUSB1                 # "73682 209"
+```
+
+`-o name.bin` writes the raw stream that Alchitry's loader takes instead of
+a `.bit` file. For another problem, take its answer width and extra
+sources (`bcd.v` for 25 and 57) from `designs.txt`.
