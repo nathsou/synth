@@ -1,14 +1,25 @@
 // Runs the playground's WebAssembly build off the main thread.
-// Messages: {id, method, body} → {id, ok, out} or {id, ok: false, error}.
+// Messages: {id, method, body} → {id, ok, out} or {id, ok: false, error},
+// after any number of {id, progress} while the flow runs.
 
 let wasm = null;
+// The request being answered, for its progress messages.
+let current = 0;
 
 async function load() {
   const url = new URL('synth_playground.wasm', self.location);
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`synth_playground.wasm: HTTP ${resp.status}`);
   const bytes = await resp.arrayBuffer();
-  const env = { synth_now_ms: () => performance.now(), synth_fs_read: fsRead, synth_fs_take: fsTake };
+  const env = {
+    synth_now_ms: () => performance.now(),
+    synth_fs_read: fsRead,
+    synth_fs_take: fsTake,
+    synth_progress: (ptr, len) => {
+      const progress = JSON.parse(dec.decode(new Uint8Array(wasm.memory.buffer, ptr, len).slice()));
+      self.postMessage({ id: current, progress });
+    },
+  };
   const { instance } = await WebAssembly.instantiate(bytes, { env });
   return instance.exports;
 }
@@ -64,7 +75,12 @@ async function prepare(method, body) {
   if (method !== 'run') return;
   let req;
   try { req = JSON.parse(body); } catch { return; }
-  if (typeof req.part === 'string' && req.part.startsWith('xc7')) await bundle(`${req.part}${req.package}-1`);
+  if (typeof req.part !== 'string' || !req.part.startsWith('xc7')) return;
+  const part = `${req.part}${req.package}-1`;
+  if (!bundles.has(part)) {
+    self.postMessage({ id: current, progress: { step: 'elaborate', fraction: null, detail: `downloading the ${req.part} database` } });
+  }
+  await bundle(part);
 }
 
 let ready = load().then((w) => { wasm = w; });
@@ -98,6 +114,7 @@ self.onmessage = async (e) => {
   const { id, method, body } = e.data;
   try {
     await ready;
+    current = id;
     await prepare(method, body);
     const out = call(method, body);
     self.postMessage({ id, ok: true, out });

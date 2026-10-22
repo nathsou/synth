@@ -782,6 +782,10 @@ pub fn place(
         let mut temperature =
             if analytic { ANALYTIC_TEMPERATURE } else { 20.0 } * deviation.max(1e-3);
         let moves = ((objects as f64).powf(4.0 / 3.0) * effort).max(objects as f64) as usize;
+        // Progress: how far the temperature has fallen toward the end of
+        // annealing, on a log scale.
+        let first = temperature;
+        let mut reported = 0.0f64;
         for round in 1.. {
             let (mut tried, mut accepted) = (0, 0);
             for _ in 0..moves {
@@ -814,11 +818,18 @@ pub fn place(
                     "trace: round {round} T {temperature:.3e} rate {rate:.3} window {window} tried {tried} hpwl {wl:.0} cost {total:.4}"
                 );
             }
-            if temperature < 0.005 * total / nets.len() as f64 {
+            let end = 0.005 * total / nets.len() as f64;
+            if temperature < end {
                 break;
             }
+            let cooled = (first / temperature).ln() / (first / end).ln().max(1e-9);
+            reported = reported.max(cooled);
+            synth_core::progress::advance(0.2 + 0.7 * reported, || {
+                format!("annealing: round {round}, {:.0}% of moves accepted", 100.0 * rate)
+            });
         }
         // A final greedy pass.
+        synth_core::progress::advance(0.9, || "greedy pass".into());
         for _ in 0..moves {
             step(rng.below(objects), MIN_WINDOW, 0.0, &mut rng);
         }

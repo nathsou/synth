@@ -87,6 +87,7 @@ code, .mono { font-family: var(--font-code); }
 
 /* ---------- top bar ---------- */
 .topbar {
+  position: relative;
   display: flex; align-items: center; gap: 14px;
   height: 46px; padding: 0 12px; flex: none;
   background: var(--bg-1); border-bottom: 1px solid var(--line);
@@ -121,6 +122,22 @@ button.primary svg { width: 13px; height: 13px; }
 .status.error .dot { background: var(--error); }
 .status.busy .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
+/* Progress of a run: a segment per step of the flow. */
+.status .progress { display: flex; gap: 2px; width: 150px; height: 6px; flex: none; }
+.status .segment { flex-basis: 0; min-width: 3px; background: var(--bg-3); border-radius: 2px; overflow: hidden; }
+.status .fill { height: 100%; background: var(--accent); transition: width .3s ease-out; }
+.status .fill.indeterminate {
+  background: repeating-linear-gradient(-45deg, var(--accent) 0 4px, color-mix(in srgb, var(--accent) 35%, transparent) 4px 8px);
+  background-size: 11.3px 100%; animation: stripes .8s linear infinite;
+}
+@keyframes stripes { to { background-position: 11.3px 0; } }
+.status .progress-text { overflow: hidden; text-overflow: ellipsis; }
+.progress-line {
+  position: absolute; left: 0; bottom: -1px; height: 2px; width: 0;
+  background: var(--accent); opacity: 0; transition: width .4s ease-out, opacity .3s;
+  pointer-events: none;
+}
+.progress-line.active { opacity: 1; }
 
 /* ---------- panes ---------- */
 .main { flex: 1; display: flex; min-height: 0; }

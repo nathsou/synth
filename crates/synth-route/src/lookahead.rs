@@ -59,7 +59,12 @@ impl Lookahead {
         let chunk = samples.len().div_ceil(threads).max(1);
         let search = move |chunk: &[u32]| {
             let mut search = Search::new(g.graph.num_nodes(), classes * cells);
-            for &sink in chunk {
+            for (i, &sink) in chunk.iter().enumerate() {
+                // The first tenth of routing (reports from worker threads
+                // are dropped).
+                synth_core::progress::advance(0.1 * i as f64 / chunk.len() as f64, || {
+                    "building the routing lookahead".into()
+                });
                 for by_delay in [false, true] {
                     search.run(g, class, sink, radius, by_delay);
                 }

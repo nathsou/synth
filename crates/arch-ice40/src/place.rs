@@ -1257,6 +1257,10 @@ impl<'a> Annealer<'a> {
             }
         };
         let mut iters = 0;
+        // Progress: how far the temperature has fallen toward the end of
+        // annealing, on a log scale.
+        let (first, end) = (temp, 0.005 / nets);
+        let mut reported = 0.0f64;
         loop {
             // Criticalities follow the placement; normalise the cost terms.
             self.update_timing();
@@ -1282,9 +1286,14 @@ impl<'a> Annealer<'a> {
             };
             rlim = (rlim * (1.0 - 0.44 + rate)).clamp(1.0, self.width.max(self.height) as f64);
             iters += 1;
-            if temp < 0.005 / nets || iters > 2000 {
+            if temp < end || iters > 2000 {
                 break;
             }
+            let cooled = (first / temp).ln() / (first / end).ln().max(1e-9);
+            reported = reported.max(cooled.max(iters as f64 / 2000.0));
+            synth_core::progress::advance(0.95 * reported, || {
+                format!("annealing: step {iters}, {:.0}% of moves accepted", 100.0 * rate)
+            });
         }
         // Final greedy pass at zero temperature.
         for _ in 0..moves_per_temp * 2 {

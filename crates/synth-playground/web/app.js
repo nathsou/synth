@@ -6,6 +6,7 @@ import { Schematic } from './schematic.js';
 import { ChipView } from './chipview.js';
 import { BitstreamView, renderPipeline, renderTiming, renderProblems, renderLog } from './panels.js';
 import { settings, openSettings } from './settings.js';
+import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
 import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins } from './util.js';
 
 const $ = (id) => document.getElementById(id);
@@ -36,6 +37,10 @@ class App {
     this.devices = [];
     this.view = 'pipeline';
     this.docState = new Map();
+    // The run in progress: {family, start, p}; its elapsed time ticks on
+    // between reports.
+    this.running = null;
+    setInterval(() => this.running && this.renderProgress(), 500);
   }
 
   async start() {
@@ -75,7 +80,7 @@ class App {
       active: ex.files[0].name,
       part: ex.part,
       package: ex.package,
-      top: '',
+      top: ex.top || '',
     };
   }
 
@@ -482,16 +487,81 @@ class App {
     const t0 = performance.now();
     this.status('busy', 'Running the flow…');
     $('run').disabled = true;
+    const state = { family: dev?.family || 'iCE40', start: t0, p: null, steps: [] };
+    const onProgress = (p) => {
+      const now = performance.now();
+      // Null when the run starts (it may have waited for the previous one).
+      if (p === null) Object.assign(state, { start: now, p: null, steps: [] });
+      else {
+        if (p.step !== state.p?.step) state.steps.push([p.step, now]);
+        state.p = p;
+      }
+      this.running = state;
+      this.renderProgress();
+    };
     try {
-      const out = await this.backend.run(req);
+      const out = await this.backend.run(req, onProgress);
+      if (this.running === state) this.running = null;
+      if (out.ok && state.steps.length) this.learnSteps(state);
       this.resultTexts = Object.fromEntries(files.map((f) => [f.name, f.text]));
       this.showResult(out, performance.now() - t0);
     } catch (e) {
       if (e.superseded) return;
       this.status('error', e.message);
     } finally {
+      if (this.running === state) this.running = null;
+      if (!this.running) {
+        // The line fills up, fades out, then goes back to the start.
+        const line = $('progress-line');
+        if (line.classList.contains('active')) line.style.width = '100%';
+        line.classList.remove('active');
+        setTimeout(() => { if (!this.running) line.style.width = '0'; }, 400);
+      }
       $('run').disabled = false;
     }
+  }
+
+  /** Learns the share of each step from a finished run, so that the next
+   *  runs' bars move about evenly. */
+  learnSteps(state) {
+    const end = performance.now();
+    const durations = {};
+    state.steps.forEach(([step, at], i) => {
+      durations[step] = (durations[step] || 0) + ((state.steps[i + 1]?.[1] ?? end) - at);
+    });
+    const key = `progress:${state.family}`;
+    store.set(key, learnProgress(state.family, store.get(key, {}), durations));
+  }
+
+  /** The status bar during a run: a bar with a segment per step of the
+   *  flow, the step, what it is doing and the time so far; and the whole
+   *  run's progress as a line under the top bar. */
+  renderProgress() {
+    const state = this.running;
+    state.learned ??= store.get(`progress:${state.family}`, {});
+    const { segments, fraction, index, count } = progressLayout(state.family, state.p, state.learned);
+    const el = $('status');
+    // Built once per run, then updated, so that the bars move smoothly.
+    if (this.progressView?.state !== state || !el.contains(this.progressView.bar)) {
+      const fills = segments.map(() => h('div', { class: 'fill' }));
+      const bar = h('div', { class: 'progress' },
+        segments.map((s, i) => h('div', { class: 'segment', style: { flexGrow: s.share }, title: s.label }, fills[i])));
+      const step = h('span', { class: 'muted' });
+      const text = h('span', { class: 'progress-text' });
+      el.className = 'status busy';
+      el.replaceChildren(bar, step, text);
+      this.progressView = { state, bar, fills, step, text };
+    }
+    const v = this.progressView;
+    segments.forEach((s, i) => {
+      v.fills[i].classList.toggle('indeterminate', s.fill === null);
+      v.fills[i].style.width = `${100 * (s.fill ?? 1)}%`;
+    });
+    v.step.textContent = index >= 0 ? `${index + 1}/${count}` : '';
+    v.text.textContent = describeProgress(state.p, performance.now() - state.start);
+    const line = $('progress-line');
+    line.classList.add('active');
+    line.style.width = `${100 * fraction}%`;
   }
 
   showResult(out, ms) {

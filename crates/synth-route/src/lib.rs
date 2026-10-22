@@ -465,6 +465,7 @@ pub fn route_with_initial(
         looped = dst;
         Graph { edge_dst: &looped, ..graph }
     };
+    synth_core::progress::advance(0.0, || "preparing the routing graph".into());
     let (preds, pred_edges) = predecessors(&graph);
     let confined = confined_nodes(&graph, &edge_src, &preds, &pred_edges);
     let lookahead = (opts.lookahead_radius > 0).then(|| {
@@ -542,6 +543,8 @@ pub fn route_with_initial(
     to_route.sort_by_key(|&i| std::cmp::Reverse(nets[i].sinks.len()));
     // Last iteration each net was (or is to be) routed in.
     let routed: Vec<AtomicUsize> = (0..nets.len()).map(|_| AtomicUsize::new(usize::MAX)).collect();
+    let mut reported = 0.0f64;
+    synth_core::progress::advance(0.1, || "routing every net".into());
     for iter in 0..opts.max_iterations {
         stats.iterations = iter + 1;
         for &i in &to_route {
@@ -574,11 +577,36 @@ pub fn route_with_initial(
         while k < queue.len() {
             let i = queue[k];
             k += 1;
+            if iter == 0 {
+                let done = k as f64 / queue.len() as f64;
+                synth_core::progress::advance(0.1 + 0.25 * done, || "routing every net".into());
+            }
             let seed = std::mem::take(&mut seeds[i]);
             pass.reroute(&st, &mut scratch[0], i, &mut routes[i], &seed, None, &mut queue)?;
         }
         let overused: Vec<usize> = (0..n).filter(|&k| st.hot[k].occupancy() > 1).collect();
         stats.overused_history.push(overused.len());
+        // Progress: the first iteration routes every net; then congestion
+        // falls (on a log scale) toward none; then the timing rounds.
+        let first = *stats.overused_history.first().unwrap_or(&0) as f64;
+        let negotiated = if timing_rounds > 0 || overused.is_empty() || first == 0.0 {
+            1.0
+        } else {
+            1.0 - (1.0 + overused.len() as f64).ln() / (1.0 + first.max(1.0)).ln()
+        };
+        let fraction = if timing_rounds > 0 {
+            0.9 + 0.1 * timing_rounds as f64 / opts.timing_rounds.max(1) as f64
+        } else {
+            0.35 + 0.55 * negotiated
+        };
+        reported = reported.max(fraction);
+        synth_core::progress::advance(reported, || {
+            if timing_rounds > 0 {
+                format!("iteration {}: rerouting critical nets", iter + 1)
+            } else {
+                format!("iteration {}: {} congested wires", iter + 1, overused.len())
+            }
+        });
         if let Some(p) = hooks.progress.as_mut() {
             p(iter, routed.iter().filter(|r| r.load(Relaxed) == iter).count(), &overused);
         }

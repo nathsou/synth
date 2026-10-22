@@ -11,6 +11,7 @@ use std::{
     path::Path,
 };
 use synth_core::FxHashMap;
+use synth_core::progress;
 use synth_core::time::Instant;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
@@ -56,8 +57,10 @@ pub fn implement(
         log.push(format!("XDC constrains ports the design does not have: {}", unused.join(", ")));
     }
     let xdc = &xdc;
+    progress::step("pack", "");
     let mut p = pack::pack(&mut nl)?;
     log.push(format!("packed {} slices, {} carry chains", p.slices.len(), p.chains.len()));
+    progress::step("device", &format!("loading {}", opts.part));
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
@@ -67,8 +70,10 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    progress::advance(0.6, || "building the routing graph".into());
     let graph = RoutingGraph::new(&db)?;
     let clocked = graph.clocked(&db)?;
+    progress::step("place", "");
     let placement =
         place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
@@ -78,6 +83,7 @@ pub fn implement(
         let a = timer.analyze(&predictor(&db, &nl, q, &placement));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
+    progress::advance(0.95, || "detailed placement".into());
     let moves = crate::detail::refine(&db, &nl, &mut p, &placement, opts.seed, &mut retime)?;
     log.push(format!(
         "detailed placement: {moves} lane moves ({:.1}s)",
@@ -89,6 +95,7 @@ pub fn implement(
     if let Ok(path) = std::env::var("SYNTH_XC7_MACROS") {
         std::fs::write(&path, packing_macros(&nl, &p)).map_err(|e| e.to_string())?;
     }
+    progress::step("route", "");
     let (mut requests, names, request_nets, owners, blocked_edges) =
         requests(&db, &nl, &p, &placement, &graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
@@ -122,7 +129,7 @@ pub fn implement(
         start.elapsed().as_secs_f64()
     ));
     for line in &log {
-        eprintln!("info: {line}");
+        progress::info(line);
     }
     let route_opts = synth_route::RouteOptions {
         // Wires span up to 18 tiles: a lookahead by wire class bounds the
@@ -144,12 +151,12 @@ pub fn implement(
         timing_rounds: 3,
         ..Default::default()
     };
-    let mut progress = |iteration: usize, routed: usize, overused: &[usize]| {
-        eprintln!(
-            "info: route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
+    let mut iterations = |iteration: usize, routed: usize, overused: &[usize]| {
+        progress::info(&format!(
+            "route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
             overused.len(),
             start.elapsed().as_secs_f64()
-        );
+        ));
     };
     let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
         let wires =
@@ -163,15 +170,15 @@ pub fn implement(
             .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
             .collect();
         let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
-        eprintln!(
-            "info: routed timing estimate: {:.3} ns ({:.1}s)",
+        progress::info(&format!(
+            "routed timing estimate: {:.3} ns ({:.1}s)",
             score / 1000.0,
             start.elapsed().as_secs_f64()
-        );
+        ));
         synth_route::Retimed { criticality, score }
     };
     let hooks = synth_route::RouteHooks {
-        progress: Some(&mut progress),
+        progress: Some(&mut iterations),
         retime: Some(&mut retime),
         node_class: &graph.class,
         blocked_edges: &blocked_edges,
@@ -196,6 +203,7 @@ pub fn implement(
             }
         })?;
     crate::routing::verify(graph.graph(), &requests, &routes)?;
+    progress::step("bitstream", "");
     let pins = lut_pins(&graph, &nl, &p, &placement, &routes);
     let mut features = cell_features(&db, &nl, &p, &placement, xdc, &pins)?;
     features.extend(graph.features(&db, &routes));
@@ -214,6 +222,7 @@ pub fn implement(
         features.len(),
         start.elapsed().as_secs_f64()
     ));
+    progress::step("timing", "");
     let wires = crate::sta::routed_wires(&db, &graph, &requests, &request_nets, &routes, &owners);
     let routed = |c, n| wires.get(&(c, n)).copied().unwrap_or(0.0);
     let timing = timer.analyze(&routed).clocks;

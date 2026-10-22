@@ -45,6 +45,11 @@ module top(in clk: clock, in btn: bool, out led: bool) {
 target/release/synth build top.weft --device hx1k --package vq100 --pcf pins.pcf -o top.bin
 ```
 
+On a terminal, `synth build`, `synth synth` and `synth pnr` show their
+progress on the last line: the step of the flow, a bar for the whole run,
+what the step is doing (the annealing round, the routing iteration and the
+wires still congested) and the time so far, with the log above it.
+
 See the [specification](docs/WEFT.md) and the [examples](examples/weft). Verilog
 modules can be used from Weft through `extern module` declarations.
 
@@ -60,7 +65,9 @@ files that would change).
 `synth playground` opens the whole flow in the browser: edit Weft or Verilog
 and see the design after every pass as a schematic, from the module level down
 to gates and LUTs, then the cells and routed wires on the actual iCE40 die,
-the critical paths and every configuration bit, decoded.
+the critical paths and every configuration bit, decoded. Its examples (the
+Project Euler solvers among them) build for the Nandland Go, the Alchitry Cu
+and Au and the Nexys A7, with `--xc7-db` for the Artix-7 boards.
 
 ```sh
 target/release/synth playground        # http://127.0.0.1:8080/

@@ -30,6 +30,7 @@ pub fn optimize_observed(
 ) -> Result<lutmap::Mapping, String> {
     assert!(opts.wide.is_none(), "wide functions are mapped by `widen`");
     let t = Instant::now();
+    synth_core::progress::note(|| format!("optimising {} gates", net.aig.num_ands()));
     let before = net.aig.num_ands();
     let mut merged = 0;
     let mut chain_bits = 0;
@@ -90,6 +91,7 @@ pub fn optimize_observed(
         let _ = std::fs::write(path, net.aig.to_aiger());
     }
     let t = Instant::now();
+    synth_core::progress::note(|| "structural choices".into());
     let mut snapshots = vec![&net.aig, &balanced, &fraiged];
     snapshots.extend(unfraiged.as_ref());
     snapshots.extend([&compressed, &compressed2, &refactored]);
@@ -102,6 +104,7 @@ pub fn optimize_observed(
     // Candidate mappings are compared on their netlists: shallower, then
     // fewer LUTs. Choices usually help, but not always.
     let t = Instant::now();
+    synth_core::progress::note(|| "mapping to LUTs".into());
     let main = std::mem::take(&mut net.aig);
     let mut best = map_best(net, choices, opts, &timing(net), &cost)?;
     let plain = map_best(net, ChoiceAig::plain(main.clone()), opts, &timing(net), &cost)?;
@@ -118,6 +121,7 @@ pub fn optimize_observed(
     // deeper, or gets shallower without growing.
     let mut prev = main;
     for round in 1..=remap_rounds {
+        synth_core::progress::note(|| format!("remapping, round {round}"));
         let lg = lutmap::lut_graph(&best.graph, &best.mapping);
         let restructured = crate::opt::compress2(&lg);
         let choices = crate::choice::build(&[&restructured, &lg, &prev], &Default::default());

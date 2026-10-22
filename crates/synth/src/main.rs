@@ -1,6 +1,14 @@
 //! The `synth` command-line tool.
 
+/// Prints `info: …` to stderr, above any progress line.
+macro_rules! info {
+    ($($t:tt)*) => {
+        synth_core::progress::info(&format!($($t)*))
+    };
+}
+
 mod args;
+mod progress;
 mod xc7;
 
 use std::process::ExitCode;
@@ -85,6 +93,12 @@ PNR OPTIONS:
               [--incremental [<checkpoint>]]
 ";
 
+/// Whether the command line selects the Artix-7 flow.
+fn xc7_family(argv: &[String]) -> bool {
+    argv.windows(2).any(|w| w[0] == "--family" && matches!(w[1].as_str(), "artix7" | "xc7"))
+        || argv.iter().any(|a| matches!(a.as_str(), "--family=artix7" | "--family=xc7"))
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
@@ -98,9 +112,10 @@ fn main() -> ExitCode {
         }
         Some("check") => cmd_check(&argv[1..]),
         Some("elab") => cmd_elab(&argv[1..]),
-        Some("build") => cmd_build(&argv[1..]),
-        Some("synth") => cmd_synth(&argv[1..]),
-        Some("pnr") => cmd_pnr(&argv[1..]),
+        // The flows show their progress on a terminal.
+        Some("build") => progress::run(xc7_family(&argv), || cmd_build(&argv[1..])),
+        Some("synth") => progress::run(xc7_family(&argv), || cmd_synth(&argv[1..])),
+        Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
         Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
         Some("unpack-xc7") => xc7::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
@@ -153,8 +168,10 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
         return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
     }
     let t = std::time::Instant::now();
+    synth_core::progress::step("elaborate", "");
     let m = load_rtl(a)?;
-    eprintln!("info: elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    info!("elaborated in {:.2}s", t.elapsed().as_secs_f64());
+    synth_core::progress::step("synthesize", "");
     let (nl, log) = if family == "ice40" {
         let mut synth_opts = arch_ice40::synth::SynthOptions::default();
         if let Some(value) = a.value("--carry-min-width") {
@@ -173,13 +190,10 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
         arch_xc7::synth::synthesize(m)?
     };
     for l in &log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     let stats = nl.stats();
-    eprintln!(
-        "info: {}",
-        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
-    );
+    info!("{}", stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
     Ok(nl)
 }
 
@@ -429,7 +443,7 @@ fn implement(
         Ok(bytes) => match arch_ice40::checkpoint::Checkpoint::decode(&bytes) {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("info: ignoring checkpoint {path}: {e}; using fresh PnR");
+                info!("ignoring checkpoint {path}: {e}; using fresh PnR");
                 None
             }
         },
@@ -475,7 +489,7 @@ fn checkpoint_path(
     std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
     let path = format!("{dir}/{}-{}-{:016x}.chk", opts.part, opts.package, key.finish());
     a.set_value("--incremental", path.clone());
-    eprintln!("info: incremental checkpoint: {path}");
+    info!("incremental checkpoint: {path}");
     Ok(Some(path))
 }
 
@@ -502,7 +516,7 @@ fn write_checkpoint(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// and never replaces the previous checkpoint.
 fn finish_flow(res: &arch_ice40::flow::FlowResult, a: &mut Args) -> Result<(), String> {
     for l in &res.log {
-        eprintln!("info: {l}");
+        info!("{l}");
     }
     if let Some(out) = a.value("-o") {
         write(&out, &res.config.to_bin())?;
@@ -559,7 +573,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
         let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         return m.ok_or_else(|| format!("{} error(s)", diags.error_count()));
     }
@@ -580,7 +594,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     } else {
         let (src, diags) = synth_verilog::parse_files(&mut sm, &verilog, &preproc_options(a));
         if !diags.items.is_empty() {
-            eprint!("{}", diags.render(&sm));
+            synth_core::progress::eprint(&diags.render(&sm));
         }
         if diags.has_errors() {
             return Err(format!("{} error(s)", diags.error_count()));
@@ -591,14 +605,14 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     let prelude = [("ice40 primitives", arch_ice40::WEFT_PRELUDE)];
     let (m, diags) = synth_weft::compile(&mut sm, &weft, &prelude, src.as_ref(), &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     let warnings =
         diags.items.iter().filter(|d| d.severity == synth_core::Severity::Warning).count();
     match m {
         Some(m) => {
             if warnings > 0 {
-                eprintln!("info: {warnings} warning(s)");
+                info!("{warnings} warning(s)");
             }
             Ok(m)
         }
@@ -641,7 +655,7 @@ fn load_verilog(
     }
     let (src, diags) = synth_verilog::parse_files(&mut sm, &files, &opts);
     if !diags.items.is_empty() {
-        eprint!("{}", diags.render(&sm));
+        synth_core::progress::eprint(&diags.render(&sm));
     }
     if diags.has_errors() {
         return Err(format!("{} error(s)", diags.error_count()));
@@ -659,31 +673,31 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         "two-state" => opt::two_state(m),
         "merge" => {
             let n = opt::merge_identical(m);
-            eprintln!("info: merge: {n} duplicate cells");
+            info!("merge: {n} duplicate cells");
         }
         "fsm" => {
             let n = synth_rtl::fsm::simplify_state_compares(m);
-            eprintln!("info: fsm: {n} state comparisons simplified");
+            info!("fsm: {n} state comparisons simplified");
         }
         "trees" => {
             let n = opt::chains_to_trees(m);
-            eprintln!("info: trees: {n} multiplexer chains as trees");
+            info!("trees: {n} multiplexer chains as trees");
         }
         "share" => {
             let n = opt::share_arith(m);
-            eprintln!("info: share: {n} multiplexed operations shared");
+            info!("share: {n} multiplexed operations shared");
         }
         "wreduce" => {
             let n = opt::reduce_widths(m);
-            eprintln!("info: wreduce: {n} result bits constant");
+            info!("wreduce: {n} result bits constant");
         }
         "shiftmul" => {
             let n = opt::shift_by_multiple(m);
-            eprintln!("info: shiftmul: {n} shifts by multiples as multiplexers");
+            info!("shiftmul: {n} shifts by multiples as multiplexers");
         }
         "dff" => {
             let n = synth_rtl::dff::extract_controls(m);
-            eprintln!("info: dff: {n} flip-flop bits gained controls");
+            info!("dff: {n} flip-flop bits gained controls");
         }
         "memff" => {
             if mem::remove_feedback_writes(m) > 0 {
@@ -691,7 +705,7 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
             }
             mem::merge_write_ports(m);
             let n = mem::merge_read_ffs(m);
-            eprintln!("info: memff: {n} read ports made synchronous");
+            info!("memff: {n} read ports made synchronous");
         }
         "memtrans" => {
             for mi in mems() {
@@ -741,11 +755,11 @@ fn cmd_check(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["-I", "-D", "-P", "--top"], &[])?;
     if input_files(&a).iter().any(|p| is_weft(p)) {
         let m = load_rtl(&mut a)?;
-        eprintln!("info: `{}` checked: no errors", m.name);
+        info!("`{}` checked: no errors", m.name);
         return Ok(());
     }
     let (_, src) = load_verilog(&mut a)?;
-    eprintln!("info: parsed {} module(s)", src.modules.len());
+    info!("parsed {} module(s)", src.modules.len());
     Ok(())
 }
 
@@ -758,8 +772,8 @@ fn cmd_elab(argv: &[String]) -> Result<(), String> {
         run_rtl_pass(&mut m, p)?;
     }
     let stats = m.stats();
-    eprintln!(
-        "info: {} wires, cells: {}",
+    info!(
+        "{} wires, cells: {}",
         m.wires.len(),
         stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     );

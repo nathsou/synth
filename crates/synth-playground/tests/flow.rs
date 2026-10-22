@@ -8,6 +8,7 @@ fn request(ex: &Json) -> Json {
         .with("pins", ex.at(&["pins"]).clone())
         .with("part", ex.at(&["part"]).clone())
         .with("package", ex.at(&["package"]).clone())
+        .with("top", ex.at(&["top"]).clone())
         // Less placement effort: the test checks the data, not its quality.
         .with("effort", 0.3)
 }
@@ -101,6 +102,7 @@ fn board_request(ex: &Json, part: &str, package: &str) -> Json {
         .with("files", ex.at(&["files"]).clone())
         .with("pins", dev.at(&["pins", package]).clone())
         .with("clock_hz", dev.at(&["clock_hz", package]).clone())
+        .with("top", ex.at(&["top"]).clone())
         .with("part", part)
         .with("package", package)
         .with("effort", 0.3)
@@ -118,7 +120,8 @@ fn run_on_boards(boards: &[(&str, &str, &[&str])]) {
             let out = Json::parse(&synth_playground::handle("run", &req.dump())).unwrap();
             if too_big.contains(&id) {
                 let err = out.at(&["error"]).as_str().unwrap_or_default();
-                assert!(err.contains("does not fit"), "{id} on {part}: {}", out.dump());
+                let full = err.contains("does not fit") || err.contains("not enough");
+                assert!(full, "{id} on {part}: {}", out.dump());
                 continue;
             }
             assert_eq!(

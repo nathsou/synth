@@ -21,6 +21,7 @@ pub mod server;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+use synth_core::progress;
 use synth_core::time::Instant;
 use synth_core::{Diagnostics, FileId, Json, Severity, SourceMap};
 
@@ -34,6 +35,8 @@ pub struct Example {
     /// The device it starts on; its pins come from the board for it.
     pub part: &'static str,
     pub package: &'static str,
+    /// The top module, where it cannot be inferred (empty otherwise).
+    pub top: &'static str,
 }
 
 /// A board, and the pins of every port the examples use on it, in its
@@ -159,6 +162,7 @@ pub const EXAMPLES: &[Example] = &[
         files: &[("blinky.weft", include_str!("../../../examples/weft/blinky.weft"))],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "hello",
@@ -170,6 +174,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "echo",
@@ -181,6 +186,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "blinky_ram",
@@ -189,6 +195,7 @@ pub const EXAMPLES: &[Example] = &[
         files: &[("blinky_ram.weft", include_str!("../../../examples/weft/blinky_ram.weft"))],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "breathe",
@@ -197,6 +204,7 @@ pub const EXAMPLES: &[Example] = &[
         files: &[("breathe.weft", include_str!("../../../examples/weft/breathe.weft"))],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "life",
@@ -208,6 +216,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "rv_single",
@@ -221,6 +230,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "ct256",
+        top: "",
     },
     Example {
         id: "rv_multi",
@@ -234,6 +244,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "ct256",
+        top: "",
     },
     Example {
         id: "rv_pipe",
@@ -247,6 +258,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "ct256",
+        top: "",
     },
     Example {
         id: "blinky_ram_v",
@@ -255,6 +267,7 @@ pub const EXAMPLES: &[Example] = &[
         files: &[("blinky_ram.v", include_str!("../../../tests/designs/blinky_ram/blinky_ram.v"))],
         part: "hx1k",
         package: "vq100",
+        top: "",
     },
     Example {
         id: "euler10",
@@ -268,6 +281,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler14",
@@ -281,6 +295,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler25",
@@ -295,6 +310,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler31",
@@ -308,6 +324,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler43",
@@ -321,6 +338,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler48",
@@ -334,6 +352,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler57",
@@ -348,6 +367,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler58",
@@ -361,6 +381,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler92",
@@ -374,6 +395,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
     Example {
         id: "euler97",
@@ -387,6 +409,7 @@ pub const EXAMPLES: &[Example] = &[
         ],
         part: "hx8k",
         package: "cb132",
+        top: "top",
     },
 ];
 
@@ -412,6 +435,28 @@ use euler_top;
 const EULER_BOARD: &str = include_str!("../../../tests/designs/euler/euler_board.v");
 const EULER_REPORT: &str = include_str!("../../../tests/designs/euler/report.v");
 const EULER_BCD: &str = include_str!("../../../tests/designs/euler/bcd.v");
+
+/// Like [`handle`], with `progress` receiving where the flow is as it runs:
+/// `{"step", "fraction", "detail"}`, `step` one of
+/// [`synth_core::progress::STEPS`] and `fraction` (0 to 1) null when the
+/// step cannot tell.
+pub fn handle_observed(
+    method: &str,
+    body: &str,
+    mut progress: impl FnMut(&Json) + 'static,
+) -> String {
+    progress::observe(
+        move |p| {
+            progress(
+                &Json::obj()
+                    .with("step", p.step)
+                    .with("fraction", p.fraction.map_or(Json::Null, Json::from))
+                    .with("detail", p.detail.as_str()),
+            )
+        },
+        || handle(method, body),
+    )
+}
 
 /// Answers one request of the web app. Unknown methods and malformed
 /// requests give `{"error": ...}`.
@@ -454,6 +499,7 @@ pub fn examples() -> Json {
                     .with("pins_file", Family::of(e.part).pins_file())
                     .with("part", e.part)
                     .with("package", e.package)
+                    .with("top", e.top)
             })
             .collect(),
     )
@@ -702,6 +748,7 @@ pub fn run(req: &Json) -> Json {
 fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     // Elaboration.
     let t = Instant::now();
+    progress::step("elaborate", "");
     let mut sm = SourceMap::new();
     let files = sources(req, &mut sm);
     if files.is_empty() {
@@ -749,6 +796,7 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     // Synthesis, observed pass by pass.
     let t = Instant::now();
     let stages = &mut r.stages;
+    progress::step("synthesize", "");
     let mut observe = |s: arch_ice40::synth::SynthStage| match s {
         arch_ice40::synth::SynthStage::Rtl(name, m) => {
             let id = name.replace(' ', "_");
@@ -828,6 +876,7 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     })?;
     r.log.extend(res.log.iter().cloned());
     r.time("place and route", t);
+    progress::note(|| "preparing the views".into());
     r.stages.push(
         Json::obj()
             .with("id", "packed")
@@ -885,6 +934,7 @@ fn run_xc7(
             .with("stats", stats_json(module.stats()))
             .with("graph", graph::rtl_graph(&module)),
     );
+    progress::step("synthesize", "");
     let (nl, log) = arch_xc7::synth::synthesize(module)?;
     r.log.extend(log);
     r.stages.push(
@@ -915,6 +965,7 @@ fn run_xc7(
     let res = arch_xc7::flow::implement(nl, &root, &xdc, &opts)?;
     r.log.extend(res.log.iter().cloned());
     r.time("place and route", t);
+    progress::note(|| "preparing the views".into());
     out.set(
         "placed",
         Json::obj()

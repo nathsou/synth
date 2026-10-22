@@ -20,6 +20,7 @@ pub mod intern;
 pub mod json;
 pub mod logic;
 pub mod ordered;
+pub mod progress;
 pub mod rng;
 pub mod time;
 

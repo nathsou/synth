@@ -79,6 +79,9 @@ pub(crate) fn place(
     let mut best = (f64::INFINITY, pos.to_vec());
     let mut stale = 0;
     for iteration in 0..MAX_ITERATIONS {
+        synth_core::progress::advance(0.2 * iteration as f64 / MAX_ITERATIONS as f64, || {
+            format!("analytical placement: iteration {}", iteration + 1)
+        });
         // The bound-to-bound model linearizes around the current positions:
         // a few solutions converge the first, unanchored one.
         let passes = if iteration == 0 { 5 } else { 1 };

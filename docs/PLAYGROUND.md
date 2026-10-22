@@ -113,6 +113,16 @@ it: its logic cells (LUT contents, carry, flip-flop) and every routing switch,
 read back from the bits rather than from the router. Download the `.bin`
 (iCE40) or the `.bit` (Artix-7, for `openFPGALoader`).
 
+**Progress.** While the flow runs, the status bar shows a bar with a segment
+per step (elaborating, synthesising, loading the device, packing, placing,
+routing, timing, the bitstream), the step and what it is doing (the mapping
+candidate, the annealing round and its acceptance rate, the routing
+iteration and how many wires are still congested) and the time so far; a
+line under the top bar shows the whole run. The placer and the router say
+how far through they are (from how far annealing has cooled, and how far
+congestion has fallen); a step that cannot tell is striped. Each segment's
+width is its step's share of a run, learned from the runs in the browser.
+
 **Problems and Log.** Diagnostics (click to jump to the source) and the log of
 the run with the time each part took.
 
@@ -162,6 +172,12 @@ fragment, so it is not sent to any server).
   `env.synth_fs_read` and `env.synth_fs_take` (`synth_core::fs`), through
   which the Artix-7 flow reads the database files from the worker, which
   unpacks the part's bundle before the run. The flow runs on one thread there.
+- The flow reports its progress through `synth_core::progress`: the step it
+  is in and, where it can tell, the fraction done, sent to a sink at most
+  every 100 ms. `handle_observed` turns the reports into JSON; the server
+  streams them (`/api/run?progress`: a line of JSON per report, then the
+  result) and the WebAssembly module calls the import `env.synth_progress`,
+  which the worker posts to the page. `web/progress.js` lays out the bar.
 - `server.rs` is the `synth playground` server: a few lines of HTTP over
   `std::net`, serving the embedded app and `/api/<method>`.
 - The schematic, chip and bitstream views draw with WebGL2 (`gl.js`: instanced
