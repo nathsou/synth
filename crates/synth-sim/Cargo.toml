@@ -1,0 +1,22 @@
+[package]
+name = "synth-sim"
+description = "Compiled cycle simulator for RTL and netlists"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-rtl.workspace = true
+synth-netlist.workspace = true
+
+[dev-dependencies]
+synth-weft.workspace = true
+synth-verilog.workspace = true
+synth-elab.workspace = true
+
+[lints]
+workspace = true

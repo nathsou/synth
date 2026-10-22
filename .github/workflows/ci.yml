@@ -153,6 +153,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm)
       - name: Build
         run: cargo build --profile ci -p synth
+      - name: In-process simulation (synth sim)
+        run: tools/ci_sim.sh
       - name: Bitstream-level simulation
         if: env.PNR == 'true'
         run: tools/ci_bitsim.sh

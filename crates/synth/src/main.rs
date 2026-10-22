@@ -1,6 +1,7 @@
 //! The `synth` command-line tool.
 
 mod args;
+mod sim;
 
 use std::process::ExitCode;
 
@@ -17,6 +18,7 @@ COMMANDS:
     build      Synthesise, place and route a design into an iCE40 bitstream
     synth      Synthesise a design to iCE40 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
+    sim        Simulate a design (or write it as a C model with --emit-c)
     pnr        Place and route a mapped netlist (RTLIL) for iCE40
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
@@ -56,6 +58,42 @@ ELAB OPTIONS:
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
               [--pass <clean|merge|share|trees|fsm|wreduce|shiftmul|dff|memff|memtrans|memregs|two-state>]...
 
+SIM OPTIONS:
+    synth sim <files.v|.weft...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
+              [-P <NAME=VALUE>] [--clock <name>] [--cycles <n>]
+              [--until <name>[=<value>]] [--set <name>=<value>]...
+              [--at <cycle>:<name>=<value>]... [--print <name>]... [--trace]
+              [--vcd <out.vcd>] [--uart <name>[:<clocks per bit>]]
+              [--load <memory>=<file.hex>]... [--two-state | --four-state]
+              [--attach <name>:<addr>:<data>:<depth>[:<clock>:<enable>:<wdata>]]...
+              [--emit-c <dir>] [--level <rtl|synth|bitstream>] [--optimize]
+              [--stats] [--quiet]
+    synth sim <files...> --compare <synth|bitstream> [--clock <name>]...
+              [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
+              [--seed <n>]
+              (bitstream: --device <dev> --package <pkg> --pcf <file>
+              [--bitstream <file.bin>] [--freq <MHz>])
+              Runs cycles of the clock (default `clk`): inputs set by --set
+              and --at, then a rising and a falling edge. Stops after --cycles
+              (default 1000) or once --until holds, then prints --print
+              signals (every cycle with --trace). Weft simulates two-state,
+              Verilog four-state. --uart decodes an 8N1 output line.
+              --attach drives the input <data> with the word at <addr> of a
+              new memory (written on the clock's rising edge when <enable>).
+              --emit-c writes a two-state C model (<top>.h, <top>.c) instead,
+              optimized as --optimize does. --optimize runs synthesis's RTL
+              optimizations first and merges bit-level multiplexers and
+              flip-flops into words: faster, but internal signals may be
+              gone or renamed. --stats prints what the program runs.
+              --level synth simulates the iCE40 netlist synthesis makes of
+              the design, --level bitstream what its bitstream implements
+              (built, or read from --bitstream), decoded back to cells; ports
+              are named after the PCF.
+              --compare runs the RTL and the netlist or bitstream under the
+              same random inputs (held about --hold cycles; resets active for
+              the first 4 cycles) and compares every output bit the RTL
+              defines after every rising edge.
+
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
@@ -76,6 +114,7 @@ fn main() -> ExitCode {
         }
         Some("check") => cmd_check(&argv[1..]),
         Some("elab") => cmd_elab(&argv[1..]),
+        Some("sim") => sim::cmd_sim(&argv[1..]),
         Some("build") => cmd_build(&argv[1..]),
         Some("synth") => cmd_synth(&argv[1..]),
         Some("pnr") => cmd_pnr(&argv[1..]),
@@ -106,11 +145,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn read(path: &str) -> Result<String, String> {
+pub(crate) fn read(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
 }
 
-fn write(path: &str, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write(path: &str, data: &[u8]) -> Result<(), String> {
     std::fs::write(path, data).map_err(|e| format!("{path}: {e}"))
 }
 
@@ -151,7 +190,7 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
 /// `--timing-weight` (default 0.5).
 /// Clock targets: the PCF's `set_frequency` lines, and `--freq` for the
 /// other clocks.
-fn clocks(
+pub(crate) fn clocks(
     a: &mut Args,
     pcf: &arch_ice40::pcf::Pcf,
 ) -> Result<arch_ice40::timing::ClockConstraints, String> {
@@ -160,7 +199,7 @@ fn clocks(
     Ok(c)
 }
 
-fn timing_weight(a: &mut Args) -> Result<f64, String> {
+pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
     match a.value("--timing-weight") {
         Some(v) => v
             .parse()
@@ -453,18 +492,18 @@ fn cmd_unpack(argv: &[String]) -> Result<(), String> {
 }
 
 /// The input files given on the command line.
-fn input_files(a: &Args) -> Vec<String> {
+pub(crate) fn input_files(a: &Args) -> Vec<String> {
     (0..).map_while(|i| a.positional(i, "file").ok()).collect()
 }
 
-fn is_weft(path: &str) -> bool {
+pub(crate) fn is_weft(path: &str) -> bool {
     path.ends_with(".weft")
 }
 
 /// Elaborates the design given on the command line, Verilog or Weft, into
 /// RTL. Weft sources may be mixed with Verilog files that define their
 /// extern modules.
-fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
+pub(crate) fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
     let paths = input_files(a);
     if !paths.iter().any(|p| is_weft(p)) {
         let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
