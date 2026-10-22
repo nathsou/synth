@@ -235,6 +235,11 @@ fn plan(p: &Program) -> Plan {
     Plan { local, parts, part_of, children }
 }
 
+/// Sizes of the nested groups of dirty bits `settle` tests, outermost
+/// first (a word, then within it). Measured best on the NES and the
+/// PicoRV32 SoC; an event loop jumping to each dirty partition was slower.
+const LEVELS: [u32; 3] = [64, 16, 4];
+
 /// Statements setting the dirty bits of `parts`.
 fn marks(parts: impl IntoIterator<Item = u32>, dirty: &str) -> Vec<String> {
     let mut words: std::collections::BTreeMap<u32, u64> = Default::default();
@@ -756,15 +761,34 @@ impl Emitter<'_> {
         writeln!(self.out, "static void settle({pre}_t *m) {{").unwrap();
         self.indent = 1;
         self.line("uint64_t *v = m->v, *D = m->dirty; (void)v;");
+        // Nested tests skip runs of clean partitions: a word of dirty bits,
+        // then groups within it (most partitions are clean at any time).
+        let np = plan.parts.len() as u32;
+        let mut open = 0;
         for (k, units) in plan.parts.iter().enumerate() {
             let k = k as u32;
-            if k.is_multiple_of(64) {
-                if k > 0 {
+            for (l, &size) in LEVELS.iter().enumerate() {
+                if !k.is_multiple_of(size) {
+                    continue;
+                }
+                // Close this level and those inside it.
+                while open > l {
                     self.indent -= 1;
                     self.line("}");
+                    open -= 1;
                 }
-                self.line(&format!("if (D[{}]) {{", k / 64));
+                let n = size.min(np - k);
+                let bits = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << (k % 64) };
+                if size == 64 {
+                    self.line(&format!("if (D[{}]) {{", k / 64));
+                } else if n > 1 {
+                    self.line(&format!("if (D[{}] & {}) {{", k / 64, hex(bits)));
+                } else {
+                    // A single partition: its own test suffices.
+                    self.line("{");
+                }
                 self.indent += 1;
+                open += 1;
             }
             let root = *units.last().unwrap();
             let ins = p.ops[root as usize];
@@ -807,7 +831,7 @@ impl Emitter<'_> {
             self.indent -= 1;
             self.line("}");
         }
-        if !plan.parts.is_empty() {
+        for _ in 0..open {
             self.indent -= 1;
             self.line("}");
         }

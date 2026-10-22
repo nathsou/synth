@@ -87,8 +87,8 @@ For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
 `<top>.c`) to compile with a testbench of your own, like a Verilator model.
 `--attach` places external memories (a ROM on the design's address and data
 ports) inside the model. On the NES of the Weft examples, the C model runs
-1.2 times as fast as Verilator, and on the PicoRV32 SoC 0.4 times; the
-interpreter is 4 to 13 times slower than the C model. `--optimize` speeds up
+1.6 times as fast as Verilator, and on the PicoRV32 SoC 0.45 times; the
+interpreter is 5 to 15 times slower than the C model. `--optimize` speeds up
 the interpreter (it is always on for C models), at the cost of internal
 signals. Rust code drives simulations through the `synth-sim` crate. See
 [ADR 0008](docs/decisions/0008-simulator.md).
