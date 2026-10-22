@@ -222,6 +222,91 @@ fn plan(p: &Program) -> Plan {
             parts[part_of[u as usize] as usize].push(u);
         }
     }
+    // Reorder them so that partitions marked by the same source sit
+    // together (dense groups of dirty bits), keeping a topological order:
+    // each partition's sources are the partitions and state words it reads.
+    {
+        let np = parts.len();
+        let mut srcs: Vec<Vec<u64>> = vec![Vec::new(); np];
+        let mut succ: Vec<Vec<u32>> = vec![Vec::new(); np];
+        let mut preds = vec![0u32; np];
+        for q in 0..np {
+            for o in unit_writes(p, *parts[q].last().unwrap()) {
+                for &r in readers(p, o) {
+                    if (r as usize) < n
+                        && part_of[r as usize] != NONE
+                        && part_of[r as usize] != q as u32
+                    {
+                        succ[q].push(part_of[r as usize]);
+                    }
+                }
+            }
+            succ[q].sort_unstable();
+            succ[q].dedup();
+            for &t in &succ[q] {
+                preds[t as usize] += 1;
+                srcs[t as usize].push(q as u64);
+            }
+        }
+        // External sources: state and input words read.
+        for w in 0..words {
+            if p.slot_of[w] as usize != w
+                || matches!(p.word_kind[w], SlotKind::Comb | SlotKind::Const)
+            {
+                continue;
+            }
+            for &r in readers(p, w as u32) {
+                if (r as usize) < n && part_of[r as usize] != NONE {
+                    srcs[part_of[r as usize] as usize].push(1 << 40 | w as u64);
+                }
+            }
+        }
+        for s in &mut srcs {
+            s.sort_unstable();
+            s.dedup();
+        }
+        let mut ready: Vec<u32> = (0..np as u32).filter(|&q| preds[q as usize] == 0).collect();
+        let mut order: Vec<u32> = Vec::with_capacity(np);
+        let mut last: Option<u32> = None;
+        while !ready.is_empty() {
+            // The ready partition sharing most sources with the last one,
+            // then the first.
+            let pick = match last {
+                Some(l) => {
+                    let ls = &srcs[l as usize];
+                    let shared = |q: u32| {
+                        srcs[q as usize].iter().filter(|x| ls.binary_search(x).is_ok()).count()
+                    };
+                    ready
+                        .iter()
+                        .copied()
+                        .max_by_key(|&q| (shared(q), std::cmp::Reverse(q)))
+                        .unwrap()
+                }
+                None => *ready.iter().min().unwrap(),
+            };
+            ready.retain(|&q| q != pick);
+            order.push(pick);
+            last = Some(pick);
+            for &t in &succ[pick as usize] {
+                preds[t as usize] -= 1;
+                if preds[t as usize] == 0 {
+                    ready.push(t);
+                }
+            }
+        }
+        assert_eq!(order.len(), np);
+        let mut new_index = vec![0u32; np];
+        for (i, &q) in order.iter().enumerate() {
+            new_index[q as usize] = i as u32;
+        }
+        parts = order.iter().map(|&q| std::mem::take(&mut parts[q as usize])).collect();
+        for q in &mut part_of {
+            if *q != NONE {
+                *q = new_index[*q as usize];
+            }
+        }
+    }
     let mut children = vec![Vec::new(); n];
     for (s, &r) in reader.iter().enumerate() {
         if local[s] {
@@ -234,6 +319,11 @@ fn plan(p: &Program) -> Plan {
     }
     Plan { local, parts, part_of, children }
 }
+
+/// Partitions of at most this many instructions run whenever their group
+/// of dirty bits is dirty, without a test of their own: a mispredicted
+/// branch costs more than running them.
+const SMALL: usize = 8;
 
 /// Sizes of the nested groups of dirty bits `settle` tests, outermost
 /// first (a word, then within it). Measured best on the NES and the
@@ -735,10 +825,96 @@ impl Emitter<'_> {
                 return Ok(());
             }
         }
+        if ins.k == K::Pmux && nwords(ins.w) == 1 && ins.c <= 64 {
+            // A one-hot multiplexer: each input's cone only in its case.
+            let cases: Vec<u32> =
+                p.aux.lists[ins.x as usize..ins.x as usize + ins.c as usize].to_vec();
+            let of = |slot: u32| {
+                children
+                    .iter()
+                    .copied()
+                    .filter(|&c| p.ops[c as usize].d == slot)
+                    .collect::<Vec<_>>()
+            };
+            if cases.iter().chain([&ins.a]).any(|&c| !of(c).is_empty()) {
+                for c in of(p.slot_of[ins.b as usize]) {
+                    self.tree(c)?;
+                }
+                let vd = self.w(ins.d);
+                let arm = |e: &mut Self, slot: u32| -> Result<(), String> {
+                    e.indent += 1;
+                    for c in of(slot) {
+                        e.tree(c)?;
+                    }
+                    let line = format!("{vd} = {};", e.w(slot));
+                    e.line(&line);
+                    e.indent -= 1;
+                    Ok(())
+                };
+                self.line(&format!("{{ uint64_t s = {} & {};", self.w(ins.b), hex(mask(ins.c))));
+                self.line("if (s == 0) {");
+                arm(self, ins.a)?;
+                self.line("} else if (s & (s - 1)) {");
+                self.line(&format!("    {vd} = 0;"));
+                self.line("} else switch (__builtin_ctzll(s)) {");
+                for (i, &c) in cases.iter().enumerate() {
+                    self.line(&format!("case {i}: {{"));
+                    arm(self, c)?;
+                    self.line("    break; }");
+                }
+                self.line("} }");
+                return Ok(());
+            }
+        }
         for c in children {
             self.tree(c)?;
         }
         self.ins(&ins)
+    }
+
+    /// Emits the decoder of partition `k` (rooted at `u`): when its input
+    /// changes, only the comparisons with the old and the new value change
+    /// (all of them the first time), and only those mark their readers.
+    fn decode(&mut self, u: u32, k: u32) -> Result<(), String> {
+        let p = self.p;
+        let ins = p.ops[u as usize];
+        for c in self.plan.children[u as usize].clone() {
+            self.tree(c)?;
+        }
+        let dec = &p.aux.decoders[ins.x as usize];
+        let (last, valid) = (ins.d, ins.d + 1);
+        self.line(&format!("{{ uint64_t nv = {}, ov = v[{last}];", self.w(ins.a)));
+        self.line(&format!("if (!v[{valid}]) {{"));
+        self.indent += 1;
+        self.line(&format!("v[{valid}] = 1; v[{last}] = nv;"));
+        for &(key, dd, ne) in &dec.entries {
+            let op = if ne { "!=" } else { "==" };
+            let ms = self.mark_readers(dd, "d", k);
+            self.line(&format!("v[{dd}] = nv {op} {}; {}", hex(key), ms.join(" ")));
+        }
+        self.indent -= 1;
+        self.line("} else if (nv != ov) {");
+        self.indent += 1;
+        self.line(&format!("v[{last}] = nv;"));
+        // Entries by key: those of the old value now differ, those of the
+        // new one match.
+        let mut keys: Vec<u64> = dec.entries.iter().map(|e| e.0).collect();
+        keys.dedup();
+        for (value, matches) in [("ov", false), ("nv", true)] {
+            self.line(&format!("switch ({value}) {{"));
+            for &key in &keys {
+                self.line(&format!("case {}: {{", hex(key)));
+                for &(_, dd, ne) in dec.entries.iter().filter(|e| e.0 == key) {
+                    let ms = self.mark_readers(dd, "d", k);
+                    self.line(&format!("    v[{dd}] = {}; {}", (matches ^ ne) as u8, ms.join(" ")));
+                }
+                self.line("    break; }");
+            }
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("} }");
+        Ok(())
     }
 
     /// Emits a loop unit: its instructions repeated until they settle.
@@ -765,8 +941,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Emits the partitions: each runs when its bit is set and marks the
-    /// partitions reading what it changed.
     /// Emits `body(i)` for each `i` in `0..n` whose dirty bit (bit `i % 64`
     /// of local `{var}{i / 64}`) is set, under nested tests that skip runs of
     /// clean ones: a word, then groups within it (see [`LEVELS`]).
@@ -774,6 +948,7 @@ impl Emitter<'_> {
         &mut self,
         var: &str,
         n: u32,
+        own_test: impl Fn(u32) -> bool,
         mut body: impl FnMut(&mut Self, u32) -> Result<(), String>,
     ) -> Result<(), String> {
         let mut open = 0;
@@ -801,7 +976,13 @@ impl Emitter<'_> {
                 self.indent += 1;
                 open += 1;
             }
-            self.line(&format!("if ({var}{} & {}) {{", k / 64, hex(1u64 << (k % 64))));
+            if own_test(k) {
+                self.line(&format!("if ({var}{} & {}) {{", k / 64, hex(1u64 << (k % 64))));
+            } else {
+                // Cheaper to run than to test (a mispredicted branch costs
+                // more): run whenever its group is dirty.
+                self.line("{");
+            }
             self.indent += 1;
             body(self, k)?;
             self.indent -= 1;
@@ -814,6 +995,8 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// Emits the partitions: each runs when its bit is set and marks the
+    /// partitions reading what it changed.
     fn settle(&mut self) -> Result<(), String> {
         let p = self.p;
         let plan = self.plan;
@@ -828,7 +1011,11 @@ impl Emitter<'_> {
         for w in 0..np.div_ceil(64) {
             self.line(&format!("uint64_t d{w} = D[{w}]; D[{w}] = 0;"));
         }
-        self.under_dirty("d", np, |e, k| {
+        let own_test = |k: u32| {
+            let units = &plan.parts[k as usize];
+            units.len() > SMALL || p.ops[*units.last().unwrap() as usize].k == K::Loop
+        };
+        self.under_dirty("d", np, own_test, |e, k| {
             let units = &plan.parts[k as usize];
             let root = *units.last().unwrap();
             let ins = p.ops[root as usize];
@@ -842,6 +1029,9 @@ impl Emitter<'_> {
                 .collect();
             if !locals.is_empty() {
                 e.line(&format!("uint64_t {};", locals.join(", ")));
+            }
+            if ins.k == K::Decode {
+                return e.decode(root, k);
             }
             // What it writes to the state and is read, before.
             let outs: Vec<(u32, Vec<String>)> = match ins.k {
