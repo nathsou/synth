@@ -166,8 +166,15 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   error per connection against Vivado's net delays fell from 430 ps RMS to
   under 100; the estimate of a whole design is within 6% of Vivado's
   timing of the same routing on the Euler designs (it was up to 35%
-  optimistic). It
-  reports each clock's worst period, the critical path, and the estimate
+  optimistic). Setup checks are per input: a block RAM's by input class
+  from the SDF (data inputs 241 ps read-first, as synth's memories are),
+  a flip-flop's data and enable inputs from the SDF, and its set or reset
+  at Vivado's 429 ps, which X-Ray lacks. The worst setup of each kind,
+  applied to every input before, made block RAM paths 0.4-0.5 ns and data
+  inputs 0.15 ns slower than Vivado times them, and resets 0.3 ns faster,
+  steering placement and routing towards the wrong paths (1% Fmax by
+  Vivado's timer across the Euler designs, 3-4% on those with block RAM).
+  It reports each clock's worst period, the critical path, and the estimate
   without block RAM and DSP paths. It has no clock skew, I/O timing or hold
   analysis.
 - **Constraints.** An explicit XDC subset: `set_property` (including
