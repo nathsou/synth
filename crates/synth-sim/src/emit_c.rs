@@ -1067,7 +1067,7 @@ impl Emitter<'_> {
         ));
         // Either schedule can be forced when compiling the model.
         self.out.push_str(
-            "#if defined(SIM_SETTLE_ALL)\n    settle_all(m); return;\n#elif defined(SIM_SETTLE_CHANGED)\n    settle_changed(m); return;\n#endif\n",
+            "#if defined(SIM_SETTLE_ALL)\n    m->all = 1; settle_all(m); return;\n#elif defined(SIM_SETTLE_CHANGED)\n    settle_changed(m); return;\n#endif\n",
         );
         self.line(&format!("if (!m->all || ++m->probe >= {PROBE}) {{"));
         self.line("    m->probe = 0;");
@@ -1395,10 +1395,26 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
                 e.line("}");
                 Ok(())
             };
+            // While settle runs all the logic (and will not measure next),
+            // nothing to mark: it runs anyway.
+            e.line(&format!("if (m->all && m->probe < {}) {{", PROBE - 1));
+            e.indent += 1;
+            for ins in d.commit.iter().chain(&d.gated) {
+                e.ins(ins)?;
+            }
+            e.line("D[0] |= 1;");
+            e.indent -= 1;
+            e.line("} else {");
+            e.indent += 1;
             // (Gated flip-flops too: most have a changed input at every
             // edge, and their dirty bits would cost every value they read a
             // comparison.)
-            d.commit.iter().chain(&d.gated).try_for_each(|ins| update(e, ins))
+            for ins in d.commit.iter().chain(&d.gated) {
+                update(e, ins)?;
+            }
+            e.indent -= 1;
+            e.line("}");
+            Ok(())
         })?;
     }
 
