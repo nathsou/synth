@@ -3,8 +3,9 @@
 # designs of ci_rtlsim.sh (MODE=synth) and ci_bitsim.sh, each synthesized
 # netlist and each bitstream (built by synth, decoded back to cells) against
 # its RTL under random inputs, and the Project Euler solvers' answers and
-# cycle counts in RTL (both modes) and as netlists. Needs only a built
-# `synth` (no Icarus, Yosys or IceStorm), which also makes it fast; the
+# cycle counts in RTL (both modes), as netlists and as C models (with a C
+# compiler, CC). Needs only a built `synth` (no Icarus, Yosys or IceStorm),
+# which also makes it fast; the
 # Icarus-based scripts stay as independent oracles.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -77,6 +78,54 @@ while read -r n width answer cycles extra; do
       status=1
       echo "FAIL p0$n $level (expected $answer after $cycles cycles)"
       tail -5 <<<"$out"
+    fi
+  done
+done <"$eu/designs.txt"
+
+# Project Euler as C models (--emit-c), in both schedules and the adaptive
+# one: answers and cycle counts after reset, every design.
+cc=${CC:-cc}
+if ! command -v "$cc" >/dev/null; then
+  echo "skip C models (no C compiler: $cc)"
+  exit $status
+fi
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+while read -r n width answer cycles extra; do
+  case $n in \#*|'') continue ;; esac
+  src=("p0$n.v")
+  [ -n "$extra" ] && src+=("$extra")
+  t=euler$n
+  w=$tmp/$t
+  if ! (cd "$eu" && "$synth" sim "${src[@]}" --top "$t" --emit-c "$w" --quiet >/dev/null 2>&1); then
+    status=1
+    echo "FAIL p0$n C model: --emit-c"
+    continue
+  fi
+  cat >"$w/main.c" <<EOF
+#include <stdio.h>
+#include "$t.h"
+static ${t}_t m;
+static void cycle(void) { ${t}_set_clk(&m, 1); ${t}_eval(&m); ${t}_set_clk(&m, 0); ${t}_eval(&m); }
+int main(void) {
+  long c = 0;
+  ${t}_init(&m); ${t}_set_clk(&m, 0); ${t}_set_start(&m, 1); ${t}_set_rst(&m, 1); ${t}_eval(&m);
+  cycle(); cycle(); ${t}_set_rst(&m, 0);
+  do { cycle(); c++; } while (!${t}_get_done(&m) && c < 100000000);
+  printf("%llu %ld\n", (unsigned long long)${t}_get_answer(&m), c);
+  return 0;
+}
+EOF
+  for sched in "" -DSIM_SETTLE_ALL -DSIM_SETTLE_CHANGED; do
+    # shellcheck disable=SC2086
+    if "$cc" -O1 $sched -o "$w/sim" "$w/main.c" "$w/$t.c" 2>"$w/cc.log" &&
+      [ "$("$w/sim")" = "$answer $cycles" ]; then
+      echo "PASS p0$n C model ${sched:-adaptive}: $answer after $cycles cycles"
+    else
+      status=1
+      echo "FAIL p0$n C model ${sched:-adaptive} (expected $answer after $cycles cycles)"
+      tail -5 "$w/cc.log"
+      [ -x "$w/sim" ] && "$w/sim"
     fi
   done
 done <"$eu/designs.txt"
