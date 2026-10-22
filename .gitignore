@@ -2,3 +2,4 @@
 .synth/
 *.swp
 .DS_Store
+/work/

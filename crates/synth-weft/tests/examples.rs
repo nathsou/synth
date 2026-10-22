@@ -302,3 +302,33 @@ fn life_draws_its_generations() {
     assert!(text.len() >= want.len(), "{text:?}");
     assert_eq!(&text[..want.len()], want);
 }
+
+#[test]
+fn nes_cpu_elaborates_reliably() {
+    // The CPU's ALU function branches over many arms that call other
+    // functions. Branch results used to be matched to variables by the
+    // iteration order of a hash map, which could change between arms and
+    // swap or mismatch values; elaborate a few times to catch that.
+    const NES: [&str; 6] = [
+        "examples/nes/nes.weft",
+        "examples/nes/cpu.weft",
+        "examples/nes/decode.weft",
+        "examples/nes/ppu.weft",
+        "examples/nes/apu.weft",
+        "examples/nes/mapper.weft",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for _ in 0..8 {
+        let mut sm = synth_core::SourceMap::new();
+        let ids: Vec<_> = NES
+            .iter()
+            .map(|p| {
+                let path = root.join(p);
+                sm.add(path.display().to_string(), std::fs::read_to_string(&path).unwrap())
+            })
+            .collect();
+        let opts = synth_weft::Options { top: Some("nes".into()), ..Default::default() };
+        let (m, diags) = synth_weft::compile(&mut sm, &ids, &[], None, &opts);
+        assert!(m.is_some() && !diags.has_errors(), "{}", diags.render(&sm));
+    }
+}
