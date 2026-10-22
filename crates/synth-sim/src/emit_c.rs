@@ -382,10 +382,18 @@ impl Emitter<'_> {
         self.out.push('\n');
     }
 
-    /// A word of the state, or the local holding it. (Fields of some
+    /// A word of the state, the local holding it, or a constant. (Fields of some
     /// instructions that are not words are named too, and never used.)
     fn w(&self, i: u32) -> String {
-        if self.plan.local.get(i as usize).copied().unwrap_or(false) {
+        let k = i as usize;
+        if k < self.p.word_kind.len()
+            && self.p.word_kind[k] == SlotKind::Const
+            && self.p.slot_of[k] == i
+            && self.p.slot_of.get(k + 1) != Some(&i)
+        {
+            // A one-word constant: its value, for the C compiler to fold.
+            hex(self.p.init_val[k])
+        } else if self.plan.local.get(i as usize).copied().unwrap_or(false) {
             format!("t{i}")
         } else {
             format!("v[{i}]")
