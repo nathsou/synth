@@ -146,7 +146,21 @@ fn run_on_boards(boards: &[(&str, &str, &[&str])]) {
 /// The iCE40 boards: the Nandland Go and the Alchitry Cu.
 #[test]
 fn examples_build_for_ice40_boards() {
-    let go_too_big: &[&str] = &["rv_single", "rv_multi", "rv_pipe"];
+    // The Go's HX1K holds the small examples and Euler 31 only.
+    let go_too_big: &[&str] = &[
+        "rv_single",
+        "rv_multi",
+        "rv_pipe",
+        "euler10",
+        "euler14",
+        "euler25",
+        "euler43",
+        "euler48",
+        "euler57",
+        "euler58",
+        "euler92",
+        "euler97",
+    ];
     run_on_boards(&[("hx1k", "vq100", go_too_big), ("hx8k", "cb132", &[])]);
 }
 

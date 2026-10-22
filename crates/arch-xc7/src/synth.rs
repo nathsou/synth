@@ -209,6 +209,7 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     log.push(format!(
         "selected minimum carry width {selected}, {cuts} cuts; LUT/FF/CARRY4/BRAM18/DSP48 {cost:?}"
     ));
+    crate::pll::lower(&mut nl, &mut log)?;
     Ok((nl, log))
 }
 

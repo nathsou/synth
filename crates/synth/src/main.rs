@@ -571,7 +571,7 @@ fn load_rtl(a: &mut Args) -> Result<synth_rtl::Module, String> {
         let top_params = a.values("-P").iter().map(|p| parse_param(p)).collect::<Result<_, _>>()?;
         let (sm, src) = load_verilog(a)?;
         let opts = synth_elab::ElabOptions { top: a.value("--top"), top_params };
-        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::NoBlackBoxes);
+        let (m, diags) = synth_elab::elaborate(&src, &sm, &opts, &synth_elab::StdBlackBoxes);
         if !diags.items.is_empty() {
             synth_core::progress::eprint(&diags.render(&sm));
         }

@@ -670,7 +670,14 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
             && !is_ram(kind)
             && !matches!(
                 kind,
-                "CARRY4" | "MUXF7" | "MUXF8" | "RAMB18E1" | "DSP48E1" | "$input" | "$output"
+                "CARRY4"
+                    | "MUXF7"
+                    | "MUXF8"
+                    | "RAMB18E1"
+                    | "DSP48E1"
+                    | crate::pll::PLL
+                    | "$input"
+                    | "$output"
             )
         {
             return Err(format!(

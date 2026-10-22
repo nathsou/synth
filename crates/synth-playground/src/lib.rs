@@ -274,7 +274,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 10: Summation of primes",
         description: "Project Euler 10 in hardware: sends 142913828922 over the UART after 131,016 cycles",
         files: &[
-            ("top.v", euler_top!("euler10", 38)),
+            ("top.v", euler_top!("euler10", 38, "40000000")),
             ("p010.v", include_str!("../../../tests/designs/euler/p010.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -288,7 +288,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 14: Longest Collatz sequence",
         description: "Project Euler 14 in hardware: sends 837799 over the UART after 364,431 cycles",
         files: &[
-            ("top.v", euler_top!("euler14", 20)),
+            ("top.v", euler_top!("euler14", 20, "33333333")),
             ("p014.v", include_str!("../../../tests/designs/euler/p014.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -302,7 +302,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 25: 1000-digit Fibonacci number",
         description: "Project Euler 25 in hardware: sends 4782 over the UART after 2,390 cycles",
         files: &[
-            ("top.v", euler_top!("euler25", 16)),
+            ("top.v", euler_top!("euler25", 16, "50000000")),
             ("p025.v", include_str!("../../../tests/designs/euler/p025.v")),
             ("bcd.v", EULER_BCD),
             ("euler_board.v", EULER_BOARD),
@@ -317,7 +317,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 31: Coin sums",
         description: "Project Euler 31 in hardware: sends 73682 over the UART after 209 cycles",
         files: &[
-            ("top.v", euler_top!("euler31", 17)),
+            ("top.v", euler_top!("euler31", 17, "100000000")),
             ("p031.v", include_str!("../../../tests/designs/euler/p031.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -331,7 +331,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 43: Sub-string divisibility",
         description: "Project Euler 43 in hardware: sends 16695334890 over the UART after 363 cycles",
         files: &[
-            ("top.v", euler_top!("euler43", 36)),
+            ("top.v", euler_top!("euler43", 36, "40000000")),
             ("p043.v", include_str!("../../../tests/designs/euler/p043.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -345,7 +345,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 48: Self powers",
         description: "Project Euler 48 in hardware: sends 9110846700 over the UART after 22,758 cycles",
         files: &[
-            ("top.v", euler_top!("euler48", 34)),
+            ("top.v", euler_top!("euler48", 34, "50000000")),
             ("p048.v", include_str!("../../../tests/designs/euler/p048.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -359,7 +359,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 57: Square root convergents",
         description: "Project Euler 57 in hardware: sends 153 over the UART after 8,571 cycles",
         files: &[
-            ("top.v", euler_top!("euler57", 10)),
+            ("top.v", euler_top!("euler57", 10, "50000000")),
             ("p057.v", include_str!("../../../tests/designs/euler/p057.v")),
             ("bcd.v", EULER_BCD),
             ("euler_board.v", EULER_BOARD),
@@ -374,7 +374,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 58: Spiral primes",
         description: "Project Euler 58 in hardware: sends 26241 over the UART after 2,628,585 cycles",
         files: &[
-            ("top.v", euler_top!("euler58", 16)),
+            ("top.v", euler_top!("euler58", 16, "25000000")),
             ("p058.v", include_str!("../../../tests/designs/euler/p058.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -388,7 +388,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 92: Square digit chains",
         description: "Project Euler 92 in hardware: sends 8581146 over the UART after 1,201 cycles",
         files: &[
-            ("top.v", euler_top!("euler92", 24)),
+            ("top.v", euler_top!("euler92", 24, "66666667")),
             ("p092.v", include_str!("../../../tests/designs/euler/p092.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -402,7 +402,7 @@ pub const EXAMPLES: &[Example] = &[
         title: "Euler 97: Large non-Mersenne prime",
         description: "Project Euler 97 in hardware: sends 8739992577 over the UART after 389 cycles",
         files: &[
-            ("top.v", euler_top!("euler97", 34)),
+            ("top.v", euler_top!("euler97", 34, "66666667")),
             ("p097.v", include_str!("../../../tests/designs/euler/p097.v")),
             ("euler_board.v", EULER_BOARD),
             ("report.v", EULER_REPORT),
@@ -414,18 +414,25 @@ pub const EXAMPLES: &[Example] = &[
 ];
 
 /// The playground's top for a Project Euler solver: the solver with the
-/// board-neutral shell of `tests/designs/euler/euler_board.v`.
+/// board-neutral shell of `tests/designs/euler/euler_board.v`, on a clock of
+/// at most `max_hz` (its speed on the Alchitry Cu) from the board's PLL.
 macro_rules! euler_top {
-    ($solver:literal, $width:literal) => {
+    ($solver:literal, $width:literal, $max_hz:literal) => {
         concat!(
             "// Project Euler in hardware: ", $solver, " with a board-neutral shell (euler_board.v).\n",
             "// \"<answer> <cycles>\" on the UART at 115200 baud; the answer's low byte on the LEDs.\n",
-            "module top #(parameter CLK_HZ = 100000000) (input clk, output tx, output [7:0] led);\n",
-            "  wire rst, done;\n",
+            "// The solver runs at SYS_HZ, MAX_HZ at most (it meets timing at that speed on\n",
+            "// every board), from the board's PLL.\n",
+            "module top #(parameter CLK_HZ = 100000000, parameter MAX_HZ = ", $max_hz, ")\n",
+            "  (input clk, output tx, output [7:0] led);\n",
+            "  localparam SYS_HZ = MAX_HZ < CLK_HZ ? MAX_HZ : CLK_HZ;\n",
+            "  wire sys, locked, rst, done;\n",
             "  wire [", $width, "-1:0] answer;\n",
-            "  ", $solver, " solver (.clk(clk), .rst(rst), .start(1'b1), .done(done), .answer(answer));\n",
-            "  euler_board #(.CLK_HZ(CLK_HZ), .ANSWER_WIDTH(", $width, ")) board (.clk(clk), .rst(rst),\n",
-            "    .done(done), .answer(answer), .tx(tx), .led(led));\n",
+            "  synth_pll #(.IN_HZ(CLK_HZ), .OUT_HZ(SYS_HZ)) pll (.clk_in(clk), .clk_out(sys),\n",
+            "    .locked(locked));\n",
+            "  ", $solver, " solver (.clk(sys), .rst(rst), .start(1'b1), .done(done), .answer(answer));\n",
+            "  euler_board #(.CLK_HZ(SYS_HZ), .ANSWER_WIDTH(", $width, ")) board (.clk(sys),\n",
+            "    .locked(locked), .rst(rst), .done(done), .answer(answer), .tx(tx), .led(led));\n",
             "endmodule\n",
         )
     };
@@ -778,7 +785,7 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
             .unwrap_or_default();
         let opts = synth_elab::ElabOptions { top, top_params };
         let (m, d) =
-            synth_elab::elaborate(src.as_ref().unwrap(), &sm, &opts, &synth_elab::NoBlackBoxes);
+            synth_elab::elaborate(src.as_ref().unwrap(), &sm, &opts, &synth_elab::StdBlackBoxes);
         diags.extend(d);
         m
     };
@@ -982,16 +989,24 @@ fn run_xc7(
         .timing
         .iter()
         .map(|c| {
-            // A clock is named by its input port, as the XDC names it.
+            // A clock is named by its input port, as the XDC names it, or
+            // by the PLL making it.
+            let pll = names.nets[c.net]
+                .driver
+                .filter(|d| names.cell_kind(d.cell) == arch_xc7::pll::PLL)
+                .map(|d| names.str(names.cells[d.cell].name));
             let name = names
                 .live_cells()
                 .find(|&p| names.cell_kind(p) == "$input" && names.pin_net(p, "PAD") == Some(c.net))
                 .map(|p| names.str(names.cells[p].name))
+                .or(pll)
                 .unwrap_or_else(|| names.str(names.nets[c.net].name))
                 .to_string();
             let period_ns = c.period / 1000.0;
-            let target_mhz =
-                xdc.clocks.get(&name).map(|ns| 1000.0 / ns).or(target).filter(|f| *f > 0.0);
+            let target_mhz = arch_xc7::flow::target_ns(&names, &xdc, c.net)
+                .map(|ns| 1000.0 / ns)
+                .or(target)
+                .filter(|f| *f > 0.0);
             let path: Vec<Json> = c
                 .path
                 .iter()

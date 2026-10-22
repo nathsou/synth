@@ -74,12 +74,14 @@ enum Unit {
     /// Carry chain, least significant cell first; anchored at slot 0.
     Chain(Vec<CellId>),
     Ram(CellId),
+    /// A logic cell placed beforehand (a PLL's `LOCK` buffer): never moves.
+    Pinned(CellId),
 }
 
 impl Unit {
     fn cells(&self) -> &[CellId] {
         match self {
-            Self::Lc(c) | Self::Ram(c) => std::slice::from_ref(c),
+            Self::Lc(c) | Self::Ram(c) | Self::Pinned(c) => std::slice::from_ref(c),
             Self::Chain(cells) => cells,
         }
     }
@@ -96,11 +98,12 @@ pub(crate) fn port_name(nl: &Netlist, c: CellId) -> Option<String> {
         .and_then(|(_, v)| v.as_str().map(String::from))
 }
 
-/// Whether a net is on a global network (driven by a global buffer).
+/// Whether a net is on a global network (driven by a global buffer, a
+/// global pad or a PLL's global output).
 pub(crate) fn on_global(nl: &Netlist, n: NetId) -> bool {
     nl.nets[n].driver.is_some_and(|d| {
         let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name);
-        nl.cell_kind(d.cell) == GB || pin == "GLOBAL_BUFFER_OUTPUT"
+        nl.cell_kind(d.cell) == GB || pin == "GLOBAL_BUFFER_OUTPUT" || pin == "PLLOUTGLOBAL"
     })
 }
 
@@ -114,10 +117,64 @@ pub fn place(
 ) -> Result<(Placement, Vec<String>), String> {
     let mut log = Vec::new();
     let mut placement = Placement::default();
+    place_plls(arch, nl, packed, pins, &mut placement, &mut log)?;
     place_ios(arch, nl, pins, &mut placement, &mut log)?;
     assign_globals(arch, nl, &mut placement, &mut log)?;
     place_with_fixed(arch, nl, packed, &mut placement, opts, &mut log)?;
     Ok((placement, log))
+}
+
+/// Places each PLL on a site whose output pad is not one of the design's
+/// pins (the pad is the PLL's, and its global network too), and the logic
+/// cell buffering its `LOCK` in the one tile `LOCK` reaches.
+pub(crate) fn place_plls(
+    arch: &Arch,
+    nl: &Netlist,
+    packed: &Packed,
+    pins: &PinConstraints,
+    placement: &mut Placement,
+    log: &mut Vec<String>,
+) -> Result<(), String> {
+    let plls: Vec<CellId> =
+        nl.live_cells().filter(|&c| nl.cell_kind(c) == crate::pll::CORE).collect();
+    if plls.is_empty() {
+        return Ok(());
+    }
+    let pads: Vec<(u8, u8, u8)> = pins
+        .values()
+        .filter_map(|p| arch.pin_bel(p))
+        .map(|b| (arch.bel(b).x, arch.bel(b).y, arch.bel(b).z))
+        .collect();
+    let mut sites = arch.plls.iter().filter(|s| !pads.contains(&s.out_io));
+    for c in plls {
+        let name = nl.str(nl.cells[c].name);
+        let site = sites.next().ok_or_else(|| {
+            if arch.plls.is_empty() {
+                format!("{name}: {} {} has no PLL", arch.part, arch.package.name)
+            } else {
+                format!("{name}: no PLL left whose output pad is free")
+            }
+        })?;
+        placement.cell_bel.insert(c, site.bel);
+        placement.cell_global.insert(c, site.global);
+        let b = arch.bel(site.bel);
+        log.push(format!("{name} at PLL ({}, {}), global {}", b.x, b.y, site.global));
+        for &(_, lc) in packed.lock_buffers.iter().filter(|(p, _)| *p == c) {
+            let (x, y) = site.lock_tile;
+            let bel = arch.bel_at(x, y, 0, BelKind::Lc).ok_or("no logic cell next to the PLL")?;
+            placement.cell_bel.insert(lc, bel);
+        }
+    }
+    Ok(())
+}
+
+/// The IO blocks that PLLs placed so far use for their outputs.
+fn pll_pads(arch: &Arch, placement: &Placement) -> Vec<(u8, u8, u8)> {
+    arch.plls
+        .iter()
+        .filter(|s| placement.cell_bel.values().any(|&b| b == s.bel))
+        .map(|s| s.out_io)
+        .collect()
 }
 
 pub(crate) fn place_ios(
@@ -128,6 +185,7 @@ pub(crate) fn place_ios(
     log: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut used: FxHashMap<BelId, CellId> = FxHashMap::default();
+    let reserved = pll_pads(arch, placement);
     let ios: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == IO).collect();
     let mut unconstrained = Vec::new();
     for &c in &ios {
@@ -159,6 +217,7 @@ pub(crate) fn place_ios(
         .package
         .pins
         .iter()
+        .filter(|p| !reserved.contains(&(p.x, p.y, p.z)))
         .filter_map(|p| arch.bel_at(p.x, p.y, p.z, BelKind::Io))
         .filter(|b| !used.contains_key(b))
         .collect();
@@ -187,7 +246,11 @@ pub(crate) fn assign_globals(
     log: &mut Vec<String>,
 ) -> Result<(), String> {
     let gbs: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == GB).collect();
+    // Networks already driven (by PLLs).
     let mut taken = [false; 8];
+    for &g in placement.cell_global.values() {
+        taken[g as usize] = true;
+    }
     let mut rest = Vec::new();
     for gb in gbs {
         let input = nl.pin_net(gb, "USER_SIGNAL_TO_GLOBAL_BUFFER");
@@ -342,6 +405,8 @@ struct Annealer<'a> {
     net_cost: Vec<f64>,
     cell_nets: FxHashMap<CellId, Vec<u32>>,
     fixed: FxHashMap<CellId, (i16, i16)>,
+    /// Logic cells placed beforehand, and where.
+    pinned: Vec<(CellId, (i16, i16, u8))>,
     /// Units moves may pick (all when empty): those an incremental repair
     /// placed anew.
     movable: Vec<usize>,
@@ -402,6 +467,7 @@ impl<'a> Annealer<'a> {
             net_cost: Vec::new(),
             cell_nets: FxHashMap::default(),
             fixed: FxHashMap::default(),
+            pinned: Vec::new(),
             movable: Vec::new(),
         };
 
@@ -558,6 +624,13 @@ impl<'a> Annealer<'a> {
         for (&c, &bel) in &placement.cell_bel {
             let b = self.arch.bel(bel);
             self.fixed.insert(c, (b.x as i16, b.y as i16));
+            // Logic cells placed beforehand stay where they are.
+            if b.kind == BelKind::Lc
+                && let Some(&u) = self.cell_unit.get(&c)
+            {
+                self.units[u] = Unit::Pinned(c);
+                self.pinned.push((c, (b.x as i16, b.y as i16, b.z)));
+            }
         }
     }
 
@@ -636,6 +709,11 @@ impl<'a> Annealer<'a> {
     }
 
     fn initial_placement(&mut self) -> Result<(), String> {
+        for (c, (x, y, z)) in self.pinned.clone() {
+            let s = self.slot(x as usize, y as usize, z as usize);
+            self.lc_occ[s] = Some(c);
+            self.pos.insert(c, (x, y, z));
+        }
         // Chains: fill columns bottom-up.
         let mut col_fill: Vec<usize> = vec![1; self.width + 2]; // next free tile row per column
         let mut ci = 0usize;
@@ -646,7 +724,11 @@ impl<'a> Annealer<'a> {
             let mut placed = false;
             for k in 0..self.logic_cols.len() {
                 let x = self.logic_cols[(ci + k) % self.logic_cols.len()];
-                if col_fill[x] + tiles - 1 <= self.height {
+                let free = |sa: &Self| {
+                    (0..cells.len())
+                        .all(|i| sa.lc_occ[sa.slot(x, col_fill[x] + i / 8, i % 8)].is_none())
+                };
+                if col_fill[x] + tiles - 1 <= self.height && free(self) {
                     let y0 = col_fill[x];
                     for (i, &c) in cells.iter().enumerate() {
                         let (y, z) = (y0 + i / 8, i % 8);
@@ -781,9 +863,14 @@ impl<'a> Annealer<'a> {
     }
 
     fn repair_placement(&mut self, previous: &Placement) -> Result<usize, String> {
+        for (c, (x, y, z)) in self.pinned.clone() {
+            let s = self.slot(x as usize, y as usize, z as usize);
+            self.lc_occ[s] = Some(c);
+            self.pos.insert(c, (x, y, z));
+        }
         let units = self.units.clone();
         let mut reused = 0;
-        for unit in &units {
+        for unit in units.iter().filter(|u| !matches!(u, Unit::Pinned(_))) {
             let bels: Option<Vec<_>> =
                 unit.cells().iter().map(|c| previous.cell_bel.get(c).copied()).collect();
             if let Some(bels) = bels
@@ -969,6 +1056,7 @@ impl<'a> Annealer<'a> {
         };
         let r = rlim.max(1.0) as i64;
         match self.units[u].clone() {
+            Unit::Pinned(_) => None,
             Unit::Lc(c) => {
                 let (x, y, z) = self.pos[&c];
                 let (nx, ny) = match self.median_target(&[c]) {

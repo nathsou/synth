@@ -75,9 +75,13 @@ Every board has a clock frequency (25 MHz on the Go, 12 MHz on the iCEstick
 and the HX8K Breakout, 100 MHz on the Cu, Au and Nexys A7), passed to the
 design as its top's `CLK_HZ` parameter when it declares one: the examples
 derive their baud-rate dividers and blink rates from it, so the same source
-works on every board. It is also the timing target. The RISC-V cores do not
-fit the Go's HX1K, and on the 100 MHz boards they build but miss timing (their
-critical paths are 30 to 90 MHz), so they need a slower clock to run there.
+works on every board. It is also the timing target. The RISC-V cores and the
+Euler solvers state, as `MAX_HZ`, the fastest clock they meet timing at on
+every board (the Cu's iCE40 is the slowest), and run at the slower of the two
+from the board's PLL (`synth_pll`, see `docs/WEFT.md` §8.7), held in reset
+until it locks; the PLL's output frequency is then the timing target. Only
+the small examples and Euler 31 fit the Go's HX1K, which has no PLL in its
+package.
 
 **Pipeline.** Each step of the flow with its statistics and how they changed
 from the previous step: cells by kind after elaboration, after RTL

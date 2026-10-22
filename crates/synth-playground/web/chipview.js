@@ -257,6 +257,9 @@ export class ChipView {
         cb.rect(x + 0.5 * T, this.ty(cell.y + 1) + 0.12 * T, 0.45 * T, 1.76 * T, [...c.bram, 1], null, 4, 0);
       } else if (cell.bel === 'gb') {
         cb.rect(x + 0.4 * T, y + 0.4 * T, 0.2 * T, 0.2 * T, [...c.global, 1], null, 10, 0);
+      } else if (cell.bel === 'pll') {
+        const [px, py, pw, ph] = this.cellRect(cell);
+        cb.rect(px, py, pw, ph, [...c.global, 1], null, 4, 0);
       }
     });
     this.paintHighlight();
@@ -318,6 +321,8 @@ export class ChipView {
     if (cell.bel === 'lc') return [x + LC_X0 * T, y + (LC_Y0 + cell.z * LC_DY) * T, (LC_X1 - LC_X0) * T, LC_H * T];
     if (cell.bel === 'io') return this.ioRect(cell.x, cell.y, cell.z);
     if (cell.bel === 'ram') return [x + 0.5 * T, this.ty(cell.y + 1) + 0.12 * T, 0.45 * T, 1.76 * T];
+    // A PLL: a block over its IO tile.
+    if (cell.bel === 'pll') return [x + 0.1 * T, y + 0.25 * T, 0.8 * T, 0.5 * T];
     return [x + 0.4 * T, y + 0.4 * T, 0.2 * T, 0.2 * T];
   }
 

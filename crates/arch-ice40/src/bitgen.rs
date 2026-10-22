@@ -192,6 +192,63 @@ pub fn generate(
                 }
             }
             GB => {}
+            crate::pll::CORE => {
+                let site =
+                    arch.plls.iter().find(|s| s.bel == bel_id).ok_or("PLL not on a PLL site")?;
+                let p = |name: &str| crate::pll::param(nl, c, name);
+                let feedback = match nl.param(c, "FEEDBACK_PATH").and_then(Param::as_str) {
+                    Some("DELAY") => 0,
+                    Some("SIMPLE") | None => 1,
+                    Some("PHASE_AND_DELAY") => 2,
+                    Some("EXTERNAL") => 6,
+                    Some(other) => return Err(format!("unsupported PLL FEEDBACK_PATH {other}")),
+                };
+                let select = match nl.param(c, "PLLOUT_SELECT").and_then(Param::as_str) {
+                    Some("GENCLK") | None => 0,
+                    Some("GENCLK_HALF") => 1,
+                    Some("SHIFTREG_90deg") => 2,
+                    Some("SHIFTREG_0deg") => 3,
+                    Some(other) => return Err(format!("unsupported PLL PLLOUT_SELECT {other}")),
+                };
+                // Field, value, width: as IceStorm's `icebox_vlog` reads them.
+                let fields = [
+                    ("PLLTYPE", 0b011, 3),
+                    ("FEEDBACK_PATH", feedback, 3),
+                    ("PLLOUT_SELECT_A", select, 2),
+                    ("DIVR", p("DIVR"), 4),
+                    ("DIVF", p("DIVF"), 7),
+                    ("DIVQ", p("DIVQ"), 3),
+                    ("FILTER_RANGE", p("FILTER_RANGE"), 3),
+                    ("FDA_FEEDBACK", p("FDA_FEEDBACK"), 4),
+                    ("FDA_RELATIVE", p("FDA_RELATIVE"), 4),
+                    ("SHIFTREG_DIV_MODE", p("SHIFTREG_DIV_MODE"), 1),
+                ];
+                for (name, value, width) in fields {
+                    if value >> width != 0 {
+                        return Err(format!("PLL {name} {value} does not fit {width} bits"));
+                    }
+                    for i in (0..width).filter(|i| value >> i & 1 != 0) {
+                        let key = if width == 1 { name.to_string() } else { format!("{name}_{i}") };
+                        let (_, x, y, bit) = site
+                            .config
+                            .iter()
+                            .find(|e| e.0 == key)
+                            .ok_or_else(|| format!("PLL has no field {key}"))?;
+                        w.entry(*x as usize, *y as usize, &format!("PLL.{bit}"), true, None);
+                    }
+                }
+                // Output A goes through an IO block, set to pass it on (as
+                // nextpnr does), and from its pad to the global network.
+                let (ix, iy, iz) = site.out_io;
+                w.entry(ix as usize, iy as usize, &format!("IOB_{iz}.PINTYPE_0"), true, None);
+                if let Some(io) = arch.bel_at(ix, iy, iz, BelKind::Io) {
+                    used_ios.insert(io);
+                }
+                if nl.pin_net(c, "PLLOUTGLOBAL").is_some() {
+                    let (bank, ex, ey) = db.globals[site.global as usize].pad_extra_bit;
+                    w.cfg.cram[bank as usize].set(ex as usize, ey as usize, true);
+                }
+            }
             other => return Err(format!("cannot configure cell type {other}")),
         }
     }

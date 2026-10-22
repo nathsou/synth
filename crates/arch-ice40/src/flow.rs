@@ -159,6 +159,9 @@ fn run(
     // with less weight on timing if the placement does not route (timing
     // pulls critical logic together, which can congest local routing).
     let mut fixed = crate::place::Placement::default();
+    // PLL outputs are clocks of the frequency they make.
+    let clocks = crate::pll::clock_targets(&nl, &opts.clocks);
+    crate::place::place_plls(&arch, &nl, &packed, pins, &mut fixed, log)?;
     crate::place::place_ios(&arch, &nl, pins, &mut fixed, log)?;
     crate::place::assign_globals(&arch, &mut nl, &mut fixed, log)?;
     // Each retry also leaves tiles room on their local tracks (contested
@@ -180,7 +183,7 @@ fn run(
             effort: opts.place_effort,
             timing_weight: opts.timing_weight,
             max_locals: 32,
-            clocks: opts.clocks.clone(),
+            clocks: clocks.clone(),
         };
         let attempt = crate::place::place_incremental(
             &arch,
@@ -197,7 +200,7 @@ fn run(
                 &arch,
                 &nl,
                 &placement,
-                &opts.clocks,
+                &clocks,
                 opts.route_timing_rounds,
                 log,
                 Some(previous),
@@ -222,7 +225,7 @@ fn run(
             effort,
             timing_weight: w,
             max_locals,
-            clocks: opts.clocks.clone(),
+            clocks: clocks.clone(),
         };
         let mut placement = fixed.clone();
         let again = if attempt > 0 {
@@ -240,14 +243,7 @@ fn run(
         }
         let t = Instant::now();
         progress::step("route", &again);
-        match crate::route::route(
-            &arch,
-            &nl,
-            &placement,
-            &opts.clocks,
-            opts.route_timing_rounds,
-            log,
-        ) {
+        match crate::route::route(&arch, &nl, &placement, &clocks, opts.route_timing_rounds, log) {
             Ok(routing) => {
                 log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
                 result = Some((placement, routing));
@@ -276,7 +272,7 @@ fn run(
 
     let t = Instant::now();
     progress::step("timing", "");
-    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &opts.clocks);
+    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &clocks);
     let met = timing.clocks.iter().all(|c| c.target_mhz.is_none_or(|t| c.fmax_mhz >= t));
     for c in &timing.clocks {
         let target = match c.target_mhz {

@@ -214,7 +214,8 @@ pub fn synthesize_observed(
         deep.truncate(8);
         log.push(format!("deepest sinks: {deep:?}"));
     }
-    let nl = emit(&net, &mapping)?;
+    let mut nl = emit(&net, &mapping)?;
+    crate::pll::lower(&mut nl, &mut log)?;
     observe(SynthStage::Mapped(&nl));
     Ok((nl, log))
 }

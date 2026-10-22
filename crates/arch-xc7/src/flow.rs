@@ -234,22 +234,13 @@ pub fn implement(
     }
     for clock in &timing {
         let name = nl.str(nl.nets[clock.net].name);
-        let target = xdc
-            .clocks
-            .iter()
-            .find(|(port, _)| {
-                nl.live_cells().any(|c| {
-                    nl.str(nl.cells[c].name) == port.as_str()
-                        && nl.pin_net(c, "PAD") == Some(clock.net)
-                })
-            })
-            .map(|(_, &ns)| {
-                format!(
-                    ", target {ns:.3} ns: {}",
-                    if clock.period <= ns * 1000.0 { "met" } else { "MISSED" }
-                )
-            })
-            .unwrap_or_default();
+        let target = target_ns(&nl, xdc, clock.net).map(|ns| {
+            format!(
+                ", target {ns:.3} ns: {}",
+                if clock.period <= ns * 1000.0 { "met" } else { "MISSED" }
+            )
+        });
+        let target = target.unwrap_or_default();
         log.push(format!(
             "timing estimate: clock {name}: {:.3} ns ({:.1} MHz){target}",
             clock.period / 1000.0,
@@ -278,6 +269,25 @@ pub fn implement(
     drop(predicted);
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
+/// The target period (ns) of a clock net: its port's `create_clock`, or the
+/// frequency of the PLL driving it.
+pub fn target_ns(nl: &Netlist, xdc: &Constraints, net: NetId) -> Option<f64> {
+    if let Some(d) = nl.nets[net].driver
+        && nl.cell_kind(d.cell) == crate::pll::PLL
+    {
+        let hz = nl.param(d.cell, crate::pll::OUT_HZ).and_then(synth_netlist::Param::as_u64)?;
+        return Some(1e9 / hz as f64);
+    }
+    xdc.clocks
+        .iter()
+        .find(|(port, _)| {
+            nl.live_cells().any(|c| {
+                nl.str(nl.cells[c].name) == port.as_str() && nl.pin_net(c, "PAD") == Some(net)
+            })
+        })
+        .map(|(_, &ns)| ns)
+}
+
 /// The local GND_WIRE and VCC_WIRE nodes of the constant sinks that are
 /// interconnect inputs.
 fn local_constants(
@@ -308,8 +318,10 @@ fn local_constants(
     }
     let mut out: FxHashMap<u32, (u32, u32)> =
         wanted.iter().filter_map(|n| inputs.get(n).map(|&c| (*n, c))).collect();
-    // Block RAM and DSP pins are one pip beyond an interconnect input.
-    for t in db.tiles.iter().filter(|t| t.kind.starts_with("BRAM_") || t.kind.starts_with("DSP_")) {
+    // Block RAM, DSP and PLL pins are one pip beyond an interconnect input.
+    for t in db.tiles.iter().filter(|t| {
+        t.kind.starts_with("BRAM_") || t.kind.starts_with("DSP_") || t.kind.starts_with("CMT_TOP")
+    }) {
         for pip in &db.templates[t.template].pips {
             let (src, dst) = (t.nodes[pip.src as usize], t.nodes[pip.dst as usize]);
             if wanted.contains(&dst)
@@ -353,7 +365,11 @@ fn location(
     let site = if let Some(&(s, _)) = p.slots.get(&c) {
         &pl.slices[s]
     } else {
-        pl.rams.get(&c).or_else(|| pl.dsps.get(&c)).or_else(|| pl.ports.get(&c))?
+        pl.rams
+            .get(&c)
+            .or_else(|| pl.dsps.get(&c))
+            .or_else(|| pl.ports.get(&c))
+            .or_else(|| pl.plls.get(&c))?
     };
     let t = &db.tiles[site.tile];
     Some(((t.x, t.y), (site.tile, site.index)))
@@ -391,7 +407,9 @@ fn source(db: &Device, nl: &Netlist, p: &Packed, pl: &Placement, n: NetId) -> Re
     if let Some(site) = pl.ports.get(&d.cell) {
         return site.node(db, "I");
     }
-    if let Some(site) = pl.rams.get(&d.cell).or_else(|| pl.dsps.get(&d.cell)) {
+    if let Some(site) =
+        pl.rams.get(&d.cell).or_else(|| pl.dsps.get(&d.cell)).or_else(|| pl.plls.get(&d.cell))
+    {
         let pin = nl.str(nl.cells[d.cell].pins[d.pin as usize].name).replace(['[', ']'], "");
         return site.node(db, &pin);
     }
@@ -531,6 +549,12 @@ fn requests(
         }
         if let Some(site) = pl.dsps.get(&c) {
             for (pin, n) in crate::physical_dsp::inputs(db, nl, c, site)? {
+                add(n, site.node(db, &pin)?, c, &pin);
+            }
+            continue;
+        }
+        if let Some(site) = pl.plls.get(&c) {
+            for (pin, n) in crate::pll::inputs(nl, c) {
                 add(n, site.node(db, &pin)?, c, &pin);
             }
             continue;
@@ -978,6 +1002,9 @@ fn cell_features(
     }
     for (&c, site) in &pl.dsps {
         f.extend(crate::physical_dsp::features(db, nl, c, site)?);
+    }
+    for (&c, site) in &pl.plls {
+        f.extend(crate::pll::features(db, nl, c, site)?);
     }
     for site in pl.clocks.values() {
         let t = &db.tiles[site.tile];

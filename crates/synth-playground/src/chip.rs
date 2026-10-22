@@ -133,8 +133,13 @@ pub fn chip(imp: &Implementation, opts: &FlowOptions) -> (Json, Json) {
         .collect();
 
     // Timing: criticality per net, and the critical paths.
-    let (report, tg, ta) =
-        arch_ice40::timing::analyse_full(arch, nl, &imp.placement, &imp.routing, &opts.clocks);
+    let (report, tg, ta) = arch_ice40::timing::analyse_full(
+        arch,
+        nl,
+        &imp.placement,
+        &imp.routing,
+        &arch_ice40::pll::clock_targets(nl, &opts.clocks),
+    );
     let mut net_crit: HashMap<synth_netlist::NetId, (f64, f64)> = HashMap::new();
     for (k, c) in tg.conns.iter().enumerate() {
         if let Some(n) = nl.cells[c.sink].pins[c.pin].net {
@@ -165,6 +170,7 @@ pub fn chip(imp: &Implementation, opts: &FlowOptions) -> (Json, Json) {
             BelKind::Io => "io",
             BelKind::Ram => "ram",
             BelKind::Gb => "gb",
+            BelKind::Pll => "pll",
         };
         let pins: Vec<Json> = cell
             .pins

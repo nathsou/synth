@@ -46,6 +46,7 @@ pub struct Placement {
     pub clocks: BTreeMap<synth_netlist::NetId, Site>,
     pub rams: BTreeMap<CellId, Site>,
     pub dsps: BTreeMap<CellId, Site>,
+    pub plls: BTreeMap<CellId, Site>,
     pub hpwl: f64,
 }
 fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> {
@@ -144,6 +145,26 @@ pub fn place(
             return Err(format!("XDC references nonexistent port {n}"));
         }
     }
+    // Each PLL on the free PLL site nearest the pad of its reference clock
+    // (a clock-capable pin reaches the PLLs of its clock region directly).
+    let mut plls = BTreeMap::new();
+    let mut pll_sites = sites(db, |k| k == crate::pll::PLL)?;
+    for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == crate::pll::PLL) {
+        let pad = nl
+            .pin_net(c, "CLKIN1")
+            .and_then(|n| nl.nets[n].driver)
+            .and_then(|d| ports.get(&d.cell))
+            .map(|s: &Site| &db.tiles[s.tile]);
+        let at = |s: &Site| {
+            let t = &db.tiles[s.tile];
+            pad.map_or(0, |p| {
+                (i32::from(t.x) - i32::from(p.x)).abs() + (i32::from(t.y) - i32::from(p.y)).abs()
+            })
+        };
+        let i = (0..pll_sites.len()).min_by_key(|&i| at(&pll_sites[i])).ok_or("not enough PLLs")?;
+        plls.insert(c, pll_sites.remove(i));
+    }
+    let fixed_at = |c: &CellId| ports.get(c).or_else(|| plls.get(c));
     // Slices only where a global clock reaches.
     let mut all = sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
     all.retain(|s| s.node(db, "CLK").is_ok_and(|n| clocked.get(n as usize) == Some(&true)));
@@ -284,7 +305,7 @@ pub fn place(
         } else if let Some(&h) = hard_index.get(&c) {
             Some(End::Hard(h))
         } else {
-            let t = &db.tiles[ports.get(&c)?.tile];
+            let t = &db.tiles[fixed_at(&c)?.tile];
             Some(End::Fixed(i32::from(t.x), i32::from(t.y)))
         }
     };
@@ -301,7 +322,7 @@ pub fn place(
                     clusters.insert(s);
                 } else if let Some(&h) = hard_index.get(&pin.cell) {
                     blocks.insert(h);
-                } else if let Some(site) = ports.get(&pin.cell) {
+                } else if let Some(site) = fixed_at(&pin.cell) {
                     let tile = &db.tiles[site.tile];
                     fixed.push((f64::from(tile.x), f64::from(tile.y)));
                 }
@@ -420,6 +441,7 @@ pub fn place(
             clocks: BTreeMap::new(),
             rams,
             dsps,
+            plls: plls.clone(),
             hpwl: (0..nets.len()).map(hpwl).sum(),
         }
     };
@@ -840,8 +862,7 @@ pub fn place(
     let mut used = BTreeSet::new();
     for clock in clock_nets {
         let drv = nl.nets[clock].driver.ok_or("clock has no driver")?;
-        let origin = ports
-            .get(&drv.cell)
+        let origin = fixed_at(&drv.cell)
             .map(|s| s.tile)
             .or_else(|| p.slots.get(&drv.cell).map(|&(s, _)| all[loc[s].get()].tile))
             .ok_or("unsupported clock source")?;

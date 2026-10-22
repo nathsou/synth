@@ -148,7 +148,9 @@ sequential clean-up; LUT mapping with remapping and don't-care optimisation,
 timing through carry chains, block RAM inference), packing, timing-driven
 placement and routing (with LUT input permutation), static timing analysis
 against clock constraints (`set_frequency` in the PCF or `--freq`) and
-bitstream generation are implemented for the iCE40 HX1K and HX8K.
+bitstream generation are implemented for the iCE40 HX1K and HX8K, PLLs
+included: `synth_pll<IN_HZ, OUT_HZ>` (Weft or Verilog) makes a clock with the
+device's PLL on iCE40 and Artix-7 alike ([docs/WEFT.md](docs/WEFT.md) §8.7).
 [examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
 (Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
 

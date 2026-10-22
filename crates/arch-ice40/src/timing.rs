@@ -261,6 +261,7 @@ fn clock_name(nl: &Netlist, net: NetId) -> String {
                 None => break,
             },
             LC => return nl.str(nl.cells[d.cell].name).trim_end_matches("$lc").to_string(),
+            crate::pll::CORE => return nl.str(nl.cells[d.cell].name).to_string(),
             _ => break,
         }
     }
