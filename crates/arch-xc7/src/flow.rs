@@ -38,8 +38,22 @@ pub fn implement(
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
     let mut log = Vec::new();
+    let original = nl.clone();
     let mut p = pack::pack(&mut nl)?;
-    log.push(format!("packed {} slices, {} carry chains", p.slices.len(), p.chains.len()));
+    // Timing-driven packing: the cells critical in the first packing, timed
+    // with a fixed delay between slices, are packed again on outputs that
+    // leave their slice directly.
+    let critical = crate::sta::Timer::new(root, &nl, &p)?.packing_critical(&p);
+    if !critical.is_empty() {
+        nl = original;
+        p = pack::pack_timed(&mut nl, &critical)?;
+    }
+    log.push(format!(
+        "packed {} slices, {} carry chains ({} critical cells)",
+        p.slices.len(),
+        p.chains.len(),
+        critical.len()
+    ));
     let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
@@ -135,10 +149,10 @@ pub fn implement(
     };
     let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
         let wires =
-            crate::sta::routed_wires(&db, &graph, &requests, &request_nets, routes, &owners);
+            crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, routes, &owners);
         // Connections not routed yet keep their predicted delays.
-        let a =
-            timer.analyze(&|c, n| wires.get(&(c, n)).copied().unwrap_or_else(|| predicted(c, n)));
+        let a = timer
+            .analyze(&|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)));
         let criticality = requests
             .iter()
             .enumerate()
@@ -196,8 +210,9 @@ pub fn implement(
         features.len(),
         start.elapsed().as_secs_f64()
     ));
-    let wires = crate::sta::routed_wires(&db, &graph, &requests, &request_nets, &routes, &owners);
-    let routed = |c, n| wires.get(&(c, n)).copied().unwrap_or(0.0);
+    let wires =
+        crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, &routes, &owners);
+    let routed = |c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0);
     let timing = timer.analyze(&routed).clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
@@ -231,6 +246,10 @@ pub fn implement(
         if let (Some(first), Some(last)) = (clock.path.first(), clock.path.last()) {
             log.push(format!("critical path: {first} -> {last} ({} pins)", clock.path.len()));
         }
+    }
+    if let Ok(path) = std::env::var("SYNTH_XC7_PATH") {
+        let pins: Vec<String> = timing.iter().flat_map(|c| c.path.iter().cloned()).collect();
+        std::fs::write(&path, pins.join("\n")).map_err(|e| e.to_string())?;
     }
     // For comparison with nextpnr-xilinx, which does not time them.
     if nl.live_cells().any(|c| matches!(nl.cell_kind(c), "RAMB18E1" | "DSP48E1")) {
@@ -304,13 +323,15 @@ fn predictor<'a>(
     nl: &'a Netlist,
     p: &'a Packed,
     pl: &'a Placement,
-) -> impl Fn(CellId, NetId) -> f64 + 'a {
-    move |c, n| {
+) -> impl Fn(CellId, u32, NetId) -> f64 + 'a {
+    move |c, i, n| {
         let Some(d) = nl.nets[n].driver else { return 0.0 };
         match (location(db, p, pl, d.cell), location(db, p, pl, c)) {
             (Some((a, sa)), Some((b, sb))) if a == b && sa == sb => 0.0,
+            _ if crate::sta::dedicated(nl, c, i) => 0.0,
             (Some(((ax, ay), _)), Some(((bx, by), _))) => {
                 crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
+                    + crate::sta::output_delay(nl, p, n)
             }
             _ => 0.0,
         }

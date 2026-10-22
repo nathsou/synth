@@ -1,11 +1,13 @@
 //! Static timing estimate of a routed design from Project X-Ray delay data.
 //!
 //! Routing delays follow nextpnr-xilinx's model of the same data (each pip's
-//! slow-corner intrinsic delay plus RC terms of its wires), and cell arcs are
-//! the slow-corner SDF characterization, so estimates are comparable with
-//! nextpnr's. They are not calibrated against vendor timing or hardware.
-//! Only register-to-register paths within one clock are analyzed, without
-//! clock skew; block RAM arcs are the worst over its modes and pins.
+//! slow-corner intrinsic delay plus RC terms of its wires), scaled and
+//! completed to Vivado 2025.2's net delays (`device::VENDOR_SCALE`). Cell
+//! arcs are the slow-corner SDF characterization, but for flip-flops, timed
+//! as Vivado times them. Vivado's arcs have equal rise and fall delays, so
+//! one delay per arc loses nothing. Only register-to-register paths within
+//! one clock are analyzed, without clock skew; block RAM arcs are the worst
+//! over its modes and pins.
 use crate::device::Device;
 use crate::flow::Owners;
 use crate::pack::{self, Packed};
@@ -72,11 +74,24 @@ impl Arcs {
     }
 }
 
-/// Flip-flop set and reset setup (ps), which Project X-Ray's timing data
-/// lacks: Vivado 2025.2's slow-corner FDRE R check, against its D checks
-/// of about -50 ps (the SDF's) and CE of 170-410 ps (the SDF's 109 with
-/// the enable's routing, fitted in `device::untimed_pip_delay`).
-const FF_SR_SETUP: f64 = 429.0;
+/// Flip-flop timing (ps): Vivado 2025.2's slow corner in SLICEL sites,
+/// read from its timing arcs on routed Euler designs (SLICEM's clock to Q
+/// is 60 ps slower and its data setups 30-50 faster). X-Ray's SDF has one
+/// clock to Q of 340 for both banks, a data setup of -45 and an enable
+/// setup of 109, and no set or reset setup. Clock to Q of AFF-DFF and of
+/// A5FF-D5FF.
+const FF_CLK_Q: [f64; 2] = [456.0, 419.0];
+/// Data setup from the lane's own LUT or carry, by bank (the second bank's
+/// data from the lane's O5), and through the bypass input from routing.
+const FF_SETUP_LOCAL: [f64; 2] = [-31.0, -75.0];
+const FF_SETUP_ROUTED: f64 = 67.0;
+/// Clock enable, and set or reset.
+const FF_SETUP_CE: f64 = 205.0;
+const FF_SETUP_SR: f64 = 429.0;
+
+/// Criticality from which a connection's driver is packed on a direct
+/// output (`Timer::packing_critical`), for at most 1% more slices.
+const PACKING_CRITICAL: f32 = 0.7;
 
 /// Block RAM input classes with setup checks, by netlist pin prefix (`DI`
 /// covers the parity inputs `DIP...`).
@@ -93,9 +108,6 @@ struct Model {
     f8: f64,
     /// CARRY4 arcs by SDF pin names (`CIN`, `S0`, `DI0` to `CO3`, `O3`...).
     carry: FxHashMap<(String, String), f64>,
-    ff_clk_q: f64,
-    /// Flip-flop setup by input: data, clock enable, and set or reset.
-    ff_setup: [f64; 3],
     lutram_clk_o: f64,
     lutram_read: f64,
     lutram_setup: f64,
@@ -272,12 +284,6 @@ impl Model {
                     *d = f64::max(*d, max * 1000.0);
                     m
                 }),
-            ff_clk_q: need(a.delay("REG_INIT_FF", |f, t| f == "CLK" && t == "Q"), "FF clock")?,
-            ff_setup: [
-                need(a.setup("REG_INIT_FF", |p| p == "DIN"), "FF data setup")?,
-                need(a.setup("REG_INIT_FF", |p| p == "CE"), "FF enable setup")?,
-                FF_SR_SETUP,
-            ],
             lutram_clk_o: need(a.delay("LUT_OR_MEM6LRAM", |f, _| f == "CLK"), "LUT RAM clock")?,
             lutram_read: need(
                 a.delay("LUT_OR_MEM6LRAM", |f, _| f.starts_with('A')),
@@ -422,8 +428,9 @@ struct Sequential {
     edge: Edge,
     clk_to_out: f64,
     setup: f64,
-    /// The inputs checked and their setups, if not all data inputs alike.
-    capture: Option<Vec<(u32, f64)>>,
+    /// The inputs checked, if not all data inputs alike, with their setups
+    /// from routing and from within the site.
+    capture: Option<Vec<(u32, f64, f64)>>,
 }
 
 /// The timing graph of a packed design: cell arcs, launch and capture
@@ -511,7 +518,7 @@ impl<'a> Timer<'a> {
             if let Some(config) = dsp.filter(|d| d.clocked()) {
                 let capture = ins
                     .iter()
-                    .filter_map(|&i| model.dsp.setup(&config, pin(c, i)).map(|d| (i as u32, d)))
+                    .filter_map(|&i| model.dsp.setup(&config, pin(c, i)).map(|d| (i as u32, d, d)))
                     .collect();
                 if let Some(n) = nl.pin_net(c, "CLK").filter(|&n| nl.nets[n].constant.is_none()) {
                     seq.push(Sequential {
@@ -525,21 +532,22 @@ impl<'a> Timer<'a> {
                 continue;
             }
             if pack::is_ff(k) {
+                let bank = p.slots.get(&c).map_or(0, |&(_, slot)| slot / 4);
                 let capture = (0..nl.cells[c].pins.len())
                     .filter(|&i| nl.cells[c].pins[i].dir == Dir::Input)
                     .filter_map(|i| {
-                        let setup = match pin(c, i) {
-                            "D" => model.ff_setup[0],
-                            "CE" => model.ff_setup[1],
-                            "R" | "S" | "CLR" | "PRE" => model.ff_setup[2],
+                        let (setup, local) = match pin(c, i) {
+                            "D" => (FF_SETUP_ROUTED, FF_SETUP_LOCAL[bank]),
+                            "CE" => (FF_SETUP_CE, FF_SETUP_CE),
+                            "R" | "S" | "CLR" | "PRE" => (FF_SETUP_SR, FF_SETUP_SR),
                             _ => return None,
                         };
-                        Some((i as u32, setup))
+                        Some((i as u32, setup, local))
                     })
                     .collect();
                 if let Some(n) = nl.pin_net(c, "C").filter(|&n| nl.nets[n].constant.is_none()) {
                     let edge = (n, pack::param(nl, c, "IS_C_INVERTED", 0) != 0);
-                    let clk_to_out = model.ff_clk_q;
+                    let clk_to_out = FF_CLK_Q[bank];
                     seq.push(Sequential {
                         cell: c,
                         edge,
@@ -576,7 +584,7 @@ impl<'a> Timer<'a> {
                         } else {
                             *d
                         };
-                        Some((i as u32, d))
+                        Some((i as u32, d, d))
                     })
                     .collect();
                 if let Some(n) =
@@ -637,6 +645,30 @@ impl<'a> Timer<'a> {
         Ok(Timer { nl, order, arcs, seq })
     }
 
+    /// The LUTs and flip-flops driving connections of criticality at least
+    /// `PACKING_CRITICAL` in packing `p`, timed with `predicted_delay(2, 2)`
+    /// and `output_delay` between slices.
+    pub fn packing_critical(&self, p: &Packed) -> std::collections::BTreeSet<CellId> {
+        let nl = self.nl;
+        let slice = |c: CellId| p.slots.get(&c).map(|&(s, _)| s);
+        let between = predicted_delay(2, 2);
+        let wire = |c: CellId, i: u32, n: NetId| match nl.nets[n].driver {
+            Some(d) if slice(d.cell).is_some() && slice(d.cell) == slice(c) => 0.0,
+            Some(_) if !dedicated(nl, c, i) => between + output_delay(nl, p, n),
+            _ => 0.0,
+        };
+        let a = self.analyze(&wire);
+        a.slack
+            .keys()
+            .filter(|&&(c, n)| a.criticality(c, n) >= PACKING_CRITICAL)
+            .filter_map(|&(_, n)| nl.nets[n].driver.map(|d| d.cell))
+            .filter(|&d| {
+                let k = nl.cell_kind(d);
+                pack::is_lut(k) || pack::is_ff(k)
+            })
+            .collect()
+    }
+
     /// The timing graph without block RAM and DSP cells: the paths
     /// nextpnr-xilinx times, which has no timing for them.
     pub fn fabric(&self) -> Timer<'a> {
@@ -652,9 +684,9 @@ impl<'a> Timer<'a> {
         }
     }
 
-    /// Analyzes the design with wire delays `wire(cell, net)` (ps) from each
-    /// net's driver to each cell reading it.
-    pub fn analyze(&self, wire: &dyn Fn(CellId, NetId) -> f64) -> Analysis {
+    /// Analyzes the design with wire delays `wire(cell, pin, net)` (ps) from
+    /// each net's driver to each cell input pin reading it.
+    pub fn analyze(&self, wire: &dyn Fn(CellId, u32, NetId) -> f64) -> Analysis {
         let nl = self.nl;
         let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>> = FxHashMap::default();
         for s in &self.seq {
@@ -670,7 +702,7 @@ impl<'a> Timer<'a> {
             |arrival: &FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>>, c: CellId, i: u32| {
                 let n = nl.cells[c].pins[i as usize].net?;
                 let d = nl.nets[n].driver?;
-                let w = wire(c, n);
+                let w = wire(c, i, n);
                 arrival
                     .get(&(d.cell, d.pin))
                     .map(|m| m.iter().map(|(&e, a)| (e, a.time + w)).collect::<Vec<_>>())
@@ -690,10 +722,16 @@ impl<'a> Timer<'a> {
             }
         }
         // Setup checks: paths within one clock; opposite edges have half a
-        // period.
+        // period. An input without wire delay is driven within its site.
         let checks = |s: &Sequential| -> Vec<(u32, f64)> {
             if let Some(c) = &s.capture {
-                return c.clone();
+                let local = |i: u32| {
+                    nl.cells[s.cell].pins[i as usize].net.is_some_and(|n| wire(s.cell, i, n) == 0.0)
+                };
+                return c
+                    .iter()
+                    .map(|&(i, setup, l)| (i, if local(i) { l } else { setup }))
+                    .collect();
             }
             let pins = &nl.cells[s.cell].pins;
             (0..pins.len() as u32)
@@ -738,7 +776,7 @@ impl<'a> Timer<'a> {
             |required: &mut FxHashMap<(CellId, u32), f64>, c: CellId, i: u32, req: f64| {
                 let Some(n) = nl.cells[c].pins[i as usize].net else { return };
                 let Some(d) = nl.nets[n].driver else { return };
-                let w = wire(c, n);
+                let w = wire(c, i, n);
                 if let Some(arr) = arrival
                     .get(&(d.cell, d.pin))
                     .map(|m| m.values().map(|a| a.time).fold(f64::MIN, f64::max))
@@ -809,28 +847,38 @@ impl<'a> Timer<'a> {
     }
 }
 
-/// Routing delay from each net to each cell reading it (none for in-site
-/// paths): the worst where a cell reads a net at several pins.
+/// Routing delay to each cell input pin (none for in-site paths).
 pub fn routed_wires(
     db: &Device,
+    nl: &Netlist,
     graph: &RoutingGraph,
     requests: &[synth_route::NetRequest],
     request_nets: &[Option<NetId>],
     routes: &[synth_route::NetRoute],
     owners: &Owners,
-) -> FxHashMap<(CellId, NetId), f64> {
+) -> FxHashMap<(CellId, u32), f64> {
     let routed = net_delays(db, graph, requests, routes);
     if let Ok(path) = std::env::var("SYNTH_XC7_DELAYS") {
         dump_delays(db, graph, requests, routes, &routed, &path);
     }
-    let mut wire: FxHashMap<(CellId, NetId), f64> = FxHashMap::default();
+    let mut wire: FxHashMap<(CellId, u32), f64> = FxHashMap::default();
     for (i, req) in requests.iter().enumerate() {
         let Some(net) = request_nets[i] else { continue };
         for &sink in &req.sinks {
-            for &(c, _, n) in owners.get(&sink).into_iter().flatten() {
-                if n == net {
-                    let d = routed.get(&(i, sink)).copied().unwrap_or(0.0);
-                    let w = wire.entry((c, n)).or_insert(0.0);
+            for (c, name, n) in owners.get(&sink).into_iter().flatten() {
+                if *n != net {
+                    continue;
+                }
+                let d = routed.get(&(i, sink)).copied().unwrap_or(0.0);
+                // Slice sinks are owned by netlist pin; block RAM and DSP
+                // sinks by site pin, so those take the worst over the cell's
+                // pins on the net.
+                let pins = &nl.cells[*c].pins;
+                let on_net = |k: &usize| pins[*k].dir == Dir::Input && pins[*k].net == Some(net);
+                let named = (0..pins.len()).find(|k| on_net(k) && nl.str(pins[*k].name) == name);
+                for k in named.map_or_else(|| (0..pins.len()).filter(on_net).collect(), |k| vec![k])
+                {
+                    let w = wire.entry((*c, k as u32)).or_insert(0.0);
                     *w = w.max(d);
                 }
             }
@@ -902,6 +950,26 @@ fn dump_delays(
     }
     lines.sort();
     let _ = std::fs::write(path, lines.concat());
+}
+
+/// The delay (ps) net `n` adds to leave its slice before routing: through
+/// an output multiplexer from the second flip-flop bank, a LUT's O5, a carry
+/// or a wide multiplexer, which have no direct output.
+pub fn output_delay(nl: &Netlist, p: &Packed, n: NetId) -> f64 {
+    let Some(d) = nl.nets[n].driver else { return 0.0 };
+    let k = nl.cell_kind(d.cell);
+    let muxed = match p.slots.get(&d.cell) {
+        Some(&(_, slot)) if pack::is_ff(k) => slot >= 4,
+        Some(&(s, l)) if pack::is_lut(k) => p.slices[s].lut5[l] == Some(d.cell),
+        _ => matches!(k, "CARRY4" | "MUXF7" | "MUXF8"),
+    };
+    if muxed { f64::from(crate::device::OUTPUT_MUX_DELAY) } else { 0.0 }
+}
+
+/// Whether input `i` of cell `c` is reached by a dedicated wire between
+/// slices: a carry's CI from the CO[3] below.
+pub fn dedicated(nl: &Netlist, c: CellId, i: u32) -> bool {
+    nl.cell_kind(c) == "CARRY4" && nl.str(nl.cells[c].pins[i as usize].name) == "CI"
 }
 
 /// The routing delay between two tiles before routing (ps): a piecewise

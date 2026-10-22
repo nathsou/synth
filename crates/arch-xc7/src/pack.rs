@@ -370,6 +370,13 @@ fn di_lut(
 }
 
 pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
+    pack_timed(nl, &BTreeSet::new())
+}
+
+/// Packs `nl` keeping the `critical` LUTs and flip-flops on outputs that
+/// leave their slice directly: LUTs off the lanes' O5 and flip-flops out of
+/// the second bank, whose outputs pass the output multiplexers.
+pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packed, String> {
     nl.check().map_err(|e| e.to_string())?;
     // An inverter is a one-input LUT.
     let inverters: Vec<_> = nl.live_cells().filter(|&c| nl.cell_kind(c) == "INV").collect();
@@ -658,7 +665,7 @@ pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
             e.insert(l);
         }
     }
-    cluster(nl, &mut p, loose_ffs)?;
+    cluster(nl, &mut p, loose_ffs, critical)?;
     for c in nl.live_cells() {
         if nl.cell_kind(c) == "DSP48E1" {
             crate::physical_dsp::validate(nl, c)?;
@@ -715,7 +722,12 @@ enum Fit {
 /// all taken. Connected logic so shares slices, which the
 /// placer moves as units: the first-fit packing this replaces spread it
 /// over the design, about doubling the wirelength of any placement.
-fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), String> {
+fn cluster(
+    nl: &mut Netlist,
+    p: &mut Packed,
+    ffs: Vec<CellId>,
+    critical: &BTreeSet<CellId>,
+) -> Result<(), String> {
     let luts: Vec<CellId> =
         nl.live_cells().filter(|&c| is_lut(nl.cell_kind(c)) && !p.slots.contains_key(&c)).collect();
     let lut_set: BTreeSet<CellId> = luts.iter().copied().collect();
@@ -784,7 +796,7 @@ fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), Str
                     .collect();
                 // Constant sources are routed from their lane's O6 pin.
                 let constant = p.constant_luts.values().any(|&k| k == lut);
-                let o5 = (ins.len() <= 5 && !constant)
+                let o5 = (ins.len() <= 5 && !constant && !critical.contains(&lut))
                     .then(|| {
                         (0..4).find(|&l| {
                             x.luts[l].is_some() && x.ffs[l + 4].is_none() && x.o5_fits(nl, l, &ins)
@@ -797,7 +809,8 @@ fn cluster(nl: &mut Netlist, p: &mut Packed, ffs: Vec<CellId>) -> Result<(), Str
                 let d = nl.pin_net(ff, "D")?;
                 // A lane's X input can feed both its flip-flops the same net.
                 let x_ok = |l: usize| x.x_free(nl, l) && x.x_net(nl, l).is_none_or(|n| n == d);
-                (0..12)
+                let banks = if critical.contains(&ff) { 4 } else { 12 };
+                (0..banks)
                     .find(|&k| {
                         if k < 4 {
                             x.ffs[k].is_none() && x_ok(k)
