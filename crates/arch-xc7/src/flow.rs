@@ -702,7 +702,10 @@ fn external(nl: &Netlist, p: &Packed, n: NetId) -> bool {
                         .and_then(|x| x.strip_suffix(']'))
                         .and_then(|x| x.parse().ok())
                         .is_some_and(|k| slice.di_from_o5(nl, k))
+                // Only a flip-flop's data input reads inside the slice: its
+                // clock enable and reset come through the interconnect.
                 || pack::is_ff(nl.cell_kind(u.cell))
+                    && pin == "D"
                     && pack::ff_mux(nl, slice, l, u.cell) != "BYPASS");
         !internal
     })
@@ -1078,4 +1081,51 @@ fn packing_macros(nl: &Netlist, p: &Packed) -> String {
         out.push_str("]\n}\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synth_netlist::{Const, Param};
+
+    #[test]
+    fn a_flip_flop_enable_from_its_own_slice_leaves_through_the_outmux() {
+        // d = a & b on a lane's O6 feeds a flip-flop whose enable e = !a is
+        // a LUT packed into the same slice: the enable reaches CE through
+        // the interconnect, so its LUT's output must leave the slice.
+        let mut nl = Netlist::default();
+        let input = |nl: &mut Netlist, name: &str| {
+            let c = nl.add_cell(name, synth_netlist::INPUT_PORT);
+            let n = nl.add_net(name);
+            nl.add_pin(c, "PAD", Dir::Output, Some(n)).unwrap();
+            n
+        };
+        let (clk, a, b) = (input(&mut nl, "clk"), input(&mut nl, "a"), input(&mut nl, "b"));
+        let lut = |nl: &mut Netlist, ins: &[NetId], init: i64| {
+            let c = nl.add_cell("lut", &format!("LUT{}", ins.len()));
+            nl.set_param(c, "INIT", Param::Int(init));
+            for (i, &n) in ins.iter().enumerate() {
+                nl.add_pin(c, &format!("I{i}"), Dir::Input, Some(n)).unwrap();
+            }
+            let o = nl.add_net("o");
+            nl.add_pin(c, "O", Dir::Output, Some(o)).unwrap();
+            o
+        };
+        let d = lut(&mut nl, &[a, b], 0b1000);
+        let e = lut(&mut nl, &[a], 0b01);
+        let zero = nl.add_const_net(Const::Zero);
+        let ff = nl.add_cell("ff", "FDRE");
+        for (pin, n) in [("C", clk), ("D", d), ("CE", e), ("R", zero)] {
+            nl.add_pin(ff, pin, Dir::Input, Some(n)).unwrap();
+        }
+        let q = nl.add_net("q");
+        nl.add_pin(ff, "Q", Dir::Output, Some(q)).unwrap();
+        let out = nl.add_cell("q", synth_netlist::OUTPUT_PORT);
+        nl.add_pin(out, "PAD", Dir::Input, Some(q)).unwrap();
+        let p = pack::pack(&mut nl).unwrap();
+        let slice = |n: NetId| p.slots[&nl.nets[n].driver.unwrap().cell].0;
+        assert_eq!(slice(e), p.slots[&ff].0, "the enable's LUT shares the flip-flop's slice");
+        assert!(external(&nl, &p, e));
+        assert!(!external(&nl, &p, d));
+    }
 }
