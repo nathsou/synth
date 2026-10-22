@@ -86,8 +86,11 @@ target/release/synth sim soc.v picorv32.v --top top --cycles 200000 --uart tx:8
 For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
 `<top>.c`) to compile with a testbench of your own, like a Verilator model.
 `--attach` places external memories (a ROM on the design's address and data
-ports) inside the model. On the NES of the Weft examples, the C model runs
-1.8 times as fast as Verilator, and on the PicoRV32 SoC half as fast; the
+ports) inside the model. The model runs only the logic that changed, or all
+of it, as Verilator does, when most of it changes at each edge
+(`-DSIM_SETTLE_CHANGED` or `-DSIM_SETTLE_ALL` forces one). On the NES of the
+Weft examples, the C model runs twice as fast as Verilator, and on the
+PicoRV32 SoC 0.7 times as fast; the
 interpreter is 5 to 15 times slower than the C model. `--optimize` speeds up
 the interpreter (it is always on for C models), at the cost of internal
 signals. Rust code drives simulations through the `synth-sim` crate. See
