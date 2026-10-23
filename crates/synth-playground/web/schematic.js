@@ -145,14 +145,11 @@ export class Schematic {
 
   renderToolbar() {
     const tb = this.toolbar;
-    const stageSel = h('select', { onchange: (e) => this.setStage(e.target.value), title: 'Stage of the flow' },
-      this.stages.map((s) => h('option', { value: s.id, selected: s === this.stage }, s.title)));
     const search = h('input', {
       type: 'search', placeholder: 'Find a cell or signal…',
       onkeydown: (e) => { if (e.key === 'Enter') this.find(e.target.value); },
     });
     fill(tb, 
-      h('div', { class: 'group' }, stageSel),
       h('div', { class: 'group' },
         h('button', { title: 'Collapse every instance (module level)', onclick: () => this.collapseAll() }, icon('minus'), 'Modules'),
         h('button', { title: 'Expand every instance (down to the cells)', onclick: () => this.expandAll() }, icon('plus'), 'Cells')),

@@ -3,11 +3,11 @@
 
 import { h, icon, store, Emitter } from './util.js';
 
-export const ACCENTS = ['#7aa2ff', '#4fd1c5', '#5fd38d', '#f0b450', '#ff8a65', '#ff6b9a', '#b18cff'];
+export const ACCENTS = ['#5ed3b3', '#8db4ff', '#7aa2ff', '#f2b54b', '#ff8a65', '#ff6b9a', '#b18cff'];
 
 const DEFAULTS = {
   theme: 'dark',
-  accent: '#7aa2ff',
+  accent: '#5ed3b3',
   layout: 'left', // editor position: left, right or hidden
   codeSize: 13,
   // Off by default: a long flow on every pause in typing gets in the way.
@@ -85,8 +85,6 @@ function apply(v) {
     main.classList.toggle('editor-right', v.layout === 'right');
     main.classList.toggle('editor-hidden', v.layout === 'hidden');
   }
-  const themeBtn = document.querySelector('#theme use');
-  if (themeBtn) themeBtn.setAttribute('href', v.theme === 'dark' ? '#i-moon' : '#i-sun');
 }
 apply(settings.v);
 
@@ -205,6 +203,8 @@ const SECTIONS = [
     const keys = [
       [`${mod} Enter`, 'Run the flow'],
       [`${mod} S`, 'Run the flow'],
+      [`${mod} K`, 'Jump to a step, file, cell, example or action'],
+      [`${mod} B`, 'Show or hide the editor'],
       [`${mod} click`, 'Go to the definition of a name'],
       [`${mod} Space`, 'Complete a name'],
       ['.', 'Complete ports, fields and variants'],

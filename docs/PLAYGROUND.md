@@ -48,6 +48,24 @@ WebGL2.
 
 ## What it shows
 
+**Layout.** The top bar holds the design (its example, with a dot once
+edited), the board, the Run button and the result of the last run, then
+**Jump to…** (Ctrl+K, ⌘K on a Mac), the share link, the bitstream download,
+USB programming and the settings. The editor is on the left, with problems and
+the log folded under it; Ctrl+B hides it to a rail of its files. The rest of
+the page is the flow: a rail of its steps, each with its headline number
+(cells, AND gates, LUTs, logic cells, the share of the die, routed wires,
+Fmax, the bitstream's size) and how it changed from the step before, then the
+view of the step that is open. **Simulate**, at the head of the rail, runs
+the design instead. A status bar at the bottom shows where the flow runs (in
+the browser or on the local server), the problems, the logic used, Fmax
+against its target and the cursor's position.
+
+**Jump to.** One list of the steps, the files, actions (run, simulate,
+format, show problems or the log, share, download, program, the critical
+path on the chip, the theme, the settings, the board), the examples and,
+once two letters are typed, the cells and signals of the schematic's step.
+
 **Editor.** Files are tabs: Weft (`.weft`), Verilog (`.v`) and the pin
 constraints (`.pcf` for iCE40, `.xdc` for Artix-7). As you type, the Weft sources are checked: errors and
 lint warnings are underlined, hovering a name shows its type, value range,
@@ -58,16 +76,18 @@ not only by syntax. The format button (Shift+Alt+F) lays out a Weft file as
 `synth fmt` does. The flow runs when you press Run (Ctrl+Enter); with **Run
 after edits** (in the run options) it also runs shortly after you stop typing.
 
-**Examples.** Blinky, a UART greeting and echo, breathing LEDs, Conway's Game
+**Examples.** The design's name opens them, searchable: Blinky, a UART greeting and echo, breathing LEDs, Conway's Game
 of Life over a UART, three RV32I cores running the same program (one
 instruction per cycle, five cycles per instruction, and a five-stage pipeline
 with forwarding), and ten Project Euler solvers (`tests/designs/euler`) that
 send `<answer> <cycles>` over the UART and show the answer's low byte on the
 LEDs. Each starts on a board's device, and its pins file is that board's.
-Changing the device or package replaces it with the pins of a board that uses
-it (Nandland Go Board, iCEstick, iCE40-HX8K Breakout Board, Alchitry Cu,
-Alchitry Au, Digilent Nexys A7-100T), or with none, so that the placer chooses
-them; it asks first if the file was edited. The pins file is `pins.pcf` on
+The board button picks a board (Nandland Go Board, iCEstick, iCE40-HX8K
+Breakout Board, Alchitry Cu, Alchitry Au, Digilent Nexys A7-100T), which
+replaces the pins file with that board's; under the boards, any device and
+package can be chosen instead, with the pins of a board that uses them, or
+with none, so that the placer chooses them. It asks first if the pins file
+was edited. The pins file is `pins.pcf` on
 iCE40 and `pins.xdc` on Artix-7; constraints for ports the design does not
 have are ignored (and logged), so every board file lists all of its LEDs,
 buttons and UART pins.
@@ -84,16 +104,21 @@ until it locks; the PLL's output frequency is then the timing target. Only
 the small examples and Euler 31 fit the Go's HX1K, which has no PLL in its
 package.
 
-**Pipeline.** Each step of the flow with its statistics and how they changed
-from the previous step: cells by kind after elaboration, after RTL
+**Summary.** The first step: what the design uses of the device (logic
+cells, IO pins, block RAM; slices, block RAMs, DSPs and IOs on Artix-7), its
+Fmax and slack, then each step of the flow with its statistics, how they
+changed from the previous step and the time it took: cells by kind after elaboration, after RTL
 optimisation and after memory mapping; AND gates, flip-flops and carry chains
 after lowering and after gate optimisation; iCE40 primitives after LUT
 mapping; logic cells after packing; then placement, routing, timing and the
 bitstream. On Artix-7, synthesis maps to 7-series primitives (LUT6, CARRY4,
 FDRE, RAMB, DSP48E1, …) and the physical flow is one step, with the slices,
-block RAMs, DSPs and IOs used; the Chip and Bitstream views are iCE40 only. Click a step to inspect it.
+block RAMs, DSPs and IOs used; the Chip and Bitstream views are iCE40 only. Beside them, the critical path
+split into the delay of cells and of wires, and the problems. Click a step to
+open it.
 
-**Schematic.** The design at any of those steps as a graph. Instances start
+**Schematic.** The design at any of the synthesis steps, and after packing,
+as a graph. Instances start
 collapsed into blocks with their boundary signals as ports (the module-level
 view); double-click a block, or use **Cells**, to open it down to the
 operators, gates, LUTs and flip-flops. The gate level shows the and-inverter
@@ -160,22 +185,24 @@ each request (about 25 times a second) and sent only when it changed; its
 label counts the changes. The Game of Life marks its grid this way, so it
 shows both the grid itself and what it draws over the UART.
 
-**Progress.** While the flow runs, the status bar shows a bar with a segment
-per step (elaborating, synthesising, loading the device, packing, placing,
+**Progress.** While the flow runs, the Run button turns into a bar with a
+segment per step (elaborating, synthesising, loading the device, packing, placing,
 routing, timing, the bitstream), the step and what it is doing (the mapping
 candidate, the annealing round and its acceptance rate, the routing
-iteration and how many wires are still congested) and the time so far; a
-line under the top bar shows the whole run. The placer and the router say
+iteration and how many wires are still congested) and the time so far are written beside it, and the step of the rail that is
+running is striped; a line under the top bar shows the whole run. The placer and the router say
 how far through they are (from how far annealing has cooled, and how far
 congestion has fallen); a step that cannot tell is striped. Each segment's
 width is its step's share of a run, learned from the runs in the browser.
 
-**Problems and Log.** Diagnostics (click to jump to the source) and the log of
-the run with the time each part took.
+**Problems and Log.** Under the editor, folded to a line with the first
+problem: diagnostics (click to jump to the source) and the log of the run with
+the time each part took. A run that fails opens them, and the top bar says
+where the flow stopped.
 
 ## Configuring it
 
-The gear opens the settings, kept in the browser:
+The settings button (or Jump to…) opens the settings, kept in the browser:
 
 - appearance: dark or light theme, accent colour, code font size, whether the
   editor is on the left, on the right or hidden (the splitters between the
@@ -239,6 +266,8 @@ fragment, so it is not sent to any server).
   bridge with a flash or a 7-series TAP behind it.
 - `server.rs` is the `synth playground` server: a few lines of HTTP over
   `std::net`, serving the embedded app and `/api/<method>`.
+- `web/menus.js` is the searchable list behind the example and board menus and
+  Jump to; `panels.js` derives the rail's steps from a run (`flowSteps`).
 - The schematic, chip and bitstream views draw with WebGL2 (`gl.js`: instanced
   rounded rectangles and anti-aliased lines, a pan and zoom camera) with a
   Canvas2D layer for text. `layout.js` lays out graphs in layers: cycle

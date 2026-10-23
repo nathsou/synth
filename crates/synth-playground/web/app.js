@@ -4,15 +4,22 @@ import { Backend } from './backend.js';
 import { Editor, langOf } from './editor.js';
 import { Schematic } from './schematic.js';
 import { ChipView } from './chipview.js';
-import { BitstreamView, renderPipeline, renderTiming, renderProblems, renderLog } from './panels.js';
+import { BitstreamView, renderSummary, renderTiming, renderProblems, renderLog, flowSteps, stageInfo } from './panels.js';
+import { openList, closeMenu, matches } from './menus.js';
 import { settings, openSettings, toggle } from './settings.js';
 import { requestFtdi, supported as usbSupported } from './ftdi.js';
 import { programBoard } from './program.js';
 import { SimView } from './simview.js';
 import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
-import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins } from './util.js';
+import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins, fmtNum } from './util.js';
 
 const $ = (id) => document.getElementById(id);
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = MAC ? '⌘' : 'Ctrl';
+
+/** The step of the rail that a progress report's step belongs to. */
+const PROGRESS_STEP = { elaborate: 'elaborated', synthesize: 'mapped', device: 'place', pack: 'packed', place: 'place', route: 'route', timing: 'timing', bitstream: 'bitstream' };
+const PROGRESS_STEP_XC7 = { elaborate: 'elaborated', synthesize: 'mapped_xc7', device: 'pnr', pack: 'pnr', place: 'pnr', route: 'pnr', timing: 'timing', bitstream: 'bitstream' };
 
 /** Byte offset (UTF-8) → string index, for positions from the flow. */
 function byteMapper(text) {
@@ -39,6 +46,9 @@ class App {
     this.examples = [];
     this.devices = [];
     this.view = 'pipeline';
+    // The step of the rail that is open, and Flow or Simulate.
+    this.step = 'summary';
+    this.mode = 'flow';
     this.docState = new Map();
     // The run in progress: {family, start, p}; its elapsed time ticks on
     // between reports.
@@ -68,12 +78,14 @@ class App {
     this.sim = new SimView($('simulation'), this);
     this.setupChrome();
     this.project = (await this.fromHash()) || store.get('project', null) || this.exampleProject(this.examples[0]);
-    // The example the design started from (none: a design of your own).
-    $('example').value = this.examples.some((e) => e.id === this.project.example) ? this.project.example : '';
+    this.backendMode = mode;
     this.fillDevices();
+    this.renderProject();
     this.renderFiles();
     this.openFile(this.project.active || this.project.files[0].name);
-    this.status('idle', mode === 'wasm' ? 'Ready (running in your browser)' : 'Ready (running on the local server)');
+    this.renderRail();
+    this.renderStatusBar();
+    this.status('idle', 'Ready');
     this.analyze();
     this.run();
   }
@@ -110,57 +122,45 @@ class App {
   // ----- chrome -----
 
   setupChrome() {
-    const ex = $('example');
-    ex.replaceChildren(h('option', { value: '' }, 'Choose…'), ...this.examples.map((e) => h('option', { value: e.id, title: e.description }, e.title)));
-    ex.addEventListener('change', () => {
-      const e = this.examples.find((x) => x.id === ex.value);
-      if (!e) return;
-      if (this.project.modified && !confirm('Replace the current files with the example?')) {
-        ex.value = this.project.example || '';
-        return;
-      }
-      this.project = this.exampleProject(e);
-      this.docState.clear();
-      this.sim.designChanged(true);
-      this.save();
-      this.fillDevices();
-      this.renderFiles();
-      this.openFile(this.project.active);
-      this.analyze();
-      this.run();
-    });
-    $('part').addEventListener('change', (e) => {
-      this.project.part = e.target.value;
-      this.fillDevices();
-      this.devicePins();
-    });
-    $('package').addEventListener('change', (e) => {
-      this.project.package = e.target.value;
-      this.fillDevices();
-      this.devicePins();
-    });
+    $('project').addEventListener('click', (e) => this.openExamples(e.currentTarget));
+    $('board').addEventListener('click', (e) => this.openBoards(e.currentTarget));
     $('run').addEventListener('click', () => this.run());
     $('settings').addEventListener('click', () => openSettings());
-    $('theme').addEventListener('click', () => settings.set('theme', settings.get('theme') === 'dark' ? 'light' : 'dark'));
     $('share').addEventListener('click', () => this.share());
-    $('download').addEventListener('click', () => {
-      if (this.result?.bin) download(this.result.bin_name || `${this.result.top || 'design'}.bin`, fromBase64(this.result.bin));
-    });
+    $('download').addEventListener('click', () => this.downloadBitstream());
     $('program').addEventListener('click', () => this.program());
     $('run-options').addEventListener('click', (e) => this.runOptions(e.currentTarget));
-    for (const b of $('view-tabs').querySelectorAll('button')) b.addEventListener('click', () => this.openView(b.dataset.view));
+    $('palette').addEventListener('click', () => this.openPalette());
+    $('run-kbd').textContent = `${MOD} ↵`;
+    $('palette-kbd').textContent = `${MOD} K`;
+    $('run').title = `Run the whole flow (${MOD}+Enter)`;
+    for (const b of $('mode').querySelectorAll('button')) b.addEventListener('click', () => this.setMode(b.dataset.mode));
     for (const b of $('bottom-tabs').querySelectorAll('button')) {
       b.addEventListener('click', () => {
-        for (const x of $('bottom-tabs').querySelectorAll('button')) x.classList.toggle('active', x === b);
-        for (const p of $('bottom-body').children) p.hidden = p.dataset.pane !== b.dataset.tab;
+        this.showBottomTab(b.dataset.tab);
+        this.setBottom(true);
       });
     }
+    $('bottom-toggle').addEventListener('click', () => this.setBottom($('bottom').classList.contains('collapsed')));
+    $('problem-peek').addEventListener('click', () => this.showProblems());
+    $('sb-problems').addEventListener('click', () => this.showProblems());
+    this.setBottom(store.get('bottomOpen', false), true);
     document.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === 'Enter') {
         e.preventDefault();
         this.run();
+      } else if (mod && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        this.openPalette();
+      } else if (mod && (e.key === 'b' || e.key === 'B') && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        this.toggleEditor();
       }
     });
+    // The cursor's line and column, in the status bar.
+    const cursor = () => requestAnimationFrame(() => this.renderCursor());
+    for (const ev of ['keyup', 'pointerup', 'input', 'focusin']) $('editor').addEventListener(ev, cursor);
     // Splitters.
     const lay = store.get('layout', {});
     if (lay.left) document.documentElement.style.setProperty('--left-width', lay.left);
@@ -179,7 +179,10 @@ class App {
       store.set('layout', { ...store.get('layout', {}), bottom: v });
     }, () => document.querySelector('.bottom').getBoundingClientRect().height);
     settings.on('change', (k) => {
-      if (k === 'layout') this.visible();
+      if (k === 'layout') {
+        this.renderFiles();
+        this.visible();
+      }
       if (['seed', 'freq', 'timingWeight', 'effort'].includes(k)) this.scheduleRun();
     });
     this.scheduleRun = debounce(() => this.run(), 900);
@@ -209,16 +212,107 @@ class App {
   }
 
   fillDevices() {
-    const part = $('part'), pkg = $('package');
     if (!this.devices.find((d) => d.part === this.project.part)) this.project.part = 'hx1k';
-    part.replaceChildren(...this.devices.map((d) => h('option', { value: d.part, selected: d.part === this.project.part }, d.part.toUpperCase())));
-    const dev = this.devices.find((d) => d.part === this.project.part);
+    const dev = this.device();
     // A new part starts on a package a board uses, when there is one.
     if (!dev.packages.includes(this.project.package)) {
       this.project.package = Object.keys(dev.boards || {})[0] || dev.packages[0];
     }
-    const label = (p) => (dev.boards?.[p] ? `${p} · ${dev.boards[p]}` : p);
-    pkg.replaceChildren(...dev.packages.map((p) => h('option', { value: p, selected: p === this.project.package }, label(p))));
+    this.renderBoard();
+  }
+
+  device() {
+    return this.devices.find((d) => d.part === this.project.part);
+  }
+
+  /** The board of the current device and package, if one uses them. */
+  boardName() {
+    return this.device()?.boards?.[this.project.package] || '';
+  }
+
+  renderBoard() {
+    const dev = this.device();
+    const board = this.boardName();
+    const hz = dev?.clock_hz?.[this.project.package];
+    $('board-name').textContent = board || `${this.project.part.toUpperCase()} · ${this.project.package.toUpperCase()}`;
+    $('board-meta').textContent = board
+      ? `${this.project.part.toUpperCase()} · ${this.project.package.toUpperCase()}${hz ? ` · ${hz / 1e6} MHz` : ''}`
+      : 'no board';
+    $('board').title = `${board ? `${board}: ` : ''}${dev?.family || ''} ${this.project.part.toUpperCase()}, package ${this.project.package.toUpperCase()}. Change the board`;
+  }
+
+  /** The board picker: the boards by family, then the device and package
+   *  for a design that runs on none of them. */
+  openBoards(anchor) {
+    const boards = [];
+    for (const d of this.devices) {
+      for (const [pkg, name] of Object.entries(d.boards || {})) {
+        const hz = d.clock_hz?.[pkg];
+        boards.push({ d, pkg, name, detail: `${d.part.toUpperCase()} · ${pkg.toUpperCase()}${hz ? ` · ${hz / 1e6} MHz` : ''}` });
+      }
+    }
+    const pick = (part, pkg) => {
+      if (part === this.project.part && pkg === this.project.package) return;
+      this.project.part = part;
+      this.project.package = pkg;
+      this.fillDevices();
+      this.devicePins();
+    };
+    const part = h('select', { 'aria-label': 'Device', onchange: (e) => { closeMenu(); pick(e.target.value, null); } },
+      this.devices.map((d) => h('option', { value: d.part, selected: d.part === this.project.part }, `${d.part.toUpperCase()} · ${d.family}`)));
+    const dev = this.device();
+    const pkg = h('select', { 'aria-label': 'Package', onchange: (e) => { closeMenu(); pick(this.project.part, e.target.value); } },
+      dev.packages.map((p) => h('option', { value: p, selected: p === this.project.package }, dev.boards?.[p] ? `${p} · ${dev.boards[p]}` : p)));
+    const foot = h('div', { class: 'foot' },
+      h('span', { class: 'h4' }, 'Device and package'),
+      h('div', { style: { display: 'flex', gap: '8px' } }, part, pkg),
+      h('span', { class: 'muted', style: { fontSize: '11.5px' } }, 'Without a board, the placer chooses the pins of an iCE40; give every port a pin on an Artix-7.'));
+    openList({
+      anchor, placeholder: 'Find a board or device', width: 400, foot,
+      items: (q) => boards.map((b) => ({
+        group: b.d.family, title: b.name, detail: b.detail,
+        tag: b.d.family === 'Artix-7' && this.backendMode === 'wasm' ? '+4 MB' : null,
+        check: b.d.part === this.project.part && b.pkg === this.project.package,
+        run: () => pick(b.d.part, b.pkg),
+      })).filter((it) => matches(it, q)),
+    });
+  }
+
+  /** The example menu. */
+  openExamples(anchor) {
+    openList({
+      anchor, placeholder: 'Find an example', width: 420,
+      items: (q) => {
+        const groups = ['Examples', 'RISC-V', 'Project Euler'];
+        return this.examples.map((e) => ({
+          group: /^euler/.test(e.id) ? 'Project Euler' : /^rv_/.test(e.id) ? 'RISC-V' : 'Examples',
+          title: e.title, detail: e.description, check: e.id === this.project.example,
+          run: () => this.loadExample(e),
+        })).filter((it) => matches(it, q)).sort((a, b) => groups.indexOf(a.group) - groups.indexOf(b.group));
+      },
+    });
+  }
+
+  loadExample(e) {
+    if (this.project.modified && !confirm(`Replace the current files with the example “${e.title}”?`)) return;
+    this.project = this.exampleProject(e);
+    this.docState.clear();
+    this.sim.designChanged(true);
+    this.save();
+    this.fillDevices();
+    this.renderProject();
+    this.renderFiles();
+    this.openFile(this.project.active);
+    this.analyze();
+    this.run();
+  }
+
+  /** The project's name in the top bar: its example, and whether it was edited. */
+  renderProject() {
+    const ex = this.examples.find((e) => e.id === this.project.example);
+    $('project-name').textContent = ex ? ex.title : 'My design';
+    $('project-dot').hidden = !this.project.modified;
+    $('project').title = ex ? `${ex.description}. Open another example` : 'Open an example';
   }
 
   /** After a device change: the pins of the new package's board, then run. */
@@ -263,8 +357,9 @@ class App {
       h('input', { type: 'number', value: settings.get(key), style: { width: '100px' }, ...attrs, onchange: (e) => settings.set(key, Number(e.target.value)) }));
     const top = h('input', { type: 'text', value: this.project.top || '', placeholder: 'inferred', style: { width: '140px' },
       onchange: (e) => { this.project.top = e.target.value.trim(); this.save(); this.analyze(); this.run(); } });
-    const pop = h('div', { class: 'popover', style: { left: `${r.left}px`, top: `${r.bottom + 6}px` } },
+    const pop = h('div', { class: 'popover', style: { left: `${Math.max(8, r.right - 320)}px`, top: `${r.bottom + 6}px`, width: '320px' } },
       h('div', { class: 'form' },
+        h('h3', {}, 'Run options'),
         h('div', { class: 'row' }, h('div', { class: 'lbl' }, 'Run after edits'), toggle('runOnEdit')),
         h('div', { class: 'row' }, h('div', { class: 'lbl' }, 'Top module'), top),
         field('Placement seed', 'seed', { min: 0 }),
@@ -297,6 +392,7 @@ class App {
 
   renderFiles() {
     const tabs = $('file-tabs');
+    const lang = (name) => ({ weft: 'W', v: 'V', sv: 'SV', pcf: 'P', xdc: 'X' })[name.split('.').pop()] || '·';
     const items = this.project.files.map((f) => {
       const close = h('span', {
         class: 'tab-close', title: 'Delete file',
@@ -313,17 +409,33 @@ class App {
         },
       }, icon('x'));
       return h('button', {
-        class: f.name === this.project.active ? 'active' : '',
+        class: f.name === this.project.active ? 'active' : '', 'data-file': f.name,
         title: 'Double-click to rename',
         onclick: () => this.openFile(f.name),
         ondblclick: () => this.renameFile(f),
-      }, h('span', { class: `lang-${langOf(f.name)}` }, f.name), close);
+      }, h('span', { class: 'lang' }, lang(f.name)), h('span', { class: `lang-${langOf(f.name)}` }, f.name), close);
     });
     tabs.replaceChildren(
       ...items,
-      h('button', { class: 'add', title: 'New file', onclick: () => this.newFile() }, icon('plus')),
+      h('button', { class: 'add', title: 'New file', 'aria-label': 'New file', onclick: () => this.newFile() }, icon('plus')),
       h('span', { style: { flex: 1 } }),
-      h('button', { class: 'add', title: 'Format the file (Shift+Alt+F)', onclick: () => this.format() }, icon('format'), 'Format'));
+      h('button', { class: 'add', title: 'Format the file (Shift+Alt+F)', 'aria-label': 'Format the file', onclick: () => this.format() }, icon('format')),
+      h('button', { class: 'add', title: `Hide the editor (${MOD}+B)`, 'aria-label': 'Hide the editor', onclick: () => this.toggleEditor() }, icon('panel')));
+    // With the editor hidden, a rail of the files.
+    $('files-rail').replaceChildren(
+      h('button', { title: `Show the editor (${MOD}+B)`, 'aria-label': 'Show the editor', onclick: () => this.toggleEditor() }, icon('panel')),
+      h('hr'),
+      ...this.project.files.map((f) => h('button', {
+        class: f.name === this.project.active ? 'active' : '', title: f.name, 'aria-label': f.name,
+        onclick: () => { this.openFile(f.name); this.toggleEditor(); },
+      }, lang(f.name))));
+  }
+
+  toggleEditor() {
+    const hidden = settings.get('layout') === 'hidden';
+    if (!hidden) store.set('editorSide', settings.get('layout'));
+    settings.set('layout', hidden ? store.get('editorSide', 'left') : 'hidden');
+    if (hidden) requestAnimationFrame(() => this.editor?.ta.focus());
   }
 
   async format() {
@@ -368,13 +480,19 @@ class App {
     if (this.editor.name) this.docState.set(this.editor.name, this.editor.state());
     this.project.active = name;
     this.editor.setDoc(name, f.text, this.docState.get(name));
-    for (const b of $('file-tabs').children) b.classList.toggle('active', b.firstChild?.textContent === name);
+    for (const b of $('file-tabs').children) b.classList.toggle('active', b.dataset.file === name);
+    for (const b of $('files-rail').children) b.classList.toggle('active', b.title === name);
+    $('sb-lang').textContent = { weft: 'Weft', v: 'Verilog', sv: 'SystemVerilog', pcf: 'PCF', xdc: 'XDC' }[name.split('.').pop()] || '';
+    this.renderCursor();
     this.applyAnalysis();
     this.saveSoon();
   }
 
   modified() {
-    this.project.modified = true;
+    if (!this.project.modified) {
+      this.project.modified = true;
+      this.renderProject();
+    }
     this.saveSoon();
   }
 
@@ -476,6 +594,10 @@ class App {
     badge.textContent = errors + warnings || '';
     badge.className = `badge ${errors ? 'error' : warnings ? 'warning' : ''}`;
     renderProblems($('problems'), list, { revealSource: (f, s, e) => this.revealSource(f, s, e, texts) });
+    const first = list.find((d) => d.severity === 'error') || list.find((d) => d.severity === 'warning');
+    $('problem-peek').textContent = first ? `${first.message}${first.at ? ` · ${first.at.file}:${first.at.line}` : ''}` : '';
+    const sb = $('sb-problems');
+    sb.replaceChildren(h('span', { class: errors ? 'e' : '' }, `${errors}`), ` error${errors === 1 ? '' : 's'} · `, h('span', { class: warnings ? 'w' : '' }, `${warnings}`), ` warning${warnings === 1 ? '' : 's'}`);
   }
 
   async run() {
@@ -498,8 +620,8 @@ class App {
       effort: settings.get('effort'),
     };
     const t0 = performance.now();
-    this.status('busy', 'Running the flow…');
-    $('run').disabled = true;
+    this.status('busy', 'Starting…');
+    this.setRunBusy(true);
     const state = { family: dev?.family || 'iCE40', start: t0, p: null, steps: [] };
     const onProgress = (p) => {
       const now = performance.now();
@@ -530,7 +652,22 @@ class App {
         line.classList.remove('active');
         setTimeout(() => { if (!this.running) line.style.width = '0'; }, 400);
       }
-      $('run').disabled = false;
+      if (!this.running) this.setRunBusy(false);
+    }
+  }
+
+  /** The run button while a run goes: a spinner, the step and a bar. */
+  setRunBusy(busy) {
+    const split = $('run-split');
+    split.classList.toggle('busy', busy);
+    $('run').querySelector('use').setAttribute('href', busy ? '#i-spinner' : '#i-play');
+    $('run').querySelector('span').textContent = busy ? 'Running' : 'Run';
+    $('run').title = busy ? 'Run again with the latest changes' : `Run the whole flow (${MOD}+Enter)`;
+    if (!busy) {
+      this.progressView?.bar.remove();
+      this.progressView = null;
+      this.busyStep = null;
+      this.renderRail();
     }
   }
 
@@ -552,26 +689,28 @@ class App {
   renderProgress() {
     const state = this.running;
     state.learned ??= store.get(`progress:${state.family}`, {});
-    const { segments, fraction, index, count } = progressLayout(state.family, state.p, state.learned);
-    const el = $('status');
+    const { segments, fraction } = progressLayout(state.family, state.p, state.learned);
+    const split = $('run-split');
     // Built once per run, then updated, so that the bars move smoothly.
-    if (this.progressView?.state !== state || !el.contains(this.progressView.bar)) {
+    if (this.progressView?.state !== state || !split.contains(this.progressView.bar)) {
+      this.progressView?.bar.remove();
       const fills = segments.map(() => h('div', { class: 'fill' }));
       const bar = h('div', { class: 'progress' },
         segments.map((s, i) => h('div', { class: 'segment', style: { flexGrow: s.share }, title: s.label }, fills[i])));
-      const step = h('span', { class: 'muted' });
-      const text = h('span', { class: 'progress-text' });
-      el.className = 'status busy';
-      el.replaceChildren(bar, step, text);
-      this.progressView = { state, bar, fills, step, text };
+      split.append(bar);
+      this.progressView = { state, bar, fills };
     }
     const v = this.progressView;
     segments.forEach((s, i) => {
       v.fills[i].classList.toggle('indeterminate', s.fill === null);
       v.fills[i].style.width = `${100 * (s.fill ?? 1)}%`;
     });
-    v.step.textContent = index >= 0 ? `${index + 1}/${count}` : '';
-    v.text.textContent = describeProgress(state.p, performance.now() - state.start);
+    this.status('busy', describeProgress(state.p, performance.now() - state.start));
+    const step = state.p ? (state.family === 'Artix-7' ? PROGRESS_STEP_XC7 : PROGRESS_STEP)[state.p.step] : 'elaborated';
+    if (step !== this.busyStep) {
+      this.busyStep = step;
+      this.renderRail();
+    }
     const line = $('progress-line');
     line.classList.add('active');
     line.style.width = `${100 * fraction}%`;
@@ -583,13 +722,24 @@ class App {
     $('download').disabled = !out.bin;
     $('program').disabled = !out.bin;
     const errors = (out.diagnostics || []).filter((d) => d.severity === 'error').length;
+    const el = $('status');
     if (out.ok) {
-      const clk = out.timing?.clocks?.[0];
-      this.status('ok', `${out.top}: ${out.chip ? `${out.chip.usage.lc} LCs` : out.placed ? `${out.placed.slices} slices` : 'synthesised'}${clk ? `, ${clk.fmax_mhz.toFixed(1)} MHz` : ''} · ${Math.round(ms)} ms`);
+      el.className = 'status ok';
+      el.title = '';
+      el.replaceChildren(h('span', { class: 'ok-ico' }, icon('check')),
+        h('span', {}, 'Built in ', h('b', {}, ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`), settings.get('runOnEdit') ? ' · auto' : ''));
     } else {
-      this.status('error', errors ? `${errors} error${errors > 1 ? 's' : ''}` : out.error || 'failed');
+      // Where the flow stopped: the last step that has a result.
+      const steps = flowSteps(out, this.device()?.family).flatMap((g) => g.steps);
+      const reached = steps.filter((x) => x.metric && x.id !== 'summary').pop();
+      const at = reached ? steps[steps.indexOf(reached) + 1] : steps[1];
+      el.className = 'status error';
+      el.title = out.error || '';
+      el.replaceChildren(h('button', { class: 'err-pill', onclick: () => this.showProblems() }, icon('error'),
+        `${errors ? `${errors} error${errors > 1 ? 's' : ''}` : 'Failed'}${at ? ` · stopped at ${at.label}` : ''}`));
     }
-    renderPipeline($('pipeline'), out, this);
+    this.lastRun = out;
+    renderSummary($('pipeline'), out, this);
     renderLog($('log'), out);
     // A design that does not elaborate keeps the last good views (shown
     // as out of date) while it is being fixed.
@@ -604,10 +754,58 @@ class App {
       if (out.ok) this.sim.designChanged(false);
     }
     if (!settings.get('liveCheck') || !this.analysis) this.applyAnalysis();
-    if (!out.ok && errors) {
-      const first = $('bottom-tabs').querySelector('[data-tab="problems"]');
-      first.click();
-    }
+    if (!out.ok && errors) this.showProblems();
+    this.renderRail();
+    this.renderStatusBar();
+  }
+
+  downloadBitstream() {
+    const r = this.result;
+    if (r?.bin) download(r.bin_name || `${r.top || 'design'}.bin`, fromBase64(r.bin));
+  }
+
+  // ----- problems and the log -----
+
+  setBottom(open, quiet) {
+    $('bottom').classList.toggle('collapsed', !open);
+    $('left').classList.toggle('bottom-collapsed', !open);
+    store.set('bottomOpen', open);
+    if (!quiet) this.editor?.measure?.();
+  }
+
+  showBottomTab(tab) {
+    for (const x of $('bottom-tabs').querySelectorAll('button')) x.classList.toggle('active', x.dataset.tab === tab);
+    for (const p of $('bottom-body').children) p.hidden = p.dataset.pane !== tab;
+  }
+
+  showProblems() {
+    if (settings.get('layout') === 'hidden') this.toggleEditor();
+    this.showBottomTab('problems');
+    this.setBottom(true);
+  }
+
+  // ----- the status bar -----
+
+  renderStatusBar() {
+    const mode = $('sb-mode');
+    mode.lastChild.textContent = this.backendMode === 'wasm' ? 'In your browser · WebAssembly' : 'On the local server';
+    const r = this.good;
+    const chip = r?.chip;
+    $('sb-usage').textContent = chip ? `${fmtNum(chip.usage.lc)} / ${fmtNum(chip.usage.lc_total)} LC` : r?.placed ? `${fmtNum(r.placed.slices)} slices` : '';
+    const clk = r?.timing?.clocks?.[0];
+    const fmax = $('sb-fmax');
+    fmax.textContent = clk ? `${clk.fmax_mhz.toFixed(1)} MHz${clk.target_mhz ? ` ${clk.met ? '≥' : '<'} ${clk.target_mhz} MHz` : ''}` : '';
+    fmax.classList.toggle('bad', !!clk && !!clk.target_mhz && !clk.met);
+    fmax.title = clk ? `Fmax of ${clk.clock}` : '';
+  }
+
+  renderCursor() {
+    const ta = this.editor?.ta;
+    if (!ta) return;
+    const before = ta.value.slice(0, ta.selectionStart);
+    const line = before.split('\n').length;
+    const col = ta.selectionStart - before.lastIndexOf('\n');
+    $('sb-cursor').textContent = `Ln ${line}, Col ${col}`;
   }
 
   /** Programs the board connected over USB with the last bitstream. */
@@ -643,6 +841,7 @@ class App {
   status(kind, text) {
     const el = $('status');
     el.className = `status ${kind}`;
+    el.title = text;
     el.replaceChildren(h('span', { class: 'dot' }), h('span', {}, text));
   }
 
@@ -650,9 +849,135 @@ class App {
 
   openView(name) {
     this.view = name;
-    for (const b of $('view-tabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.view === name);
     for (const p of document.querySelectorAll('[data-view-pane]')) p.hidden = p.dataset.viewPane !== name;
+    const mode = name === 'simulation' ? 'simulate' : 'flow';
+    if (mode !== this.mode) {
+      this.mode = mode;
+      this.renderRail();
+    }
+    if (name === 'chip') this.step = this.step === 'route' ? 'route' : 'place';
+    else if (name === 'timing') this.step = 'timing';
+    else if (name === 'bitstream') this.step = 'bitstream';
+    else if (name === 'pipeline' && !['pnr', 'bitstream'].includes(this.step)) this.step = 'summary';
+    this.markRail();
     this.visible();
+  }
+
+  /** The run the rail and the views show: the last one, or while a design
+   *  does not elaborate, the last good one (`stale`). */
+  shownRun() {
+    const r = this.running ? this.lastRun : this.result;
+    if (r && !r.ok && !(r.stages || []).length && this.good) return { run: this.good, stale: true };
+    return { run: r, stale: false };
+  }
+
+  /** Opens a step of the flow: its view, at its stage for the schematic. */
+  openStep(id) {
+    const step = flowSteps(this.shownRun().run, this.device()?.family).flatMap((g) => g.steps).find((x) => x.id === id);
+    if (!step) return;
+    this.step = id;
+    if (step.view === 'schematic') {
+      this.openView('schematic');
+      this.schematic.setStage(id);
+    } else this.openView(step.view);
+    this.step = id;
+    this.markRail();
+  }
+
+  setMode(mode) {
+    if (mode === 'simulate') this.openView('simulation');
+    else this.openStep(this.step || 'summary');
+  }
+
+  /** The rail: Flow or Simulate, then the steps of the flow with their
+   *  headline numbers. */
+  renderRail() {
+    for (const b of $('mode').querySelectorAll('button')) {
+      b.classList.toggle('on', b.dataset.mode === this.mode);
+      b.setAttribute('aria-selected', b.dataset.mode === this.mode ? 'true' : 'false');
+    }
+    const host = $('rail-steps');
+    if (this.mode === 'simulate') {
+      host.replaceChildren(h('span', { class: 'muted', style: { fontSize: '12px' } }, 'The design running on a virtual board: its clock, LEDs, buttons and serial port.'));
+      return;
+    }
+    const { run, stale } = this.shownRun();
+    const groups = flowSteps(run, this.device()?.family);
+    if (stale) Object.assign(groups[0].steps[0], { metric: 'failed', bad: true });
+    let reached = true;
+    host.replaceChildren(...groups.map((g) => h('div', { class: 'rail-group' },
+      h('span', { class: 'h4' }, g.title),
+      h('div', {}, g.steps.flatMap((st, i) => {
+        const busy = this.running && st.id === this.busyStep;
+        const pending = !st.metric || (this.running && !reached);
+        if (busy) reached = false;
+        const delta = st.delta ? h('span', { class: st.delta < 0 ? 'down' : 'up' }, ` ${st.delta < 0 ? '−' : '+'}${fmtNum(Math.abs(st.delta))}`) : null;
+        const btn = h('button', {
+          class: `step${pending && !busy ? ' pending' : ''}${busy ? ' busy' : ''}${(this.running || stale) && !busy && st.id !== 'summary' ? ' stale' : ''}${st.bad ? ' bad' : ''}`, 'data-step': st.id,
+          title: `${stageInfo(st.id)[1] || st.label}${st.view === 'schematic' && st.metric && !st.has ? ' (too large to draw)' : ''}`,
+          disabled: !st.metric || (st.view === 'schematic' && !st.has),
+          onclick: () => this.openStep(st.id),
+        }, h('span', { class: 'l' }, st.label), h('span', { class: 'm' }, busy ? 'running' : st.metric ?? '—', busy ? null : delta));
+        return i ? [h('span', { class: 'rail-sep', 'aria-hidden': 'true' }), btn] : [btn];
+      })))));
+    this.markRail();
+  }
+
+  markRail() {
+    for (const b of $('rail-steps').querySelectorAll('.step')) {
+      const on = b.dataset.step === this.step && this.mode === 'flow';
+      b.classList.toggle('on', on);
+      if (on) {
+        b.setAttribute('aria-current', 'step');
+        b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      } else b.removeAttribute('aria-current');
+    }
+  }
+
+  // ----- the palette -----
+
+  openPalette() {
+    const steps = flowSteps(this.shownRun().run, this.device()?.family).flatMap((g) => g.steps).filter((x) => x.metric && (x.view !== 'schematic' || x.has));
+    const theme = settings.get('theme');
+    const actions = [
+      ['Run the flow', 'play', `${MOD} ↵`, () => this.run()],
+      ['Simulate the design', 'wave', null, () => this.setMode('simulate')],
+      ['Format the file', 'format', 'Shift Alt F', () => this.format()],
+      [settings.get('layout') === 'hidden' ? 'Show the editor' : 'Hide the editor', 'panel', `${MOD} B`, () => this.toggleEditor()],
+      ['Show problems', 'warning', null, () => this.showProblems()],
+      ['Show the log', 'file', null, () => { this.showProblems(); this.showBottomTab('log'); }],
+      ['Copy a link to this design', 'link', null, () => this.share()],
+      this.result?.bin ? [`Download ${this.result.bin_name || 'the bitstream'}`, 'download', null, () => this.downloadBitstream()] : null,
+      this.result?.bin ? ['Program the board over USB', 'usb', null, () => this.program()] : null,
+      this.result?.timing?.clocks?.length && this.result.chip ? ['Show the critical path on the chip', 'clock', null, () => this.showCriticalPath(0)] : null,
+      [theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme', theme === 'dark' ? 'sun' : 'moon', null, () => settings.set('theme', theme === 'dark' ? 'light' : 'dark')],
+      ['Open the settings', 'gear', null, () => openSettings()],
+      ['Change the board', 'board', null, () => this.openBoards($('board'))],
+    ].filter(Boolean);
+    // The cells and signals of the schematic's stage, once the query is
+    // long enough to be specific.
+    const cells = () => {
+      const g = this.schematic.stage?.graph;
+      if (!g) return [];
+      const seen = new Set();
+      return g.nodes.filter((n) => n.name && !seen.has(n.name) && seen.add(n.name)).map((n) => ({
+        group: `Cells · ${stageInfo(this.schematic.stage.id)[0]}`, kind: n.t || n.k || 'cell', title: n.name,
+        run: () => { this.openStep(this.schematic.stage.id); this.schematic.find(n.name); },
+      }));
+    };
+    openList({
+      placeholder: 'Jump to a step, file, cell, example or action',
+      items: (q) => {
+        const out = [
+          ...steps.map((x) => ({ group: 'Steps', ico: x.view === 'schematic' ? 'graph' : x.view === 'chip' ? 'chip' : x.view === 'timing' ? 'clock' : x.view === 'bitstream' ? 'bits' : 'flow', title: x.label, detail: x.metric, keywords: stageInfo(x.id)[1], run: () => this.openStep(x.id) })),
+          ...this.project.files.map((f) => ({ group: 'Files', ico: 'file', title: f.name, run: () => { if (settings.get('layout') === 'hidden') this.toggleEditor(); this.openFile(f.name); } })),
+          ...actions.map(([title, ico, kbd, run]) => ({ group: 'Actions', ico, title, kbd, run })),
+          ...this.examples.map((e) => ({ group: 'Examples', ico: 'chip', title: e.title, detail: e.description, run: () => this.loadExample(e) })),
+        ].filter((it) => matches(it, q));
+        if (q.length >= 2) out.push(...cells().filter((it) => it.title.toLowerCase().includes(q)).slice(0, 30));
+        return out;
+      },
+    });
   }
 
   visible() {
@@ -665,8 +990,7 @@ class App {
   }
 
   openSchematic(stage) {
-    this.openView('schematic');
-    this.schematic.setStage(stage);
+    this.openStep(stage);
   }
 
   showBits(x, y) {
@@ -701,4 +1025,5 @@ app.start().catch((e) => {
   const el = document.getElementById('status');
   el.className = 'status error';
   el.textContent = `Failed to start: ${e.message}`;
+  el.title = e.message;
 });
