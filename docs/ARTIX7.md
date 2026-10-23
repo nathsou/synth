@@ -7,7 +7,7 @@ bitstreams have been checked against independent encoders and by simulating
 the netlist reconstructed from them, but never run on hardware. The timing
 estimate's routing delays are calibrated against Vivado 2025.2's timing of
 the same routed designs (see below); it is still an estimate, with clock
-skew between clock regions but without I/O or hold analysis. Missing timing characterization is reported and
+skew between clock regions and hold repair, but without I/O timing. Missing timing characterization is reported and
 fails timing acceptance by default.
 
 [Against Vivado](#against-vivado), with Vivado's own timer judging both
@@ -231,8 +231,16 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   150 near the clock pin, which had cost Euler 31 about 8% by Vivado.
   Timing it lets placement and the choice of seed avoid it (Euler 14 +3%,
   geomean +0.5% over six seeds), and brings the estimate to within 1% of
-  Vivado on most runs. It has no I/O timing or hold analysis: paths
-  crossing that boundary upward can still fail hold by up to 60 ps.
+  Vivado on most runs. Hold is checked at Vivado's fast corner, timed as
+  the slow delays times 0.33 (its routes measured 0.31-0.35 of synth's
+  estimates), against a capture clock 50 ps late within a region, 265 ps
+  across the spine and 350 ps one row of regions up. After routing, the
+  last routed connection of each failing path is rerouted through unused
+  wires near its sink until 40 ps past the requirement, and carry chains
+  stay within one clock region, whose dedicated links could not be
+  slowed. Synth's bitstreams had failed Vivado's hold check on 14 of 48
+  runs (by up to 60 ps, all across the region boundary at row 150); after
+  the repair none failed, at no cost in Fmax. There is no I/O timing.
 - **Constraints.** An explicit XDC subset: `set_property` (including
   `-dict`), `get_ports` and `create_clock`; every port needs PACKAGE_PIN and
   LVCMOS33. Unknown commands or properties are errors.
@@ -505,8 +513,7 @@ How to read the timing columns:
   modelled.
 - Time DSP designs with Vivado: fasm2bels has no DSP48 model, so Euler 48
   and 97 have only synth's estimate.
-- Extend timing to I/O and hold (fixing hold on paths crossing clock
-  regions upward), and characterize the BRAM pips
+- Extend timing to I/O, and characterize the BRAM pips
   missing from the upstream data.
 - Reduce routing time on designs with wide high-fanout critical nets
   (Euler 48: three times nextpnr's). Their sinks' A* searches are loosely

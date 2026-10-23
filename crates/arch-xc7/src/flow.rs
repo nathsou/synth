@@ -10,9 +10,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
-use synth_core::FxHashMap;
 use synth_core::progress;
 use synth_core::time::Instant;
+use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
 #[derive(Clone, Debug)]
@@ -175,7 +175,7 @@ fn implement_seed(
             opts.effort,
             Some(&mut criticality),
             model,
-            true,
+            place::Scope::Global,
         )?;
         let mut pos: FxHashMap<CellId, (f64, f64)> = FxHashMap::default();
         for (&c, &(s, _)) in &ps.slots {
@@ -210,7 +210,7 @@ fn implement_seed(
         opts.effort,
         Some(&mut criticality),
         model,
-        false,
+        place::Scope::Full,
     )?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     // Detailed placement: lanes move between the placed slices, with
@@ -333,7 +333,7 @@ fn implement_seed(
         blocked_edges: &blocked_edges,
         ..Default::default()
     };
-    let (routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
+    let (mut routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
         .map_err(|e| match &e {
             synth_route::RouteError::Congested { nodes, nets, .. } => {
                 let nets: Vec<_> = nets.iter().map(|&i| names[i].as_str()).collect();
@@ -351,6 +351,23 @@ fn implement_seed(
                 format!("{e} ({}; {pins})", names[*net])
             }
         })?;
+    let (rerouted, failing) = repair_hold(
+        db,
+        &nl,
+        graph,
+        &timer,
+        &clocks,
+        &requests,
+        &request_nets,
+        &owners,
+        &blocked_edges,
+        &mut routes,
+    );
+    if rerouted + failing > 0 {
+        log.push(format!(
+            "hold: {rerouted} connections rerouted slower, {failing} still estimated to fail"
+        ));
+    }
     crate::routing::verify(graph.graph(), &requests, &routes)?;
     progress::step("bitstream", "");
     let pins = lut_pins(graph, &nl, &p, &placement, &routes);
@@ -489,6 +506,74 @@ fn local_constants(
         }
     }
     out
+}
+
+/// Hold repair: connections the fast-corner check finds too fast take
+/// detours, for up to three rounds. The connections rerouted, and the
+/// inputs still failing.
+#[allow(clippy::too_many_arguments)]
+fn repair_hold(
+    db: &Device,
+    nl: &Netlist,
+    graph: &RoutingGraph,
+    timer: &crate::sta::Timer,
+    clocks: &dyn Fn(CellId) -> crate::sta::ClockSite,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    owners: &Owners,
+    blocked_edges: &[u32],
+    routes: &mut [synth_route::NetRoute],
+) -> (usize, usize) {
+    // Margin over the estimate, in fast-corner ps.
+    const MARGIN: f64 = 40.0;
+    let mut used = vec![0u16; graph.x.len()];
+    for (req, route) in requests.iter().zip(routes.iter()) {
+        used[req.source as usize] += 1;
+        for &e in &route.edges {
+            used[graph.dst[e as usize] as usize] += 1;
+        }
+    }
+    let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
+    // The routed connection reaching each cell input.
+    let mut sink_of: FxHashMap<(CellId, u32), (usize, u32)> = FxHashMap::default();
+    for (i, req) in requests.iter().enumerate() {
+        let Some(net) = request_nets[i] else { continue };
+        for &sink in &req.sinks {
+            for (c, name, n) in owners.get(&sink).into_iter().flatten() {
+                let pins = &nl.cells[*c].pins;
+                if let Some(k) = (0..pins.len()).find(|&k| {
+                    *n == net && pins[k].net == Some(net) && nl.str(pins[k].name) == name
+                }) {
+                    sink_of.insert((*c, k as u32), (i, sink));
+                }
+            }
+        }
+    }
+    let (mut rerouted, mut failing) = (0, 0);
+    for _ in 0..3 {
+        let wires = crate::sta::routed_wires(db, nl, graph, requests, request_nets, routes, owners);
+        // The slowest repair each connection needs.
+        let mut need: BTreeMap<(CellId, u32), f64> = BTreeMap::new();
+        for (at, slack) in timer.hold(&|c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0), clocks)
+        {
+            let v = need.entry(at).or_insert(0.0);
+            *v = v.max(MARGIN - slack);
+        }
+        failing = need.len();
+        let mut any = false;
+        for (at, fast) in need {
+            let Some(&(net, sink)) = sink_of.get(&at) else { continue };
+            let extra = fast / crate::sta::FAST;
+            if crate::hold::detour(graph, requests, routes, &mut used, &blocked, net, sink, extra) {
+                rerouted += 1;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    (rerouted, failing)
 }
 
 /// Each sequential cell's clock site in a placement.

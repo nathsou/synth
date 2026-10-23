@@ -254,9 +254,13 @@ def timed_attempt(a, prefix, xdc, skip):
     if error:
         return {"vivado_error": error}
     log = Path(f"{prefix}.timing.log").read_text()
+    hold = re.search(r"^Hold\s*:\s*(\d+)\s+Failing Endpoints?\s*,\s*Worst Slack\s+(-?[0-9.]+)ns",
+                     Path(f"{prefix}.timing.rpt").read_text(), re.M)
     return {"vivado_mhz": fmax(prefix),
             "vivado_unrouted": int(re.findall(r"^QOR unrouted (\d+)", log, re.M)[-1]),
-            "vivado_unfixed": int(re.findall(r"^QOR unfixed (\d+)", log, re.M)[-1])}
+            "vivado_unfixed": int(re.findall(r"^QOR unfixed (\d+)", log, re.M)[-1]),
+            "vivado_hold_failing": int(hold[1]) if hold else None,
+            "vivado_hold_wns": float(hold[2]) if hold else None}
 
 
 def native(files, top, prefix, xdc, a):

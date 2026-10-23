@@ -6,6 +6,7 @@ mod detail;
 pub mod device;
 mod dsp;
 pub mod fasm;
+mod hold;
 mod json;
 mod lutram;
 mod physical_dsp;

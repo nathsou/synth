@@ -75,6 +75,8 @@ pub type Criticality<'a> = &'a mut dyn FnMut(&Placement) -> FxHashMap<(CellId, N
 /// design measured. The criticality exponent's range, raised as moves
 /// become local, is VPR's.
 pub(crate) const TIMING_TRADEOFF: f64 = 0.25;
+/// Slice rows in a 7-series clock region.
+const REGION_ROWS: u32 = 50;
 
 const CRITICALITY_EXPONENT: (f64, f64) = (1.0, 8.0);
 /// Temperatures between timing analyses of the placement.
@@ -96,6 +98,18 @@ const ANALYTIC_TEMPERATURE: f64 = 0.3;
 /// more tile columns apart, across their interconnect.
 const MIN_WINDOW: i32 = 3;
 
+/// What a placement is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The final placement of packed slices.
+    Full,
+    /// Positions of single-atom slices for clustering: the legalized
+    /// analytical placement, each slice's area its fill.
+    Global,
+    /// The same, annealed.
+    Annealed,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn place(
     db: &Device,
@@ -107,8 +121,9 @@ pub fn place(
     effort: f64,
     mut criticality: Option<Criticality<'_>>,
     model: &crate::sta::DelayModel,
-    global_only: bool,
+    scope: Scope,
 ) -> Result<Placement, String> {
+    let global_only = scope != Scope::Full;
     if !effort.is_finite() || effort <= 0.0 || effort > 100.0 {
         return Err("placement effort must be in (0,100]".into());
     }
@@ -190,10 +205,16 @@ pub fn place(
     // SLICEM macros go first: their sites are the scarcer.
     macros.sort_by_key(|m| (std::cmp::Reverse(m.len()), !needs_m(m), m[0]));
     let macro_m: Vec<bool> = macros.iter().map(|m| needs_m(m)).collect();
+    // A macro stays within a clock region (50 slice rows) where it fits:
+    // a carry chain across the boundary is timed through the clock skew
+    // between regions, and its dedicated links cannot be slowed to repair
+    // hold.
     let mut choices: BTreeMap<(usize, bool), Vec<Vec<usize>>> = BTreeMap::new();
     for (m, &mm) in macros.iter().zip(&macro_m) {
         choices.entry((m.len(), mm)).or_insert_with(|| {
+            let fits = |s: &Site| s.y / REGION_ROWS == (s.y + m.len() as u32 - 1) / REGION_ROWS;
             all.iter()
+                .filter(|s| fits(s) || m.len() as u32 > REGION_ROWS)
                 .filter_map(|s| {
                     (0..m.len())
                         .map(|i| by_xy.get(&(s.x, s.y + i as u32)).copied())
@@ -597,7 +618,7 @@ pub fn place(
             crate::analytic::place(&mut problem, &mut pos, Some(&mut timed))
         };
         legalize(&spread)?;
-        if global_only {
+        if scope == Scope::Global {
             let mut placement = snapshot();
             placement.spread = (0..p.slices.len())
                 .map(|s| {
@@ -883,6 +904,14 @@ pub fn place(
         }
     }
     let mut placement = snapshot();
+    if scope == Scope::Annealed {
+        placement.spread = (0..p.slices.len())
+            .map(|s| {
+                let (x, y) = slice_xy[loc[s].get()];
+                (f64::from(x), f64::from(y))
+            })
+            .collect();
+    }
     let mut clocks = BTreeMap::new();
     let buffers = sites(db, |k| k == "BUFGCTRL")?;
     let mut used = BTreeSet::new();

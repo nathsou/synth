@@ -62,6 +62,7 @@ impl ClockTree {
         let extra = if bram { BRAM_LATENCY } else { 0.0 };
         ClockSite {
             region: row as u16 * 2 + u16::from(x > self.spine),
+            hops,
             late: hops * REGION_LATE + extra + CLOCK_DERATE,
             early: hops * REGION_EARLY + extra,
         }
@@ -168,16 +169,31 @@ pub const CLOCK_DERATE: f64 = 120.0;
 const SHARED_REGION: f64 = 80.0;
 const SHARED_ROW: f64 = 36.0;
 
+/// Hold checks use Vivado's fast corner, timed as the slow delays scaled
+/// by its ratio to them (routes 0.31-0.35 on the Euler designs, flip-flop
+/// clock-to-out 0.34). A flip-flop's hold time, and the capture clock's
+/// lateness over the launch's: within a region, and per row of regions
+/// the capture is farther from the global buffers (Vivado: 352 ps for one
+/// row up, 30-60 ps within one region).
+pub const FAST: f64 = 0.33;
+const FF_HOLD: f64 = 63.0;
+const HOLD_SKEW: f64 = 50.0;
+const HOLD_REGION: f64 = 300.0;
+/// Across the spine within one row of regions (Vivado: 262-264 ps).
+const HOLD_SIDE: f64 = 265.0;
+
 /// Where a sequential cell is clocked: its clock region (row times two
 /// plus side of the spine) and latency from the global buffer.
 #[derive(Clone, Copy, Debug)]
 pub struct ClockSite {
     pub region: u16,
+    /// Rows of regions from the global buffers.
+    pub hops: f64,
     pub late: f64,
     pub early: f64,
 }
 impl ClockSite {
-    pub const NONE: ClockSite = ClockSite { region: NO_REGION, late: 0.0, early: 0.0 };
+    pub const NONE: ClockSite = ClockSite { region: NO_REGION, hops: 0.0, late: 0.0, early: 0.0 };
     /// The capture clock's lead over the period for a launch in `from`.
     fn capture(&self, from: u16) -> f64 {
         let shared = if from == NO_REGION || self.region == NO_REGION {
@@ -532,7 +548,7 @@ fn pip_delay(
     d * f64::from(crate::device::VENDOR_SCALE)
 }
 
-fn edge_src(graph: &RoutingGraph, e: u32) -> u32 {
+pub(crate) fn edge_src(graph: &RoutingGraph, e: u32) -> u32 {
     // Edges are stored by source node: find the node whose range holds `e`.
     graph.offsets.partition_point(|&o| o <= e) as u32 - 1
 }
@@ -826,8 +842,7 @@ impl<'a> Timer<'a> {
         clock: &dyn Fn(CellId) -> ClockSite,
     ) -> Analysis {
         let nl = self.nl;
-        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>> =
-            FxHashMap::default();
+        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>> = FxHashMap::default();
         let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
         for (s, site) in self.seq.iter().zip(&sites) {
             for (i, pin) in nl.cells[s.cell].pins.iter().enumerate() {
@@ -903,11 +918,8 @@ impl<'a> Timer<'a> {
                     });
                     if period > worst.period {
                         worst.period = period;
-                        worst.path = self.trace(
-                            &arrival,
-                            ((launch, launch_falling), region),
-                            (s.cell, i),
-                        );
+                        worst.path =
+                            self.trace(&arrival, ((launch, launch_falling), region), (s.cell, i));
                     }
                 }
             }
@@ -957,6 +969,96 @@ impl<'a> Timer<'a> {
             }
         }
         Analysis { clocks: clocks.into_values().collect(), slack }
+    }
+
+    /// Hold checks of flip-flop inputs at the fast corner: the shortest
+    /// path to each, against the capture clock's lateness over the
+    /// launch's. For each input that fails, the last routed connection on
+    /// its shortest path (the cell input it reaches) and the slack (ps,
+    /// negative).
+    pub fn hold(
+        &self,
+        wire: &dyn Fn(CellId, u32, NetId) -> f64,
+        clock: &dyn Fn(CellId) -> ClockSite,
+    ) -> Vec<((CellId, u32), f64)> {
+        let nl = self.nl;
+        let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
+        let hops: FxHashMap<u16, f64> = sites.iter().map(|s| (s.region, s.hops)).collect();
+        // The earliest arrival at each output by launch, with the input it
+        // came through.
+        type Early = FxHashMap<(CellId, u32), BTreeMap<Launch, (f64, Option<u32>)>>;
+        let mut early: Early = FxHashMap::default();
+        for (s, site) in self.seq.iter().zip(&sites) {
+            for (i, pin) in nl.cells[s.cell].pins.iter().enumerate() {
+                if pin.dir == Dir::Output && pin.net.is_some() {
+                    early
+                        .entry((s.cell, i as u32))
+                        .or_default()
+                        .insert((s.edge, site.region), (s.clk_to_out, None));
+                }
+            }
+        }
+        let at_input = |early: &Early, c: CellId, i: u32| {
+            let n = nl.cells[c].pins[i as usize].net?;
+            let d = nl.nets[n].driver?;
+            let w = wire(c, i, n);
+            early
+                .get(&(d.cell, d.pin))
+                .map(|m| m.iter().map(|(&l, &(t, _))| (l, t + w)).collect::<Vec<_>>())
+        };
+        for &c in &self.order {
+            for &(i, o, d) in &self.arcs[&c] {
+                for (l, t) in at_input(&early, c, i).unwrap_or_default() {
+                    let slot =
+                        early.entry((c, o)).or_default().entry(l).or_insert((f64::MAX, None));
+                    if t + d < slot.0 {
+                        *slot = (t + d, Some(i));
+                    }
+                }
+            }
+        }
+        // The last routed connection on the earliest path from `launch` to
+        // input `i` of `c`.
+        let routed = |launch: Launch, (mut c, mut i): (CellId, u32)| loop {
+            let n = nl.cells[c].pins[i as usize].net?;
+            if wire(c, i, n) > 0.0 {
+                return Some((c, i));
+            }
+            let d = nl.nets[n].driver?;
+            let (_, from) = early.get(&(d.cell, d.pin))?.get(&launch)?;
+            (c, i) = (d.cell, (*from)?);
+        };
+        let mut fails = Vec::new();
+        for (s, site) in self.seq.iter().zip(&sites) {
+            let (Some(capture), true) = (&s.capture, pack::is_ff(nl.cell_kind(s.cell))) else {
+                continue;
+            };
+            for &(i, _, _) in capture {
+                for (launch, t) in at_input(&early, s.cell, i).unwrap_or_default() {
+                    let ((edge, region), h) = (launch, hops.get(&launch.1));
+                    if edge != s.edge {
+                        continue;
+                    }
+                    let skew = match h {
+                        Some(h) if region != site.region && region != NO_REGION => {
+                            if region / 2 == site.region / 2 {
+                                HOLD_SIDE
+                            } else {
+                                HOLD_SKEW + HOLD_REGION * (site.hops - h)
+                            }
+                        }
+                        _ => HOLD_SKEW,
+                    };
+                    let slack = FAST * t - skew - FF_HOLD;
+                    if slack < 0.0
+                        && let Some(at) = routed(launch, (s.cell, i))
+                    {
+                        fails.push((at, slack));
+                    }
+                }
+            }
+        }
+        fails
     }
 
     /// The cell pins of the path ending at input `end`, launch first.
@@ -1182,7 +1284,7 @@ mod tests {
     #[test]
     fn capture_clocks_share_more_pessimism_the_closer_the_launch_region() {
         // Region 2 is row 1, left of the spine; region 3 is row 1, right.
-        let site = ClockSite { region: 2, late: 300.0, early: 200.0 };
+        let site = ClockSite { region: 2, hops: 1.0, late: 300.0, early: 200.0 };
         assert_eq!(site.capture(2), 200.0 + SHARED_REGION);
         assert_eq!(site.capture(3), 200.0 + SHARED_ROW);
         assert_eq!(site.capture(0), 200.0);
