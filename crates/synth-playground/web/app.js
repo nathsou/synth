@@ -855,8 +855,10 @@ class App {
       this.mode = mode;
       this.renderRail();
     }
-    if (name === 'chip') this.step = this.step === 'route' ? 'route' : 'place';
-    else if (name === 'timing') this.step = 'timing';
+    if (name === 'chip') {
+      this.step = this.step === 'route' ? 'route' : 'place';
+      this.chip.setStep(this.step);
+    } else if (name === 'timing') this.step = 'timing';
     else if (name === 'bitstream') this.step = 'bitstream';
     else if (name === 'pipeline' && !['pnr', 'bitstream'].includes(this.step)) this.step = 'summary';
     this.markRail();
@@ -999,6 +1001,7 @@ class App {
   }
 
   showCriticalPath(ci) {
+    this.step = 'route';
     this.openView('chip');
     this.chip.crit = ci;
     this.chip.renderToolbar();

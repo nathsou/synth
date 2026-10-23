@@ -126,7 +126,8 @@ graph with its inversions as bubbles. Hover for properties, click to inspect a
 node (with a truth table for LUTs) and follow its connections, search for a
 cell or signal by name.
 
-**Chip.** The die as it is: logic tiles with their eight logic cells, RAM
+**Chip.** The die as it is (**Place** shows the cells on their sites,
+**Route** the routed wires over them): logic tiles with their eight logic cells, RAM
 tiles, the IO ring with package pin names. Each used logic cell shows its LUT,
 flip-flop and carry; zoom in to read the LUT contents. Every routed net is
 drawn over the wires it uses (span-4, span-12, local tracks, cell inputs) and
