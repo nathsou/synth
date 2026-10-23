@@ -353,8 +353,8 @@ XC7A100T-CSG324 with the same pins and clock, each judged by Vivado
 Each design is constrained 20% beyond the best Fmax any flow reached at
 100 MHz, so that every flow works for timing (Vivado stops optimizing once
 a constraint is met; synth's results do not depend on the target). synth's
-figures are the median of three placement seeds, at revision `e3d3441`
-(each the best of synth's three parallel placement seeds); the netlist
+figures are the median of three placement seeds, at revision `b806661`
+(each the best of synth's four parallel placement seeds); the netlist
 column of Euler 14 and 31 is at `e3d3441` too, the others at `3bec21a`,
 whose netlists are the same.
 Slices are occupied slices after routing.
@@ -362,12 +362,12 @@ Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
 
 | Design | Slices: Vivado / netlist / synth | LUTs: Vivado / netlist | FFs: Vivado / netlist / synth | MHz, Vivado's timer: Vivado / netlist / synth | synth's estimate |
 |---|---:|---:|---:|---:|---:|
-| Euler 10 | 1446 / 1222 / 1222 | 3760 / 3963 | 1369 / 1859 / 1859 | 112.4 / 118.3 / 111.4 | 109.9 |
+| Euler 10 | 1446 / 1222 / 1224 | 3760 / 3963 | 1369 / 1859 / 1859 | 112.4 / 118.3 / 112.3 | 111.3 |
 | Euler 14 | 1224 / 1087 / 1153 | 3234 / 2961 | 2200 / 2212 / 2214 | 147.3 / 151.3 / 141.0 | 149.9 |
-| Euler 25 | 167 / 183 / 149 | 665 / 515 | 187 / 187 / 187 | 144.1 / 143.8 / 136.0 | 136.0 |
+| Euler 25 | 167 / 183 / 150 | 665 / 515 | 187 / 187 / 187 | 144.1 / 143.8 / 135.0 | 137.8 |
 | Euler 31 | 83 / 86 / 91 | 223 / 196 | 300 / 300 / 300 | 327.1 / 323.4 / 287.7 | 289.3 |
-| Euler 43 | 1329 / 1104 / 1218 | 5032 / 3637 | 1523 / 1501 / 1497 | 72.3 / 96.0 / 88.6 | 90.9 |
-| Euler 48 | 1244 / 1206 / 1274 | 4781 / 3229 | 2449 / 2400 / 2412 | 134.8 / 132.6 / - | 128.8 |
+| Euler 43 | 1329 / 1104 / 1228 | 5032 / 3637 | 1523 / 1501 / 1497 | 72.3 / 96.0 / 89.7 | 90.2 |
+| Euler 48 | 1244 / 1206 / 1254 | 4781 / 3229 | 2449 / 2400 / 2412 | 134.8 / 132.6 / - | 129.0 |
 | Euler 57 | 390 / 374 / 352 | 1562 / 1149 | 857 / 784 / 601 | 130.3 / 137.9 / 120.4 | 119.5 |
 | Euler 58 | 1029 / 1097 / 1220 | 3890 / 3743 | 2023 / 2028 / 2028 | 138.8 / 144.9 / 132.5 | 135.6 |
 | Euler 92 | 823 / 536 / 577 | 1427 / 879 | 1647 / 2616 / 2616 | 158.0 / 153.8 / 145.1 | 144.7 |
@@ -382,8 +382,9 @@ Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
 - **Placement and routing.** synth's own placement and routing are 1-12%
   slower than Vivado's under a tight constraint, 3% on average (Euler 43,
   where synth's netlist is much better, is 23% faster). Since revision
-  `ae1dd6c` the flow gained 8.6% (geometric mean over six seeds of eight
-  designs): 4.1% at `3909187` and 2.1% at `e3d3441`. Controlled experiments
+  `ae1dd6c` the flow gained 9.1% (geometric mean over six seeds of eight
+  designs): 4.1% at `3909187`, 2.1% at `e3d3441` and 0.5% from a fourth
+  placement seed. Controlled experiments
   located the gap in packing: Vivado placing synth's slices (the fasm2bels
   netlist, each slice and carry chain a macro) reached no better than
   synth, while Vivado packing the same netlist itself was 9-20% faster.
@@ -394,11 +395,11 @@ Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
   leaves them a few columns apart. Routing is within a few percent: Vivado
   routing synth's placements of Euler 14 and 58 was no faster than synth's
   own routing.
-- **Runtime.** End to end, synth takes 11-163 s per design, 65 s on
+- **Runtime.** End to end, synth takes 10-169 s per design, 72 s on
   average, and Vivado 44-215 s, 86 s on average (synth measured alone on
-  the machine, Vivado with other jobs). synth is faster on eight of ten;
-  Euler 10 takes 163 s against 86 (three placement seeds and three timing
-  rounds of routing) and Euler 58 111 s against 86.
+  the machine, Vivado with other jobs). synth is faster on seven of ten;
+  Euler 10 takes 169 s against 86 (four placement seeds and three timing
+  rounds of routing), 58 121 s against 86, and 48 88 s against 96.
 
 ### Synthesis
 
@@ -480,7 +481,10 @@ How to read the timing columns:
   other end up a few columns apart (Euler 57's critical path crosses eight),
   where Vivado stacks them; legalization moves chains only half a tile from
   the analytical placement, so the model, not the legalizer, leaves them
-  there. Weighting slices' shared nets by criticality in clustering, and
+  there. Copying the drivers of critical nets with many sinks among them
+  (as Vivado's `phys_opt_design` does; Euler 25's worst path crossed a
+  LUT with 199 sinks) gained 0.4% on the five designs with such nets, in
+  the noise. Weighting slices' shared nets by criticality in clustering, and
   comparators of two bits per carry lane (as Vivado maps them: half the
   CARRY4s), gained nothing measurable.
 - Timing: flip-flops in SLICEM sites, which Vivado times 60 ps slower to
