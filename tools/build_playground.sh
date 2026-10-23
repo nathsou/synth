@@ -18,6 +18,8 @@ cd "$root"
 cargo build --release --target wasm32-unknown-unknown -p synth-playground \
   --config profile.release.debug=false --config profile.release.strip=true
 mkdir -p "$out"
+# Absolute: the database is archived from within $XC7_DB.
+out=$(cd "$out" && pwd)
 find crates/synth-playground/web -maxdepth 1 -type f -exec cp {} "$out/" \;
 cp target/wasm32-unknown-unknown/release/synth_playground.wasm "$out/"
 if [ -n "${XC7_DB:-}" ]; then
