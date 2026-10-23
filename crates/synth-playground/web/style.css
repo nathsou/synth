@@ -441,6 +441,7 @@ button.sb-item:hover { background: var(--bg-3) !important; color: var(--fg); }
 .toolbar .spacer { flex: 1; }
 .toolbar label { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12px; padding-left: 6px; }
 .toolbar label svg { width: 14px; height: 14px; }
+.toolbar .group button:disabled { opacity: .45; }
 .toolbar input[type="search"] { width: 190px; background: transparent !important; border: none !important; padding: 0 8px 0 2px; outline: none; }
 
 .zoombar {
@@ -480,6 +481,22 @@ button.sb-item:hover { background: var(--bg-3) !important; color: var(--fg); }
 .truth td { background: var(--bg-2); color: var(--muted); }
 .truth th { color: var(--muted); font-weight: 500; }
 .truth td.one { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-ink); }
+/* A stage as text (see textview.js). */
+.irtext { position: absolute; inset: 0; z-index: 4; background: var(--bg-1); }
+.irtext .scroller { position: absolute; inset: 52px 0 0 0; overflow: auto; border-top: 1px solid var(--line); }
+.irtext .sizer { position: relative; }
+.irtext .win { position: absolute; left: 0; top: 0; display: flex; min-width: 100%; padding-top: 8px; will-change: transform; }
+.irtext .gutter, .irtext .code { font: 12px/19px var(--font-code); }
+.irtext .gutter {
+  position: sticky; left: 0; z-index: 1; flex: none; min-width: calc(var(--digits, 2ch) + 28px); padding: 0 12px 0 16px;
+  text-align: right; color: var(--faint); background: var(--bg-1); user-select: none;
+}
+.irtext .code { margin: 0; padding: 0 16px 0 4px; flex: 1; white-space: pre; tab-size: 4; color: var(--fg-1); }
+.irtext .code > div, .irtext .gutter > div { height: 19px; }
+.irtext .code .match { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.irtext .code .hit { background: var(--sel); }
+.irtext .gutter .hit { color: var(--fg); }
+.text-mode .zoombar, .text-mode .legend { display: none; }
 .legend { position: absolute; left: 12px; bottom: 12px; z-index: 5; display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px;
   background: color-mix(in srgb, var(--bg-1) 92%, transparent); border: 1px solid var(--line); border-radius: 9px; padding: 6px 11px; max-width: 60%;
   backdrop-filter: blur(8px); }

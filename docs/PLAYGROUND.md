@@ -124,7 +124,12 @@ view); double-click a block, or use **Cells**, to open it down to the
 operators, gates, LUTs and flip-flops. The gate level shows the and-inverter
 graph with its inversions as bubbles. Hover for properties, click to inspect a
 node (with a truth table for LUTs) and follow its connections, search for a
-cell or signal by name.
+cell or signal by name. **Text** shows the same step as text instead, in a
+Verilog-like notation: the word-level cells as `assign` and `always`
+statements, the gate level as one line per AND gate (`$g<n>`), flip-flop,
+carry chain and instance, netlists as one line per primitive with its
+parameters and the nets on its pins. Search jumps from match to match, and
+**Download** saves it.
 
 **Chip.** The die as it is (**Place** shows the cells on their sites,
 **Route** the routed wires over them): logic tiles with their eight logic cells, RAM
@@ -290,4 +295,5 @@ and highlighting, with Node's built-in runner).
 
 Limits: Artix-7 shows the flow up to the mapped netlist, then the results of
 place and route, without the chip and bitstream views. Gate-level graphs above
-40,000 AND nodes are left out, and large schematics start collapsed.
+40,000 AND nodes are left out (the step opens as text), and large schematics
+start collapsed. Text beyond 1 MiB is cut.

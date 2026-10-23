@@ -916,7 +916,7 @@ class App {
         const delta = st.delta ? h('span', { class: st.delta < 0 ? 'down' : 'up' }, ` ${st.delta < 0 ? '−' : '+'}${fmtNum(Math.abs(st.delta))}`) : null;
         const btn = h('button', {
           class: `step${pending && !busy ? ' pending' : ''}${busy ? ' busy' : ''}${(this.running || stale) && !busy && st.id !== 'summary' ? ' stale' : ''}${st.bad ? ' bad' : ''}`, 'data-step': st.id,
-          title: `${stageInfo(st.id)[1] || st.label}${st.view === 'schematic' && st.metric && !st.has ? ' (too large to draw)' : ''}`,
+          title: `${stageInfo(st.id)[1] || st.label}${st.view === 'schematic' && st.metric && !st.graph ? ' (too large to draw: shown as text)' : ''}`,
           disabled: !st.metric || (st.view === 'schematic' && !st.has),
           onclick: () => this.openStep(st.id),
         }, h('span', { class: 'l' }, st.label), h('span', { class: 'm' }, busy ? 'running' : st.metric ?? '—', busy ? null : delta));

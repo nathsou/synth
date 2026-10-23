@@ -58,7 +58,7 @@ export function flowSteps(result, family) {
     const s = stages.get(id);
     const m = s ? headline(s) : null;
     const delta = m && prev && prev.unit === m.unit && prev.n !== m.n ? m.n - prev.n : null;
-    const step = { id, label: stageInfo(id)[0], metric: m ? `${fmtNum(m.n)} ${m.unit}` : null, delta, view: 'schematic', stage: id, has: !!s?.graph };
+    const step = { id, label: stageInfo(id)[0], metric: m ? `${fmtNum(m.n)} ${m.unit}` : null, delta, view: 'schematic', stage: id, has: !!(s?.graph || s?.text), graph: !!s?.graph };
     if (id === 'packed') step.group = 1;
     synth.push(step);
     if (m) prev = m;
@@ -173,7 +173,7 @@ export function renderSummary(el, result, app) {
   let prev = null;
   for (const s of stages) {
     const m = headline(s);
-    row(s.id, statLine(s.stats) || '—', prev && prev.unit === m.unit ? m.n - prev.n : 0, { open: s.graph ? () => app.openStep(s.id) : undefined });
+    row(s.id, statLine(s.stats) || '—', prev && prev.unit === m.unit ? m.n - prev.n : 0, { open: s.graph || s.text ? () => app.openStep(s.id) : undefined });
     prev = m;
   }
   if (chip) {

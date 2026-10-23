@@ -7,8 +7,8 @@
 //!
 //! - `run`: elaborates, synthesises, places, routes and generates the
 //!   bitstream, and returns every stage: diagnostics, the design as a graph
-//!   after each pass, the packed netlist, the placed and routed die, timing
-//!   and the decoded configuration bits.
+//!   and as text after each pass, the packed netlist, the placed and routed
+//!   die, timing and the decoded configuration bits.
 //! - `analyze`: diagnostics and the name index of Weft sources, for the
 //!   editor (hover, go to definition).
 //! - `format`: a Weft source, formatted.
@@ -19,6 +19,7 @@ pub mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod sim;
+pub mod text;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -849,7 +850,8 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
                     .with("title", format!("RTL, {name}"))
                     .with("kind", "rtl")
                     .with("stats", stats_json(m.stats()))
-                    .with("graph", graph::rtl_graph(m)),
+                    .with("graph", graph::rtl_graph(m))
+                    .with("text", text::rtl_text(m)),
             );
         }
         arch_ice40::synth::SynthStage::Logic(name, l) => {
@@ -869,6 +871,7 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
             if ands <= MAX_AIG_GRAPH {
                 j.set("graph", graph::aig_graph(l));
             }
+            j.set("text", text::aig_text(l));
             stages.push(j);
         }
         arch_ice40::synth::SynthStage::Mapped(nl) => {
@@ -878,7 +881,8 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
                     .with("title", "Mapped to iCE40 cells")
                     .with("kind", "netlist")
                     .with("stats", stats_json(nl.stats()))
-                    .with("graph", graph::netlist_graph(nl)),
+                    .with("graph", graph::netlist_graph(nl))
+                    .with("text", text::netlist_text(nl)),
             );
         }
     };
@@ -926,7 +930,8 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
             .with("title", "Packed into logic cells")
             .with("kind", "netlist")
             .with("stats", stats_json(imp.netlist.stats()))
-            .with("graph", graph::netlist_graph(&imp.netlist)),
+            .with("graph", graph::netlist_graph(&imp.netlist))
+            .with("text", text::netlist_text(&imp.netlist)),
     );
     let t = Instant::now();
     let (chip, timing) = chip::chip(&imp, &opts);
@@ -975,7 +980,8 @@ fn run_xc7(
             .with("title", "RTL, elaborated")
             .with("kind", "rtl")
             .with("stats", stats_json(module.stats()))
-            .with("graph", graph::rtl_graph(&module)),
+            .with("graph", graph::rtl_graph(&module))
+            .with("text", text::rtl_text(&module)),
     );
     progress::step("synthesize", "");
     let (nl, log) = arch_xc7::synth::synthesize(module)?;
@@ -986,7 +992,8 @@ fn run_xc7(
             .with("title", "Mapped to Artix-7 cells")
             .with("kind", "netlist")
             .with("stats", stats_json(nl.stats()))
-            .with("graph", graph::netlist_graph(&nl)),
+            .with("graph", graph::netlist_graph(&nl))
+            .with("text", text::netlist_text(&nl)),
     );
     r.time("synthesise", t);
     if req.at(&["stop"]).as_str() == Some("synth") {
