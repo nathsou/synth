@@ -2,7 +2,8 @@
 // Conway's Game of Life on an 8×8 torus, a generation every half second,
 // drawn over the UART (115200 8N1): a serial terminal shows it in place.
 // Every cell is computed in parallel, by a function called once per
-// generation. Build with uart.weft.
+// generation. Build with uart.weft. The playground's simulation also shows
+// the grid directly, as an image: it is marked as a frame.
 
 const SIZE: int = 8;
 
@@ -68,6 +69,7 @@ enum Phase { Home, Cells, Pause }
 /// CLK_HZ: the clock frequency (25 MHz on the Go Board). CLKS_PER_BIT: for
 /// 115200 baud. PAUSE: the cycles between two generations (half a second).
 module top<CLK_HZ: int = 25_000_000, CLKS_PER_BIT: int = CLK_HZ / 115200, PAUSE: int = CLK_HZ / 2>(in clk: clock, out tx: bool, out led: uint<4>) {
+    #[attr("frame", "8x8")]
     reg grid: [[bool; SIZE]; SIZE] = first();
     reg generation: uint<4> = 0;
     inst uart = uart_tx<CLKS_PER_BIT>();

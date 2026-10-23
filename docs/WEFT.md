@@ -765,6 +765,9 @@ Attributes are written `#[name]` or `#[name(args)]` before a declaration or item
 | `#[async_reg]` | `reg` | A synchronizer stage: kept, not merged into shift registers, placed close together |
 | `#[attr("name", value)]` | declarations | Passed to the RTL IR as an attribute |
 
+`#[attr("frame", "WxH")]` on a register makes the playground's simulation
+show it as a W×H image (see docs/PLAYGROUND.md).
+
 Attributes never change behaviour.
 
 ---

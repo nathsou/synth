@@ -17,6 +17,7 @@ synth-elab.workspace = true
 synth-logic.workspace = true
 synth-netlist.workspace = true
 synth-rtl.workspace = true
+synth-sim.workspace = true
 synth-verilog.workspace = true
 synth-weft.workspace = true
 arch-ice40.workspace = true

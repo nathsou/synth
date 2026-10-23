@@ -99,6 +99,7 @@ dependencies = [
  "synth-logic",
  "synth-netlist",
  "synth-rtl",
+ "synth-sim",
  "synth-verilog",
  "synth-weft",
 ]

@@ -30,5 +30,8 @@ if [ -n "${XC7_DB:-}" ]; then
   done
   rm -f "$out/xc7db/.list"
   echo "playground: Artix-7 database $(du -sh "$out/xc7db" | cut -f1)"
+else
+  echo "playground: warning: XC7_DB is not set, so the Artix-7 boards will not run" \
+    "(tools/fetch_xc7_db.sh <dir>, then XC7_DB=<dir>/artix7)" >&2
 fi
 echo "playground: $out ($(du -h "$out/synth_playground.wasm" | cut -f1) of WebAssembly)"

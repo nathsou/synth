@@ -6,6 +6,7 @@ import { Schematic } from './schematic.js';
 import { ChipView } from './chipview.js';
 import { BitstreamView, renderPipeline, renderTiming, renderProblems, renderLog } from './panels.js';
 import { settings, openSettings } from './settings.js';
+import { SimView } from './simview.js';
 import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
 import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins } from './util.js';
 
@@ -62,6 +63,7 @@ class App {
     this.schematic = new Schematic($('schematic'), this);
     this.chip = new ChipView($('chip'), this);
     this.bits = new BitstreamView($('bitstream'), this);
+    this.sim = new SimView($('simulation'), this);
     this.setupChrome();
     this.project = (await this.fromHash()) || store.get('project', null) || this.exampleProject(this.examples[0]);
     this.fillDevices();
@@ -115,6 +117,7 @@ class App {
       }
       this.project = this.exampleProject(e);
       this.docState.clear();
+      this.sim.designChanged(true);
       this.save();
       this.fillDevices();
       this.renderFiles();
@@ -402,6 +405,11 @@ class App {
     return this.project.files.filter((f) => !isPins(f.name));
   }
 
+  /** The design to simulate: the sources and the top. */
+  simRequest() {
+    return { files: this.sources().map((f) => ({ name: f.name, text: f.text })), top: this.project.top };
+  }
+
   async analyze() {
     if (!settings.get('liveCheck')) return;
     const files = this.sources().map((f) => ({ name: f.name, text: f.text }));
@@ -587,6 +595,7 @@ class App {
       this.chip.show(out);
       this.bits.show(out);
       if (out.ok) this.good = out;
+      if (out.ok) this.sim.designChanged(false);
     }
     if (!settings.get('liveCheck') || !this.analysis) this.applyAnalysis();
     if (!out.ok && errors) {
@@ -615,6 +624,7 @@ class App {
       if (this.view === 'schematic') this.schematic.visible();
       if (this.view === 'chip') this.chip.visible();
       if (this.view === 'bitstream') this.bits.visible();
+      if (this.view === 'simulation') this.sim.visible();
     });
   }
 

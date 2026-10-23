@@ -99,6 +99,8 @@ export class Backend {
       const checker = new WorkerChannel();
       this.direct = runner;
       this.checker = checker;
+      // Simulations run in their own worker, beside runs and checks.
+      this.simulator = new WorkerChannel();
       this.runs = new Latest(runner);
       this.checks = new Latest(checker);
     } catch {
@@ -106,6 +108,7 @@ export class Backend {
       const http = new HttpChannel();
       this.direct = http;
       this.checker = http;
+      this.simulator = http;
       this.runs = new Latest(http);
       this.checks = new Latest(http);
     }
@@ -120,5 +123,8 @@ export class Backend {
    *  null when the run starts (after waiting for the previous one). */
   run(req, onProgress) { return this.runs.call('run', JSON.stringify(req), onProgress); }
   analyze(req) { return this.checks.call('analyze', JSON.stringify(req)); }
+  async simStart(req) { return JSON.parse(await this.simulator.call('sim_start', JSON.stringify(req))); }
+  async simStep(req) { return JSON.parse(await this.simulator.call('sim_step', JSON.stringify(req))); }
+  async simStop() { return JSON.parse(await this.simulator.call('sim_stop', '{}')); }
   async format(text) { return JSON.parse(await this.checker.call('format', JSON.stringify({ text }))); }
 }

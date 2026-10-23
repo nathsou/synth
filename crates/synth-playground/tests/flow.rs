@@ -176,3 +176,83 @@ fn examples_build_for_artix7_boards() {
     }
     run_on_boards(&[("xc7a35t", "ftg256", &[]), ("xc7a100t", "csg324", &[])]);
 }
+
+/// The Game of Life simulated: its first generations come over the UART,
+/// each redrawn in place (cursor home, then eight rows).
+/// The playground runs one simulation at a time: so do the tests.
+static SIM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn life_simulates_to_frames() {
+    let _one = SIM.lock().unwrap_or_else(|e| e.into_inner());
+    let exs = synth_playground::examples();
+    let ex = exs.as_array().iter().find(|e| e.at(&["id"]).as_str() == Some("life")).unwrap();
+    let req = Json::obj().with("files", ex.at(&["files"]).clone());
+    let info = Json::parse(&synth_playground::handle("sim_start", &req.dump())).unwrap();
+    assert_eq!(info.at(&["ok"]).as_bool(), Some(true), "{}", info.dump());
+    assert_eq!(info.at(&["uart_tx"]).as_bool(), Some(true));
+    let mut text = Vec::new();
+    // A generation every half second of simulated time.
+    let step = Json::obj().with("cycles", 600_000).with("budget_ms", 600_000);
+    // The grid, read directly (its pixels come when they change).
+    let mut px = Vec::new();
+    for _ in 0..3 {
+        let r = Json::parse(&synth_playground::handle("sim_step", &step.dump())).unwrap();
+        text.extend(r.at(&["tx"]).as_array().iter().map(|b| b.as_i64().unwrap() as u8));
+        let f = &r.at(&["frames"]).as_array()[0];
+        if !f.at(&["pixels"]).is_null() {
+            px = f.at(&["pixels"]).as_array().to_vec();
+        }
+    }
+    let text = String::from_utf8(text).unwrap();
+    let frames: Vec<&str> = text.split("\x1b[H").filter(|f| !f.is_empty()).collect();
+    assert!(frames.len() >= 2, "{text:?}");
+    // The glider of the first generation.
+    assert!(frames[0].starts_with(".#......\r\n..#.....\r\n###....."), "{:?}", frames[0]);
+    // The grid read directly: the same picture as the UART's last frame.
+    let f = &info.at(&["frames"]).as_array()[0];
+    assert_eq!((f.at(&["width"]).as_i64(), f.at(&["height"]).as_i64()), (Some(8), Some(8)));
+    let grid: String = px
+        .chunks(8)
+        .map(|row| {
+            row.iter().map(|p| if p.as_i64() == Some(1) { '#' } else { '.' }).collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let last = frames.last().unwrap();
+    assert!(last.starts_with(&grid), "{grid:?} vs {last:?}");
+    assert_eq!(grid.matches('#').count(), 8, "{grid:?}");
+    synth_playground::handle("sim_stop", "{}");
+}
+
+#[test]
+fn verilog_frames_are_read_directly() {
+    let _one = SIM.lock().unwrap_or_else(|e| e.into_inner());
+    // A 4×2 image of 2-bit pixels that counts up: pixel 0 is the count.
+    let src = "module top(input clk, output led);
+        (* frame = \"4x2\" *) reg [15:0] img = 16'hE400;
+        always @(posedge clk) img <= img + 1;
+        assign led = img[0];
+    endmodule";
+    let req = Json::obj().with("files", vec![Json::obj().with("name", "top.v").with("text", src)]);
+    let info = Json::parse(&synth_playground::handle("sim_start", &req.dump())).unwrap();
+    assert_eq!(info.at(&["ok"]).as_bool(), Some(true), "{}", info.dump());
+    let f = &info.at(&["frames"]).as_array()[0];
+    assert_eq!(f.at(&["name"]).as_str(), Some("img"));
+    assert_eq!(f.at(&["bpp"]).as_i64(), Some(2));
+    let step = Json::obj().with("cycles", 3);
+    let r = Json::parse(&synth_playground::handle("sim_step", &step.dump())).unwrap();
+    let px: Vec<i64> = r.at(&["frames"]).as_array()[0]
+        .at(&["pixels"])
+        .as_array()
+        .iter()
+        .map(|p| p.as_i64().unwrap())
+        .collect();
+    assert_eq!(px, [3, 0, 0, 0, 0, 1, 2, 3]);
+    // Unchanged pixels are not sent again.
+    let r =
+        Json::parse(&synth_playground::handle("sim_step", &Json::obj().with("cycles", 0).dump()))
+            .unwrap();
+    assert!(r.at(&["frames"]).as_array()[0].at(&["pixels"]).is_null());
+    synth_playground::handle("sim_stop", "{}");
+}

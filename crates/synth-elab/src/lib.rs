@@ -828,6 +828,15 @@ impl<'a> Elab<'a> {
             }
             let name = format!("{}{}", self.prefix(), d.name.name);
             let w = self.new_wire(&name, width, signed);
+            // `(* frame = "WxH" *)`: the simulator shows the variable as an
+            // image (see synth-playground).
+            for a in &v.attrs {
+                if a.name.name == "frame"
+                    && let Some(ast::Expr::Str(s, _)) = &a.value
+                {
+                    self.out.wires[w].attrs.push(("frame".into(), Attr::Str(s.clone())));
+                }
+            }
             let is_var = v.kind.is_variable();
             self.declare(
                 &d.name.name,

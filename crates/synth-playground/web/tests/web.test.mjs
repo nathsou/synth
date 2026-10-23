@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { layout } from '../layout.js';
 import { tokenize, highlightHtml, langOf } from '../highlight.js';
 import * as progress from '../progress.js';
+import { Terminal } from '../terminal.js';
 
 function graph(n, edges) {
   return {
@@ -107,4 +108,23 @@ test('progress: learning moves the weights toward a run\'s shares', () => {
   const l = progress.layout('Artix-7', { step: 'synthesize', fraction: 0.5, detail: '' }, w);
   assert.ok(Math.abs(l.fraction - 0.3) < 0.02, `fraction ${l.fraction}`);
   assert.deepEqual(progress.learn('Artix-7', w, {}), w);
+});
+
+test('terminal: text, line endings, cursor home and clearing', () => {
+  const t = new Terminal(10, 4);
+  const bytes = (s) => [...s].map((c) => c.charCodeAt(0));
+  t.write(bytes('ab\r\ncd'));
+  assert.equal(t.text(), 'ab\ncd');
+  // A design redrawing in place: home, then the new frame over the old.
+  t.write(bytes('\x1b[Hxy'));
+  assert.equal(t.text(), 'xy\ncd');
+  assert.equal(t.frames, 1);
+  t.write(bytes('\x1b[2J\x1b[2;3Hz'));
+  assert.equal(t.text(), '\n  z');
+  t.write(bytes('\b\bq\x1b[K'));
+  assert.equal(t.text(), '\n q');
+  // Lines past the bottom scroll the screen up.
+  t.write(bytes('\r\n1\r\n2\r\n3'));
+  assert.equal(t.text().split('\n').length, 4);
+  assert.equal(t.text().split('\n')[3], '3');
 });

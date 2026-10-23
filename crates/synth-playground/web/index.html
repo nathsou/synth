@@ -53,6 +53,7 @@
       <button data-view="chip"><svg><use href="#i-chip"/></svg>Chip</button>
       <button data-view="timing"><svg><use href="#i-clock"/></svg>Timing</button>
       <button data-view="bitstream"><svg><use href="#i-bits"/></svg>Bitstream</button>
+      <button data-view="simulation"><svg><use href="#i-wave"/></svg>Simulation</button>
     </div>
     <div class="views-body">
       <div data-view-pane="pipeline" id="pipeline" class="view scroll"></div>
@@ -60,6 +61,7 @@
       <div data-view-pane="chip" id="chip" class="view" hidden></div>
       <div data-view-pane="timing" id="timing" class="view scroll" hidden></div>
       <div data-view-pane="bitstream" id="bitstream" class="view" hidden></div>
+      <div data-view-pane="simulation" id="simulation" class="view scroll" hidden></div>
       <div id="empty" class="empty-state">
         <svg><use href="#i-play"/></svg>
         <p>Press <kbd>Run</kbd> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to elaborate, synthesise, place, route and generate a bitstream.</p>
@@ -74,6 +76,9 @@
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9.5" y="9.5" width="5" height="5" fill="currentColor"/><path d="M9 2v3M12 2v3M15 2v3M9 19v3M12 19v3M15 19v3M2 9h3M2 12h3M2 15h3M19 9h3M19 12h3M19 15h3" stroke="currentColor" stroke-width="1.8"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4v4.5H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2.5 15h3V8h4v8h4V7h4v8h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
   <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5a7.4 7.4 0 0 0-2.6 1.5l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 3l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.4 7.4 0 0 0 2.6-1.5l2.4 1 2-3.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
