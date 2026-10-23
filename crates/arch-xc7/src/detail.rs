@@ -123,6 +123,7 @@ fn fits(
 
 pub fn refine(
     db: &Device,
+    model: &crate::sta::DelayModel,
     nl: &Netlist,
     p: &mut Packed,
     pl: &Placement,
@@ -209,11 +210,8 @@ pub fn refine(
             .filter(|(_, w)| **w > 0.0)
             .filter_map(|(&u, &w)| {
                 let (s, (x, y)) = place(p, u)?;
-                let d = if s == ds && s != usize::MAX {
-                    0.0
-                } else {
-                    crate::sta::predicted_delay(x - dx, y - dy)
-                };
+                let d =
+                    if s == ds && s != usize::MAX { 0.0 } else { model.predict(x - dx, y - dy) };
                 Some(w * d)
             })
             .sum()

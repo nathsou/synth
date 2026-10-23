@@ -966,6 +966,8 @@ fn run_xc7(
         part: device.clone(),
         seed: req.at(&["seed"]).as_i64().unwrap_or(1).max(0) as u64,
         effort: req.at(&["effort"]).as_f64().unwrap_or(1.0),
+        // The browser has no threads for parallel seeds.
+        tries: 1,
     };
     let top = nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into());
     let names = nl.clone();

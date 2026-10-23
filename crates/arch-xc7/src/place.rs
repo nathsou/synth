@@ -48,8 +48,11 @@ pub struct Placement {
     pub dsps: BTreeMap<CellId, Site>,
     pub plls: BTreeMap<CellId, Site>,
     pub hpwl: f64,
+    /// Each slice's position (tile coordinates) in the global placement,
+    /// before legalization, when only that was asked for.
+    pub spread: Vec<(f64, f64)>,
 }
-fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> {
+pub(crate) fn sites(db: &Device, kind: impl Fn(&str) -> bool) -> Result<Vec<Site>, String> {
     let mut out = Vec::new();
     for (tile, t) in db.tiles.iter().enumerate() {
         for (name, index) in db.sites(tile)? {
@@ -103,6 +106,8 @@ pub fn place(
     seed: u64,
     effort: f64,
     mut criticality: Option<Criticality<'_>>,
+    model: &crate::sta::DelayModel,
+    global_only: bool,
 ) -> Result<Placement, String> {
     if !effort.is_finite() || effort <= 0.0 || effort > 100.0 {
         return Err("placement effort must be in (0,100]".into());
@@ -397,7 +402,7 @@ pub fn place(
             .iter()
             .map(|(e, _, weight)| {
                 let (x, y) = tile_at(*e);
-                let delay = crate::sta::predicted_delay(x - dx, y - dy);
+                let delay = model.predict(x - dx, y - dy);
                 weight.get() * delay
             })
             .sum::<f64>()
@@ -443,6 +448,7 @@ pub fn place(
             dsps,
             plls: plls.clone(),
             hpwl: (0..nets.len()).map(hpwl).sum(),
+            spread: Vec::new(),
         }
     };
     // Analytical global placement, legalized onto the nearest free sites,
@@ -486,7 +492,16 @@ pub fn place(
         };
         let mut problem = Problem {
             kind: (0..macros.len()).map(|_| 0).chain(hard.iter().map(|&(_, k)| 1 + k)).collect(),
-            area: macros.iter().map(|m| m.len() as f64).chain(hard.iter().map(|_| 1.0)).collect(),
+            // A global placement for packing weighs each slice by its share
+            // of a slice's LUTs or flip-flops.
+            area: macros
+                .iter()
+                .map(|m| match m[..] {
+                    [s] if global_only => p.slices[s].fill(),
+                    _ => m.len() as f64,
+                })
+                .chain(hard.iter().map(|_| 1.0))
+                .collect(),
             nets: nets
                 .iter()
                 .map(|net| {
@@ -582,6 +597,17 @@ pub fn place(
             crate::analytic::place(&mut problem, &mut pos, Some(&mut timed))
         };
         legalize(&spread)?;
+        if global_only {
+            let mut placement = snapshot();
+            placement.spread = (0..p.slices.len())
+                .map(|s| {
+                    let (m, i) = member[s];
+                    let (x, y) = spread[m];
+                    (x, y + up * (i as f64 - (macros[m].len() - 1) as f64 / 2.0))
+                })
+                .collect();
+            return Ok(placement);
+        }
         if std::env::var("SYNTH_XC7_PLACE_TRACE").is_ok() {
             let wl: f64 = (0..nets.len()).map(hpwl).sum();
             eprintln!("trace: analytic legal hpwl {wl:.0}");

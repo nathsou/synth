@@ -50,6 +50,13 @@ impl Slice {
                 && nl.pin_net(l, "O") == nl.pin_net(c, &format!("DI[{lane}]"))
         })
     }
+    /// The share of a slice's LUT sites or flip-flops it uses, whichever is
+    /// larger, at least a quarter.
+    pub fn fill(&self) -> f64 {
+        let lanes = (0..4).filter(|&l| !self.lane_free(l)).count() as f64 / 4.0;
+        let ffs = self.ffs.iter().flatten().count() as f64 / 8.0;
+        lanes.max(ffs).max(0.25)
+    }
     /// Whether the slice needs a SLICEM site.
     pub fn needs_m(&self, nl: &Netlist) -> bool {
         self.ram.is_some() || self.luts.iter().flatten().any(|&c| is_srl(nl.cell_kind(c)))
@@ -322,9 +329,11 @@ fn lane_lut(nl: &mut Netlist, p: &Packed, c: CellId, pin: &str) -> Result<CellId
 
 /// A LUT for carry `c`'s DI input of `lane` on the lane's O5 output, which
 /// the carry reads inside the slice instead of through the X input: the
-/// constant, the DI net's own LUT (or a copy, if it has other readers), or
-/// a pass-through of a net the propagate LUT already reads, if its inputs
-/// fit beside the propagate LUT's in A1-A5.
+/// constant, or the DI net's own LUT (or a copy, if it has other readers),
+/// if its inputs fit beside the propagate LUT's in A1-A5. Other nets enter
+/// through the X input, faster than through a pass-through LUT (2% by the
+/// timing estimate), except on lane A of a carry whose dynamic carry-in
+/// takes AX: there a pass-through of a net the propagate LUT already reads.
 fn di_lut(
     nl: &mut Netlist,
     p: &Packed,
@@ -360,7 +369,10 @@ fn di_lut(
             return Ok(Some(l));
         }
         replicate_lut(nl, l)?
-    } else if inputs.contains(&d) {
+    } else if inputs.contains(&d)
+        && lane == 0
+        && nl.pin_net(c, "CYINIT").is_some_and(|n| value(nl, n).is_none())
+    {
         buffer(nl, d)?
     } else {
         return Ok(None);
@@ -370,13 +382,35 @@ fn di_lut(
 }
 
 pub fn pack(nl: &mut Netlist) -> Result<Packed, String> {
-    pack_timed(nl, &BTreeSet::new())
+    pack_timed(nl, &BTreeSet::new(), Clustering::Affinity)
+}
+
+/// How far (tile columns, a row counting two) from a slice's position in
+/// a global placement a placed clustering takes atoms: 1.5 and 3 measured
+/// alike by the timing estimate, 6 1% slower.
+const PLACED_RADIUS: f64 = 3.0;
+
+/// How the LUTs and flip-flops left after carries, wide multiplexers and
+/// memories cluster into slices.
+#[derive(Clone, Copy, Debug)]
+pub enum Clustering<'a> {
+    /// By shared nets.
+    Affinity,
+    /// One atom per slice, for a global placement to place.
+    Single,
+    /// By shared nets among the atoms near each slice in a global placement
+    /// (cell positions in tile coordinates).
+    Placed(&'a FxHashMap<CellId, (f64, f64)>),
 }
 
 /// Packs `nl` keeping the `critical` LUTs and flip-flops on outputs that
 /// leave their slice directly: LUTs off the lanes' O5 and flip-flops out of
 /// the second bank, whose outputs pass the output multiplexers.
-pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packed, String> {
+pub fn pack_timed(
+    nl: &mut Netlist,
+    critical: &BTreeSet<CellId>,
+    clustering: Clustering<'_>,
+) -> Result<Packed, String> {
     nl.check().map_err(|e| e.to_string())?;
     // An inverter is a one-input LUT.
     let inverters: Vec<_> = nl.live_cells().filter(|&c| nl.cell_kind(c) == "INV").collect();
@@ -477,24 +511,10 @@ pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packe
     }
     for &c in &carries {
         let cy = nl.pin_net(c, "CYINIT").ok_or("carry missing CYINIT")?;
-        if value(nl, cy).is_some() {
-            continue;
-        }
         let ci = nl.pin_net(c, "CI").ok_or("carry missing CI")?;
-        if value(nl, ci) != Some(false) {
+        if value(nl, cy).is_none() && value(nl, ci) != Some(false) {
             return Err("CARRY4 with both CI and CYINIT dynamic is not supported".into());
         }
-        let pre = nl.add_cell("$carry_dynamic_root", "CARRY4");
-        input(nl, pre, "CI", zero)?;
-        input(nl, pre, "CYINIT", zero)?;
-        for lane in 0..4 {
-            input(nl, pre, &format!("S[{lane}]"), if lane == 0 { zero } else { one })?;
-            input(nl, pre, &format!("DI[{lane}]"), if lane == 0 { cy } else { zero })?;
-        }
-        let n = nl.add_net("$carry_dynamic_cascade");
-        output(nl, pre, "CO[3]", n)?;
-        rewire(nl, c, "CI", n)?;
-        rewire(nl, c, "CYINIT", zero)?;
     }
     let mut p = Packed {
         slices: Vec::new(),
@@ -551,8 +571,11 @@ pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packe
             }
         }
     }
-    let carries: Vec<_> = nl.live_cells().filter(|&c| nl.cell_kind(c) == "CARRY4").collect();
-    for c in carries {
+    let mut carries: Vec<_> = nl.live_cells().filter(|&c| nl.cell_kind(c) == "CARRY4").collect();
+    let mut next = 0;
+    while next < carries.len() {
+        let c = carries[next];
+        next += 1;
         let idx = p.slices.len();
         let mut slice = Slice { carry: Some(c), ..Slice::default() };
         p.slots.insert(c, (idx, 0));
@@ -571,6 +594,25 @@ pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packe
                 slice.lut5[lane] = Some(lut);
                 p.slots.insert(lut, (idx, lane));
             }
+        }
+        // A dynamic carry-in enters through AX, unless lane A's DI needs
+        // it for another net: then a carry below generates it, its DI from
+        // AX passing to CO[3].
+        let cy = nl.pin_net(c, "CYINIT").ok_or("carry missing CYINIT")?;
+        let di = nl.pin_net(c, "DI[0]").ok_or("carry missing DI")?;
+        if value(nl, cy).is_none() && live[0] && !slice.di_from_o5(nl, 0) && di != cy {
+            let pre = nl.add_cell("$carry_dynamic_root", "CARRY4");
+            input(nl, pre, "CI", zero)?;
+            input(nl, pre, "CYINIT", zero)?;
+            for lane in 0..4 {
+                input(nl, pre, &format!("S[{lane}]"), if lane == 0 { zero } else { one })?;
+                input(nl, pre, &format!("DI[{lane}]"), if lane == 0 { cy } else { zero })?;
+            }
+            let n = nl.add_net("$carry_dynamic_cascade");
+            output(nl, pre, "CO[3]", n)?;
+            rewire(nl, c, "CI", n)?;
+            rewire(nl, c, "CYINIT", zero)?;
+            carries.push(pre);
         }
         p.slices.push(slice);
     }
@@ -665,7 +707,7 @@ pub fn pack_timed(nl: &mut Netlist, critical: &BTreeSet<CellId>) -> Result<Packe
             e.insert(l);
         }
     }
-    cluster(nl, &mut p, loose_ffs, critical)?;
+    cluster(nl, &mut p, loose_ffs, critical, clustering)?;
     for c in nl.live_cells() {
         if nl.cell_kind(c) == "DSP48E1" {
             crate::physical_dsp::validate(nl, c)?;
@@ -734,6 +776,7 @@ fn cluster(
     p: &mut Packed,
     ffs: Vec<CellId>,
     critical: &BTreeSet<CellId>,
+    clustering: Clustering<'_>,
 ) -> Result<(), String> {
     let luts: Vec<CellId> =
         nl.live_cells().filter(|&c| is_lut(nl.cell_kind(c)) && !p.slots.contains_key(&c)).collect();
@@ -882,19 +925,46 @@ fn cluster(
     let mut placed = vec![false; atoms.len()];
     let mut fillers: Vec<usize> = (0..atoms.len()).collect();
     fillers.sort_by_key(|&a| (atoms[a].nets.len(), a));
+    // A placed clustering grows each slice with the atoms near its position:
+    // its carry's, multiplexer's or memory's, or its first atom's.
+    let positions = match clustering {
+        Clustering::Placed(pos) => Some(pos),
+        _ => None,
+    };
+    let atom_xy =
+        |a: &Atom| positions.and_then(|pos| a.lut.or(a.ff).and_then(|c| pos.get(&c)).copied());
+    let mut anchors: Vec<Option<(f64, f64)>> = p
+        .slices
+        .iter()
+        .map(|x| {
+            let cells =
+                [x.carry, x.f7[0], x.f7[1], x.ram].into_iter().chain(x.luts).chain(x.ffs).flatten();
+            positions.and_then(|pos| cells.filter_map(|c| pos.get(&c)).next().copied())
+        })
+        .collect();
+    let distance = |a: Option<(f64, f64)>, b: Option<(f64, f64)>| match (a, b) {
+        (Some(a), Some(b)) => (a.0 - b.0).abs() + 2.0 * (a.1 - b.1).abs(),
+        _ => 0.0,
+    };
     // Grows slice `s` with connected atoms while any fits.
     let grow = |nl: &mut Netlist,
                 p: &mut Packed,
                 snets: &mut Vec<BTreeSet<NetId>>,
                 placed: &mut Vec<bool>,
+                anchors: &[Option<(f64, f64)>],
                 s: usize|
      -> Result<(), String> {
+        if matches!(clustering, Clustering::Single) {
+            return Ok(());
+        }
+        let near = |a: usize| distance(atom_xy(&atoms[a]), anchors[s]) <= PLACED_RADIUS;
         loop {
             let mut candidates: BTreeSet<usize> = BTreeSet::new();
             for &n in &snets[s] {
                 for pin in nl.nets[n].users.iter().chain(&nl.nets[n].driver) {
                     if let Some(&a) = atom_of.get(&pin.cell)
                         && !placed[a]
+                        && near(a)
                     {
                         candidates.insert(a);
                     }
@@ -902,6 +972,13 @@ fn cluster(
             }
             let gain = |a: usize| atoms[a].nets.iter().filter(|n| snets[s].contains(n)).count();
             let mut best: Option<(usize, usize, Fit)> = None;
+            // Nearer atoms first, so that a placed clustering takes the
+            // nearest of equal gains.
+            let mut candidates: Vec<usize> = candidates.into_iter().collect();
+            candidates.sort_by(|&a, &b| {
+                distance(atom_xy(&atoms[a]), anchors[s])
+                    .total_cmp(&distance(atom_xy(&atoms[b]), anchors[s]))
+            });
             for a in candidates {
                 let g = gain(a);
                 if best.as_ref().is_some_and(|b| b.1 >= g) {
@@ -921,6 +998,18 @@ fn cluster(
                 if (0..4).all(|l| !x.lane_free(l)) || x.ffs.iter().all(Option::is_some) {
                     return None;
                 }
+                if positions.is_some() {
+                    // The nearest atoms within reach.
+                    let mut near: Vec<usize> =
+                        (0..atoms.len()).filter(|&a| !placed[a] && near(a)).collect();
+                    near.sort_by(|&a, &b| {
+                        distance(atom_xy(&atoms[a]), anchors[s])
+                            .total_cmp(&distance(atom_xy(&atoms[b]), anchors[s]))
+                    });
+                    return near
+                        .into_iter()
+                        .find_map(|a| fit(nl, p, s, &atoms[a]).map(|f| (a, 0, f)));
+                }
                 fillers.iter().copied().find_map(|a| {
                     (!placed[a]).then(|| fit(nl, p, s, &atoms[a]).map(|f| (a, 0, f))).flatten()
                 })
@@ -932,7 +1021,7 @@ fn cluster(
         }
     };
     for s in 0..p.slices.len() {
-        grow(nl, p, &mut snets, &mut placed, s)?;
+        grow(nl, p, &mut snets, &mut placed, &anchors, s)?;
     }
     // Seeds: the most connected atoms first.
     let mut order: Vec<usize> = (0..atoms.len()).collect();
@@ -944,10 +1033,11 @@ fn cluster(
         p.slices.push(Slice::default());
         snets.push(BTreeSet::new());
         let s = p.slices.len() - 1;
+        anchors.push(atom_xy(&atoms[a]));
         let f = fit(nl, p, s, &atoms[a]).ok_or("an atom fits no empty slice")?;
         place(nl, p, &mut snets, s, &atoms[a], f)?;
         placed[a] = true;
-        grow(nl, p, &mut snets, &mut placed, s)?;
+        grow(nl, p, &mut snets, &mut placed, &anchors, s)?;
     }
     Ok(())
 }

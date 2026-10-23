@@ -355,6 +355,7 @@ fn net_delays(
         for &e in &route.edges {
             parent.insert(graph.dst[e as usize], e);
         }
+        let load = branch_load(db, graph, &route.edges);
         let mut delay: FxHashMap<u32, f64> = FxHashMap::default();
         delay.insert(req.source, 0.0);
         for &sink in &req.sinks {
@@ -371,7 +372,7 @@ fn net_delays(
                 if graph.pip[e as usize].0 == crate::routing::VIRTUAL {
                     continue;
                 }
-                t += pip_delay(db, graph, &parent, e);
+                t += pip_delay(db, graph, &parent, &load, e);
                 delay.insert(graph.dst[e as usize], t);
             }
             out.insert((i, sink), t);
@@ -380,9 +381,36 @@ fn net_delays(
     out
 }
 
+/// The share of the other branches' load a pip's delay takes: fitted to
+/// Vivado 2025.2's net delays by fanout (Euler 10's routed connections,
+/// from 34 ps optimistic at fanout 1 and 87 ps pessimistic above 30 with
+/// none of it, to under 40 ps either way).
+const BRANCH_LOAD: f64 = 0.35;
+
+/// The input capacitance (fF) of the route tree's pips leaving each node:
+/// a wire that branches drives all of them.
+fn branch_load(db: &Device, graph: &RoutingGraph, edges: &[u32]) -> FxHashMap<u32, f64> {
+    let mut load: FxHashMap<u32, f64> = FxHashMap::default();
+    for &e in edges {
+        let (ti, pi) = graph.pip[e as usize];
+        if ti == crate::routing::VIRTUAL {
+            continue;
+        }
+        let tmpl = &db.templates[db.tiles[ti as usize].template];
+        *load.entry(edge_src(graph, e)).or_insert(0.0) += f64::from(tmpl.pips[pi as usize].cap);
+    }
+    load
+}
+
 /// The delay of routing edge `e` (a real pip) within a route tree whose
-/// edge into each node is `parent`.
-fn pip_delay(db: &Device, graph: &RoutingGraph, parent: &FxHashMap<u32, u32>, e: u32) -> f64 {
+/// edge into each node is `parent` and whose pips load each node `load`.
+fn pip_delay(
+    db: &Device,
+    graph: &RoutingGraph,
+    parent: &FxHashMap<u32, u32>,
+    load: &FxHashMap<u32, f64>,
+    e: u32,
+) -> f64 {
     let (ti, pi) = graph.pip[e as usize];
     let tile = &db.tiles[ti as usize];
     let tmpl = &db.templates[tile.template];
@@ -401,7 +429,10 @@ fn pip_delay(db: &Device, graph: &RoutingGraph, parent: &FxHashMap<u32, u32>, e:
     let (_, dst_c) = tmpl.wire_rc[pip.dst as usize];
     // Resistance in ohms and capacitance in fF: ohm x fF / 1000 = ps.
     let r = src_len * f64::from(src_r) + f64::from(pip.res);
-    let mut d = f64::from(pip.delay.unwrap_or(0.0)) + r * f64::from(pip.cap) / 1000.0;
+    let own = f64::from(pip.cap);
+    let all = load.get(&edge_src(graph, e)).copied().unwrap_or(own).max(own);
+    let mut d =
+        f64::from(pip.delay.unwrap_or(0.0)) + r * (own + BRANCH_LOAD * (all - own)) / 1000.0;
     if !pip.buffered {
         d += (f64::from(src_r) + f64::from(pip.res)) * f64::from(dst_c) / 1000.0;
     }
@@ -646,12 +677,16 @@ impl<'a> Timer<'a> {
     }
 
     /// The LUTs and flip-flops driving connections of criticality at least
-    /// `PACKING_CRITICAL` in packing `p`, timed with `predicted_delay(2, 2)`
-    /// and `output_delay` between slices.
-    pub fn packing_critical(&self, p: &Packed) -> std::collections::BTreeSet<CellId> {
+    /// `PACKING_CRITICAL` in packing `p`, timed with the model's delay two
+    /// tiles away and `output_delay` between slices.
+    pub fn packing_critical(
+        &self,
+        p: &Packed,
+        model: &DelayModel,
+    ) -> std::collections::BTreeSet<CellId> {
         let nl = self.nl;
         let slice = |c: CellId| p.slots.get(&c).map(|&(s, _)| s);
-        let between = predicted_delay(2, 2);
+        let between = model.predict(2, 2);
         let wire = |c: CellId, i: u32, n: NetId| match nl.nets[n].driver {
             Some(d) if slice(d.cell).is_some() && slice(d.cell) == slice(c) => 0.0,
             Some(_) if !dedicated(nl, c, i) => between + output_delay(nl, p, n),
@@ -906,6 +941,7 @@ fn dump_delays(
         for &e in &route.edges {
             parent.insert(graph.dst[e as usize], e);
         }
+        let load = branch_load(db, graph, &route.edges);
         for &sink in &req.sinks {
             let Some(&d) = routed.get(&(i, sink)) else { continue };
             let mut pips = Vec::new();
@@ -924,7 +960,7 @@ fn dump_delays(
                         tmpl.kind,
                         tmpl.wires[pip.src as usize],
                         tmpl.wires[pip.dst as usize],
-                        pip_delay(db, graph, &parent, e)
+                        pip_delay(db, graph, &parent, &load, e)
                     ));
                 }
                 at = edge_src(graph, e);
@@ -972,16 +1008,53 @@ pub fn dedicated(nl: &Netlist, c: CellId, i: u32) -> bool {
     nl.cell_kind(c) == "CARRY4" && nl.str(nl.cells[c].pins[i as usize].name) == "CI"
 }
 
-/// The routing delay between two tiles before routing (ps): a piecewise
-/// linear fit of the routed connections between slices (calibrated delays,
-/// Euler 14, 43, 57 and 92), even within one tile, which routes through the
-/// interconnect. Nearby columns are about as close as one column; rows cost
-/// more until long wires take over.
-pub fn predicted_delay(dx: i32, dy: i32) -> f64 {
-    let (dx, dy) = (f64::from(dx.abs()), f64::from(dy.abs()));
-    428.0
-        + 15.7 * dx.min(8.0)
-        + 70.0 * (dx - 8.0).max(0.0)
-        + 60.0 * dy.min(5.0)
-        + 52.0 * (dy - 5.0).max(0.0)
+/// Routing delay between two tiles before routing (ps): the fastest delays
+/// through the routing graph by tile offset (`RoutingGraph::slice_delays`).
+/// On Euler 58's routed connections it is within 2% of their mean delay
+/// within a tile and 10-25% under it a few tiles away, where the piecewise
+/// linear fit it replaced was 30% under; tens of rows away, where long wires
+/// take over, the fit was two to three times over.
+#[derive(Clone, Debug)]
+pub struct DelayModel {
+    width: usize,
+    height: usize,
+    /// By `|dx| * height + |dy|`.
+    table: Vec<f64>,
+}
+
+impl DelayModel {
+    /// A model from the fastest delays by offset, unreached offsets filled
+    /// from their neighbours nearer the origin.
+    pub fn new(width: usize, height: usize, mut table: Vec<f64>) -> Self {
+        for x in 0..width {
+            for y in 0..height {
+                if table[x * height + y].is_infinite() {
+                    let near = [
+                        (x > 0).then(|| table[(x - 1) * height + y]),
+                        (y > 0).then(|| table[x * height + y - 1]),
+                    ];
+                    table[x * height + y] = near.into_iter().flatten().fold(0.0, f64::max);
+                }
+            }
+        }
+        DelayModel { width, height, table }
+    }
+
+    pub fn predict(&self, dx: i32, dy: i32) -> f64 {
+        let (x, y) = (dx.unsigned_abs() as usize, dy.unsigned_abs() as usize);
+        let at = |x: usize, y: usize| {
+            self.table[x.min(self.width - 1) * self.height + y.min(self.height - 1)]
+        };
+        // Beyond the table, the slope of its last eight tiles.
+        let mut d = at(x, y);
+        if x >= self.width && self.width > 8 {
+            d +=
+                (x - self.width + 1) as f64 * (at(self.width - 1, y) - at(self.width - 9, y)) / 8.0;
+        }
+        if y >= self.height && self.height > 8 {
+            d += (y - self.height + 1) as f64 * (at(x, self.height - 1) - at(x, self.height - 9))
+                / 8.0;
+        }
+        d
+    }
 }

@@ -20,6 +20,9 @@ pub struct FlowOptions {
     pub part: String,
     pub seed: u64,
     pub effort: f64,
+    /// Placement seeds implemented in parallel, the fastest by the timing
+    /// estimate kept.
+    pub tries: usize,
 }
 #[derive(Debug)]
 pub struct FlowResult {
@@ -31,13 +34,93 @@ pub struct FlowResult {
     pub timing: Vec<crate::sta::Clock>,
 }
 
+/// The device data every placement seed shares.
+struct Shared {
+    db: Device,
+    graph: RoutingGraph,
+    clocked: Vec<bool>,
+    model: crate::sta::DelayModel,
+}
+
 pub fn implement(
-    mut nl: Netlist,
+    nl: Netlist,
     root: &Path,
     xdc: &Constraints,
     opts: &FlowOptions,
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
+    progress::step("device", &format!("loading {}", opts.part));
+    let db = Device::load(root, &opts.part)?;
+    progress::advance(0.6, || "building the routing graph".into());
+    let graph = RoutingGraph::new(&db)?;
+    let clocked = graph.clocked(&db)?;
+    let model = graph.slice_delays(&db)?;
+    let shared = Shared { db, graph, clocked, model };
+    // Seeds run on threads of their own (one where there are none, as in
+    // WebAssembly), where progress reports are dropped.
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    let tries = opts.tries.clamp(1, threads);
+    // Seeds after the first are far from it, so that two runs' sets do
+    // not overlap.
+    let seeds: Vec<u64> =
+        (0..tries as u64).map(|k| opts.seed.wrapping_add(k * 1_000_003)).collect();
+    let mut results: Vec<Result<FlowResult, String>> = if tries == 1 {
+        vec![implement_seed(nl, root, xdc, opts, seeds[0], &shared, start, true)]
+    } else {
+        progress::step("place", &format!("{tries} placement seeds"));
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = seeds
+                .iter()
+                .map(|&seed| {
+                    let (nl, shared) = (nl.clone(), &shared);
+                    scope.spawn(move || {
+                        implement_seed(nl, root, xdc, opts, seed, shared, start, false)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err("a placement seed panicked".into())))
+                .collect()
+        })
+    };
+    let period = |r: &FlowResult| r.timing.iter().map(|c| c.period).fold(0.0, f64::max);
+    let periods: Vec<String> = results
+        .iter()
+        .zip(&seeds)
+        .map(|(r, s)| match r {
+            Ok(r) => format!("seed {s}: {:.3} ns", period(r) / 1000.0),
+            Err(e) => format!("seed {s}: {e}"),
+        })
+        .collect();
+    let best = (0..results.len()).filter(|&i| results[i].is_ok()).min_by(|&a, &b| {
+        let p = |i: usize| results[i].as_ref().map(period).unwrap_or(f64::MAX);
+        p(a).total_cmp(&p(b))
+    });
+    let Some(best) = best else { return results.swap_remove(0) };
+    let mut result = results.swap_remove(best)?;
+    if tries > 1 {
+        result.log.push(format!(
+            "kept seed {} of {tries} placement seeds ({})",
+            seeds[best],
+            periods.join(", ")
+        ));
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn implement_seed(
+    mut nl: Netlist,
+    root: &Path,
+    xdc: &Constraints,
+    opts: &FlowOptions,
+    seed: u64,
+    shared: &Shared,
+    start: Instant,
+    verbose: bool,
+) -> Result<FlowResult, String> {
+    let Shared { db, graph, clocked, model } = shared;
     let mut log = Vec::new();
     // As in Vivado, constraints of ports the design does not have are
     // dropped, so one board's file serves every design on it.
@@ -63,10 +146,38 @@ pub fn implement(
     // Timing-driven packing: the cells critical in the first packing, timed
     // with a fixed delay between slices, are packed again on outputs that
     // leave their slice directly.
-    let critical = crate::sta::Timer::new(root, &nl, &p)?.packing_critical(&p);
-    if !critical.is_empty() {
+    let critical = crate::sta::Timer::new(root, &nl, &p)?.packing_critical(&p, model);
+    {
+        // Placement-driven packing: the atoms are placed globally one per
+        // slice, then clustered by position. Against clustering by shared
+        // nets alone, this gained 1-9% by Vivado's timer on every Euler
+        // design (Euler 31 and 57 9%, 58 7%), for 9-36% more slices: Vivado
+        // placing synth's own clusters had reached no better than synth.
+        let mut single = original.clone();
+        let ps = pack::pack_timed(&mut single, &critical, pack::Clustering::Single)?;
+        let timer = crate::sta::Timer::new(root, &single, &ps)?;
+        let mut criticality = |pl: &place::Placement| {
+            let a = timer.analyze(&predictor(db, model, &single, &ps, pl));
+            a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
+        };
+        let global = place::place(
+            db,
+            &single,
+            &ps,
+            xdc,
+            clocked,
+            seed,
+            opts.effort,
+            Some(&mut criticality),
+            model,
+            true,
+        )?;
+        let mut pos: FxHashMap<CellId, (f64, f64)> = FxHashMap::default();
+        for (&c, &(s, _)) in &ps.slots {
+            pos.insert(c, global.spread[s]);
+        }
         nl = original;
-        p = pack::pack_timed(&mut nl, &critical)?;
+        p = pack::pack_timed(&mut nl, &critical, pack::Clustering::Placed(&pos))?;
     }
     log.push(format!(
         "packed {} slices, {} carry chains ({} critical cells)",
@@ -74,31 +185,36 @@ pub fn implement(
         p.chains.len(),
         critical.len()
     ));
-    progress::step("device", &format!("loading {}", opts.part));
-    let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
     // Timing-driven placement: criticalities from the delays the placement
     // being annealed predicts.
     let mut criticality = |pl: &place::Placement| {
-        let a = timer.analyze(&predictor(&db, &nl, &p, pl));
+        let a = timer.analyze(&predictor(db, model, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
-    progress::advance(0.6, || "building the routing graph".into());
-    let graph = RoutingGraph::new(&db)?;
-    let clocked = graph.clocked(&db)?;
     progress::step("place", "");
-    let placement =
-        place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
+    let placement = place::place(
+        db,
+        &nl,
+        &p,
+        xdc,
+        clocked,
+        seed,
+        opts.effort,
+        Some(&mut criticality),
+        model,
+        false,
+    )?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     // Detailed placement: lanes move between the placed slices, with
     // criticalities from the delays the new slice contents predict.
     let mut retime = |q: &Packed| {
-        let a = timer.analyze(&predictor(&db, &nl, q, &placement));
+        let a = timer.analyze(&predictor(db, model, &nl, q, &placement));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
     progress::advance(0.95, || "detailed placement".into());
-    let moves = crate::detail::refine(&db, &nl, &mut p, &placement, opts.seed, &mut retime)?;
+    let moves = crate::detail::refine(db, model, &nl, &mut p, &placement, seed, &mut retime)?;
     log.push(format!(
         "detailed placement: {moves} lane moves ({:.1}s)",
         start.elapsed().as_secs_f64()
@@ -111,10 +227,10 @@ pub fn implement(
     }
     progress::step("route", "");
     let (mut requests, names, request_nets, owners, blocked_edges) =
-        requests(&db, &nl, &p, &placement, &graph)?;
+        requests(db, &nl, &p, &placement, graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
     // placement, then from the routes as they converge.
-    let predicted = predictor(&db, &nl, &p, &placement);
+    let predicted = predictor(db, model, &nl, &p, &placement);
     let estimate = timer.analyze(&predicted);
     let criticality = |a: &crate::sta::Analysis, i: usize, sink: u32| -> f32 {
         let Some(net) = request_nets[i] else { return 0.0 };
@@ -142,8 +258,10 @@ pub fn implement(
         graph.dst.len(),
         start.elapsed().as_secs_f64()
     ));
-    for line in &log {
-        progress::info(line);
+    if verbose {
+        for line in &log {
+            progress::info(line);
+        }
     }
     let route_opts = synth_route::RouteOptions {
         // Wires span up to 18 tiles: a lookahead by wire class bounds the
@@ -166,6 +284,9 @@ pub fn implement(
         ..Default::default()
     };
     let mut iterations = |iteration: usize, routed: usize, overused: &[usize]| {
+        if !verbose {
+            return;
+        }
         progress::info(&format!(
             "route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
             overused.len(),
@@ -174,7 +295,7 @@ pub fn implement(
     };
     let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
         let wires =
-            crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, routes, &owners);
+            crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, routes, &owners);
         // Connections not routed yet keep their predicted delays.
         let a = timer
             .analyze(&|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)));
@@ -184,11 +305,13 @@ pub fn implement(
             .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
             .collect();
         let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
-        progress::info(&format!(
-            "routed timing estimate: {:.3} ns ({:.1}s)",
-            score / 1000.0,
-            start.elapsed().as_secs_f64()
-        ));
+        if verbose {
+            progress::info(&format!(
+                "routed timing estimate: {:.3} ns ({:.1}s)",
+                score / 1000.0,
+                start.elapsed().as_secs_f64()
+            ));
+        }
         synth_route::Retimed { criticality, score }
     };
     let hooks = synth_route::RouteHooks {
@@ -206,7 +329,7 @@ pub fn implement(
                     .iter()
                     .map(|n| match owners.get(n) {
                         Some(pins) => format!("node {n}: {}", describe(&nl, pins)),
-                        None => format!("node {n}: {}", node_name(&db, *n)),
+                        None => format!("node {n}: {}", node_name(db, *n)),
                     })
                     .collect();
                 format!("{e}; nets {}; {}", nets.join(", "), at.join("; "))
@@ -218,16 +341,16 @@ pub fn implement(
         })?;
     crate::routing::verify(graph.graph(), &requests, &routes)?;
     progress::step("bitstream", "");
-    let pins = lut_pins(&graph, &nl, &p, &placement, &routes);
-    let mut features = cell_features(&db, &nl, &p, &placement, xdc, &pins)?;
-    features.extend(graph.features(&db, &routes));
-    let coverage = crate::timing::coverage(root, &db, &graph, &routes)?;
+    let pins = lut_pins(graph, &nl, &p, &placement, &routes);
+    let mut features = cell_features(db, &nl, &p, &placement, xdc, &pins)?;
+    features.extend(graph.features(db, &routes));
+    let coverage = crate::timing::coverage(root, db, graph, &routes)?;
     log.push(coverage.report());
     for pip in &coverage.missing_pip_types {
         log.push(format!("uncharacterized routed pip: {pip}"));
     }
     // Verify frame consistency after all cell and routing features are combined.
-    let frames = crate::fasm::Assembler::new(&db, root).assemble(&features)?;
+    let frames = crate::fasm::Assembler::new(db, root).assemble(&features)?;
     let bitstream = crate::bitstream::encode(&db.part, &frames, true)?;
     crate::bitstream::decode(&db.part, &bitstream)?;
     log.push(format!(
@@ -238,9 +361,10 @@ pub fn implement(
     ));
     progress::step("timing", "");
     let wires =
-        crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, &routes, &owners);
+        crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, &routes, &owners);
     let routed = |c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0);
-    let timing = timer.analyze(&routed).clocks;
+    let full = timer.analyze(&routed);
+    let timing = full.clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
             "timing estimate counts {} uncharacterized pip types as zero delay",
@@ -359,6 +483,7 @@ fn local_constants(
 /// nothing within a site and a local hop within a tile.
 fn predictor<'a>(
     db: &'a Device,
+    model: &'a crate::sta::DelayModel,
     nl: &'a Netlist,
     p: &'a Packed,
     pl: &'a Placement,
@@ -369,7 +494,7 @@ fn predictor<'a>(
             (Some((a, sa)), Some((b, sb))) if a == b && sa == sb => 0.0,
             _ if crate::sta::dedicated(nl, c, i) => 0.0,
             (Some(((ax, ay), _)), Some(((bx, by), _))) => {
-                crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
+                model.predict(i32::from(bx - ax), i32::from(by - ay))
                     + crate::sta::output_delay(nl, p, n)
             }
             _ => 0.0,
@@ -682,6 +807,8 @@ fn requests(
                             .then(|| format!("{}X", char::from(b'A' + lane as u8)))
                     } else if name == "CI" && pack::value(nl, n).is_none() {
                         Some("CIN".into())
+                    } else if name == "CYINIT" && pack::value(nl, n).is_none() {
+                        Some("AX".into())
                     } else if matches!(name, "CI" | "CYINIT") {
                         None
                     } else {
@@ -851,6 +978,12 @@ fn lut_config(
         };
         phys |= value(cell, j)? << j;
     }
+    // A constant-0 LUT keeps one INIT bit, at the address of every input
+    // low: an unused input reads 1, so it is never read, and the LUT stays
+    // visible to bitstream readers (fasm2bels drops LUTs without INIT bits).
+    if phys == 0 && s.lut5[l].is_none() && pins.iter().flatten().count() < 6 {
+        phys = 1;
+    }
     Ok(Some((phys, Vec::new())))
 }
 
@@ -947,6 +1080,8 @@ fn cell_features(
                     return Err("dynamic CI requires CYINIT=0".into());
                 }
                 "CIN"
+            } else if pack::value(nl, cy).is_none() {
+                "AX"
             } else if pack::value(nl, ci) == Some(true) || pack::value(nl, cy) == Some(true) {
                 "C1"
             } else {
