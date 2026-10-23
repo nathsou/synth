@@ -184,13 +184,13 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
         .filter_map(|w| w.port.map(|(d, pos)| (pos, w.name.clone(), d, w.width as usize)))
         .collect();
     ports.sort_by_key(|p| p.0);
-    let marked: Vec<(String, usize, Option<(usize, usize)>, String)> = module
+    let marked: Vec<(String, usize, String)> = module
         .wires
         .iter()
         .filter_map(|w| {
             w.attrs.iter().find_map(|(k, v)| match (k.as_str(), v) {
                 ("frame", synth_rtl::Attr::Str(size)) => {
-                    Some((w.name.clone(), w.width as usize, frame_size(size), size.clone()))
+                    Some((w.name.clone(), w.width as usize, size.clone()))
                 }
                 _ => None,
             })
@@ -239,8 +239,8 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
         }
     }
     let (mut frames, mut warnings) = (Vec::new(), Vec::new());
-    for (name, width, size, text) in marked {
-        let Some((w, h)) = size else {
+    for (name, width, text) in marked {
+        let Some((w, h)) = frame_size(&text) else {
             warnings.push(format!("frame `{name}`: `{text}` is not a size like `8x8`"));
             continue;
         };
