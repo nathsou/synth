@@ -170,11 +170,14 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   by its pins spreads wide rather than tall. Against annealing from a
   random placement, the analytical start raised synth's estimate by 3%
   (geometric mean of the medians of five seeds of Euler 14, 25, 31, 57, 58
-  and 92), and 1.6% by Vivado's timer of the median seed of each. Three
+  and 92), and 1.6% by Vivado's timer of the median seed of each. Four
   placement seeds are implemented in parallel threads sharing the device
   data, and the one with the best timing estimate is kept (`--tries`,
-  default 3; one in WebAssembly): 1-5% by the estimate over a single seed
-  for a fifth more time.
+  default 4; one in WebAssembly): three gained 1-5% by the estimate over a
+  single seed, and the fourth adds 6% to the average runtime (72 s per
+  Euler design against Vivado's 86; six seeds took as long as Vivado).
+  The estimate after placement predicts the routed one too loosely to
+  choose seeds before routing them.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in

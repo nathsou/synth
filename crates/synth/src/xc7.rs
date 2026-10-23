@@ -117,7 +117,7 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
             .value("--tries")
             .map(|v| v.parse().map_err(|_| "invalid tries"))
             .transpose()?
-            .unwrap_or(3),
+            .unwrap_or(4),
     };
     let name = nl.top.map(|t| nl.str(t).to_string()).unwrap_or_else(|| "top".into());
     let result = arch_xc7::flow::implement(nl, Path::new(&db), &xdc, &opts)?;
