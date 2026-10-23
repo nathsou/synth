@@ -3,7 +3,7 @@ name: Playground (GitHub Pages)
 on:
   push:
     branches: [main]
-    paths: ['crates/**', 'tools/build_playground.sh', 'Cargo.*', '.github/workflows/pages.yml']
+    paths: ['crates/**', 'tools/build_playground.sh', 'tools/fetch_xc7_db.sh', 'Cargo.*', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -25,8 +25,17 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-unknown-unknown
+      # The Artix-7 boards need Project X-Ray's database, bundled per part
+      # into the site (about 4 MB each).
+      - name: Cache the Artix-7 database
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/prjxray-db
+          key: prjxray-db-${{ hashFiles('tools/fetch_xc7_db.sh') }}
+      - name: Fetch the Artix-7 database
+        run: tools/fetch_xc7_db.sh "$RUNNER_TEMP/prjxray-db"
       - name: Build the playground
-        run: tools/build_playground.sh site
+        run: XC7_DB="$RUNNER_TEMP/prjxray-db/artix7" tools/build_playground.sh site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
