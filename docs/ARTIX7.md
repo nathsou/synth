@@ -11,11 +11,11 @@ skew, I/O or hold analysis. Missing timing characterization is reported and
 fails timing acceptance by default.
 
 [Against Vivado](#against-vivado), with Vivado's own timer judging both
-tools' placed and routed results, synth uses fewer slices on nine of the ten
+tools' placed and routed results, synth uses fewer slices on six of the ten
 Euler solvers. Its synthesis is on par with Vivado's (Vivado implementing
 synth's netlist is within 7% of its own flow, and ahead on four designs),
-but its placement and routing are 5–28% slower under a tight clock
-constraint (details below).
+but its placement and routing are 1–16% slower under a tight clock
+constraint, 5% on average (details below), in less time on average.
 
 On nine Project Euler solvers, the native flow is also compared with Yosys's
 `synth_xilinx` followed by nextpnr-xilinx, and with Yosys's netlist placed
@@ -114,9 +114,19 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   LUTs and flip-flops cluster by affinity (as VPR's AAPack): a LUT and the
   flip-flop it alone feeds form one atom, and a slice grows with the atom
   sharing the most nets with it, then fills with the least connected atoms
-  left. The first-fit packing this replaced spread connected logic over the
-  design and about doubled the wirelength of any placement of it, Vivado's
-  included. Packing is timing-driven: the first packing is timed with a
+  left (`synth synth --pack-stats` reports this packing). The first-fit
+  packing it replaced spread connected logic over the design and about
+  doubled the wirelength of any placement of it, Vivado's included.
+  Implementation packs by placement instead: each atom is first a slice of
+  its own, weighted by its share of a slice's LUTs or flip-flops, the
+  analytical placer (below) places them all, and each slice then grows
+  with the atoms within three tiles of its own position, preferring shared
+  nets. Against clustering by shared nets alone this gained 1-9% by
+  Vivado's timer on every Euler design (Euler 31 and 57 9%, 58 7%), for
+  9-36% more slices. Carry DI enters through the lane's X input rather
+  than a pass-through LUT on O5 (2% by the estimate), and a dynamic
+  carry-in through AX rather than an extra carry below the chain. Packing
+  is also timing-driven: the first packing is timed with a
   fixed delay between slices, and the LUTs and flip-flops driving
   connections of criticality 0.7 or more are packed again on outputs that
   leave the slice directly, off a lane's O5 and its second flip-flop bank.
@@ -139,8 +149,12 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   window and a low temperature: N^(4/3) moves per temperature within a
   window adapting toward 44% acceptance, cooling by acceptance rate, and a
   greedy finish, minimizing half-perimeter wirelength and each
-  connection's predicted delay (from its distance, fitted to the
-  calibrated delays of routed connections) weighted by its criticality.
+  connection's predicted delay weighted by its criticality. Predicted
+  delays come from a table of the routing graph's fastest delays from a
+  slice to each slice by tile offset (Dijkstra from the device's centre,
+  0.6 s), within 2% of routed connections' mean in a tile, where the
+  piecewise linear fit of distance it replaced was 30% under nearby and
+  two to three times over tens of rows away.
   A carry chain moving onto single slices displaces them into the sites it
   leaves, chains of one length may swap, and a move tries several targets
   before giving up (most offsets land on a chain). Clock nets use BUFGs
@@ -151,7 +165,11 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   by its pins spreads wide rather than tall. Against annealing from a
   random placement, the analytical start raised synth's estimate by 3%
   (geometric mean of the medians of five seeds of Euler 14, 25, 31, 57, 58
-  and 92), and 1.6% by Vivado's timer of the median seed of each.
+  and 92), and 1.6% by Vivado's timer of the median seed of each. Three
+  placement seeds are implemented in parallel threads sharing the device
+  data, and the one with the best timing estimate is kept (`--tries`,
+  default 3; one in WebAssembly): 1-5% by the estimate over a single seed
+  for a fifth more time.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in
@@ -177,13 +195,17 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   timing arcs: clock to Q 456 ps (419 from the second bank) where X-Ray has
   340, data setup -31 ps from the lane's own LUT or carry and 67 through
   the bypass input, enable 205 and set or reset 429 (X-Ray has -45 and 109
-  and no reset check). A block RAM's setups are by input class from the
+  and no reset check). A pip's RC delay counts 35% of the input load of
+  the route tree's other branches leaving its source wire, as Vivado's net
+  delays grow with fanout: on Euler 10's routed connections the error went
+  from 34 ps optimistic at fanout 1 and 87 ps pessimistic above 30 to under
+  40 ps either way. A block RAM's setups are by input class from the
   SDF (data inputs 241 ps read-first, as synth's memories are). Wire
   delays are per input pin, and before routing a carry's CI from the slice
   below costs nothing and an output through a lane's output multiplexer
   185 ps. Vivado's arcs have equal rise and fall delays, so one delay per
   arc loses nothing. The estimate of a whole design is within 4% of
-  Vivado's timing of the same routing on the Euler designs (1.6% on
+  Vivado's timing of the same routing on the Euler designs (1% on
   average). Before, with X-Ray's flip-flop delays and a carry reading one
   net on S inside its slice and on DI through routing taking the routed
   delay on both, it was up to 6% off, mostly optimistic; placement also
@@ -323,46 +345,47 @@ XC7A100T-CSG324 with the same pins and clock, each judged by Vivado
 Each design is constrained 20% beyond the best Fmax any flow reached at
 100 MHz, so that every flow works for timing (Vivado stops optimizing once
 a constraint is met; synth's results do not depend on the target). synth's
-figures are the median of three placement seeds, at revision `510fd7e`.
+figures are the median of three placement seeds, at revision `3909187`
+(each the best of synth's three parallel placement seeds).
 Slices are occupied slices after routing.
 Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
 
 | Design | Slices: Vivado / netlist / synth | LUTs: Vivado / netlist | FFs: Vivado / netlist / synth | MHz, Vivado's timer: Vivado / netlist / synth | synth's estimate |
 |---|---:|---:|---:|---:|---:|
-| Euler 10 | 1446 / 1222 / 989 | 3760 / 3963 | 1369 / 1859 / 1859 | 112.4 / 118.3 / 107.1 | 105.9 |
-| Euler 14 | 1224 / 1081 / 963 | 3234 / 2934 | 2200 / 2212 / 2214 | 147.3 / 138.5 / 127.1 | 126.6 |
-| Euler 25 | 167 / 183 / 138 | 665 / 515 | 187 / 187 / 187 | 144.1 / 143.8 / 136.2 | 136.5 |
-| Euler 31 | 83 / 110 / 88 | 223 / 207 | 300 / 300 / 300 | 327.1 / 304.2 / 234.6 | 225.1 |
-| Euler 43 | 1329 / 1104 / 1073 | 5032 / 3637 | 1523 / 1501 / 1497 | 72.3 / 96.0 / 85.6 | 86.5 |
-| Euler 48 | 1244 / 1206 / 1097 | 4781 / 3229 | 2449 / 2400 / 2412 | 134.8 / 132.6 / - | 119.7 |
-| Euler 57 | 390 / 374 / 286 | 1562 / 1149 | 857 / 784 / 601 | 130.3 / 137.9 / 109.3 | 113.2 |
-| Euler 58 | 1029 / 1097 / 934 | 3890 / 3743 | 2023 / 2028 / 2028 | 138.8 / 144.9 / 124.6 | 122.6 |
-| Euler 92 | 823 / 536 / 478 | 1427 / 879 | 1647 / 2616 / 2616 | 158.0 / 153.8 / 136.6 | 137.4 |
-| Euler 97 | 211 / 211 / 198 | 792 / 545 | 443 / 443 / 445 | 85.6 / 83.7 / - | 81.3 |
+| Euler 10 | 1446 / 1222 / 1222 | 3760 / 3963 | 1369 / 1859 / 1859 | 112.4 / 118.3 / 111.4 | 109.9 |
+| Euler 14 | 1224 / 1081 / 1133 | 3234 / 2934 | 2200 / 2212 / 2214 | 147.3 / 138.5 / 126.7 | 131.7 |
+| Euler 25 | 167 / 183 / 149 | 665 / 515 | 187 / 187 / 187 | 144.1 / 143.8 / 136.0 | 136.0 |
+| Euler 31 | 83 / 110 / 110 | 223 / 207 | 300 / 300 / 300 | 327.1 / 304.2 / 273.5 | 273.7 |
+| Euler 43 | 1329 / 1104 / 1225 | 5032 / 3637 | 1523 / 1501 / 1497 | 72.3 / 96.0 / 89.0 | 88.2 |
+| Euler 48 | 1244 / 1206 / 1274 | 4781 / 3229 | 2449 / 2400 / 2412 | 134.8 / 132.6 / - | 128.8 |
+| Euler 57 | 390 / 374 / 352 | 1562 / 1149 | 857 / 784 / 601 | 130.3 / 137.9 / 120.4 | 119.5 |
+| Euler 58 | 1029 / 1097 / 1219 | 3890 / 3743 | 2023 / 2028 / 2028 | 138.8 / 144.9 / 129.2 | 129.2 |
+| Euler 92 | 823 / 536 / 577 | 1427 / 879 | 1647 / 2616 / 2616 | 158.0 / 153.8 / 145.1 | 144.7 |
+| Euler 97 | 211 / 211 / 223 | 792 / 545 | 443 / 443 / 445 | 85.6 / 83.7 / - | 80.5 |
 
-- **Area.** synth uses fewer slices than Vivado on every design but
-  Euler 31 (88 against 83), by 7–42% elsewhere, and Vivado's own
-  implementation of synth's netlist packs it into more slices than synth
-  on all ten.
+- **Area.** synth uses fewer slices than Vivado on six of ten designs (by
+  7-30%), and up to a third more on Euler 31 and 58, whose critical paths
+  its placement-driven packing spreads out (see Packing).
 - **Synthesis.** Vivado implementing synth's netlist matches or beats its
   own synthesis on Euler 10, 43, 57 and 58 (Euler 43 by 33%), and is within
-  3% on 25, 48, 92 and 97; Euler 14 and 31 trail by 6–7%.
-- **Placement and routing.** synth's own placement and routing remain
-  5–28% slower than Vivado's under a tight constraint (Euler 43, where
-  synth's netlist is much better, is 18% faster; Euler 31 varies most
-  between seeds, 226–254 MHz). Since revision `c7acb03` the analytical
-  placer, per-input setup checks, Vivado's flip-flop timing and
-  timing-driven packing gained about 6% on average (2.1% of it since
-  `ae1dd6c`, over six seeds). Routing is no longer the main gap: Vivado
-  routing synth's placement of Euler 14 reaches 121 MHz and of Euler 58
-  127, against synth's own routing at 120–125 and 122–124. Placement is:
-  on Euler 31, Vivado placing synth's slices reaches 291 MHz against 244–251
-  for synth's placement routed by Vivado; packing adds about 5% (Vivado's
-  own packing of the same netlists, 304 and on Euler 14 139 against 131).
-- **Runtime.** End to end, synth takes 3–117 s per design and Vivado 44–215
-  s (measured with other jobs on the machine); synth is faster on all but
-  Euler 10 (117 s against 86, mostly its three timing rounds of routing)
-  and on par on Euler 58.
+  3% on 25, 48, 92 and 97; Euler 14 and 31 trail by 6-7%.
+- **Placement and routing.** synth's own placement and routing are 1-16%
+  slower than Vivado's under a tight constraint, 5% on average (Euler 43,
+  where synth's netlist is much better, is 23% faster). Since revision
+  `ae1dd6c` they gained 6.4% (geometric mean over six seeds of eight
+  designs), 4.1% of it at `3909187`. Controlled experiments located the
+  gap in packing: Vivado placing synth's slices (the fasm2bels netlist,
+  each slice and carry chain a macro) reached no better than synth, while
+  Vivado packing the same netlist itself was 9-20% faster. Placement-driven
+  packing closed about half of that; on Euler 31, Vivado placing synth's
+  new slices is 4% faster than synth and its own packing 7% faster still.
+  Routing is within a few percent: Vivado routing synth's placements of
+  Euler 14 and 58 was no faster than synth's own routing.
+- **Runtime.** End to end, synth takes 11-163 s per design, 65 s on
+  average, and Vivado 44-215 s, 86 s on average (synth measured alone on
+  the machine, Vivado with other jobs). synth is faster on eight of ten;
+  Euler 10 takes 163 s against 86 (three placement seeds and three timing
+  rounds of routing) and Euler 58 111 s against 86.
 
 ### Synthesis
 
@@ -430,14 +453,17 @@ How to read the timing columns:
 
 ## Remaining work
 
-- Placement: Vivado placing synth's slices is still 8–17% faster than
-  synth's placement routed by Vivado (Euler 14 and 31). Annealing from the
-  analytical placement converges for its cost: its timing weight and
-  criticality exponents, more moves, a place-route iteration correcting
-  each connection's predicted delay by its routed one (0.8% for twice the
-  time), weighting rows above columns, and timing high-fanout nets were
-  tried and gained nothing measurable. The cost model, not the search,
-  is the likely limit.
+- Packing and placement: on Euler 31, Vivado placing synth's slices is 4%
+  faster than synth, and Vivado's own packing of the same netlist 7%
+  faster still. Starting the final placement from the packing's global
+  placement (or legalizing that placement directly), capping the LUTs per
+  slice, and a wider clustering radius were tried and gained nothing; nor
+  did weighing delay two or four times more in routing, or an admissible
+  lookahead, though a third of the critical LUT inputs take one of the
+  slow pins A1-A3 (the interconnect reaches the faster ones only through
+  another hop). Before annealing, the analytical placement converges for
+  its cost: its timing weight and criticality exponents, more moves and a
+  place-route iteration were tried as well.
 - Timing: flip-flops in SLICEM sites, which Vivado times 60 ps slower to
   Q and 30-50 ps faster to set up than in SLICEL, and the carry DI arcs
   from O5, which Vivado times about 40 ps faster than X-Ray's, are not
