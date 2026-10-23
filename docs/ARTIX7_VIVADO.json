@@ -15,7 +15,7 @@
     "synth": {
       "vivado": "vivado v2025.2 (64-bit)",
       "synth": "synth 0.1.0",
-      "revision": "3909187"
+      "revision": "e3d3441"
     }
   },
   "designs": [
@@ -60,7 +60,7 @@
       },
       "synth": {
         "seed": 1,
-        "seconds": 210.848,
+        "seconds": 223.261,
         "slices": 1222,
         "lut_sites": 4066,
         "ffs": 1859,
@@ -94,35 +94,35 @@
         "fmax_mhz": 147.3
       },
       "netlist": {
-        "seconds": 54.699,
-        "seconds_synth": 16.238,
-        "seconds_impl": 32.633,
+        "seconds": 58.957,
+        "seconds_synth": 13.534,
+        "seconds_impl": 36.688,
         "unrouted": 0.0,
-        "slices": 1081,
-        "lut_sites": 2891,
+        "slices": 1087,
+        "lut_sites": 2901,
         "ffs": 2212,
         "bram18": 4,
         "dsp48": 0,
-        "lut": 2934,
+        "lut": 2961,
         "carry4": 493,
-        "muxf7": 109,
+        "muxf7": 152,
         "muxf8": 0,
         "lutram": 0,
         "srl": 0,
-        "fmax_mhz": 138.5,
-        "seconds_import": 18.202
+        "fmax_mhz": 151.3,
+        "seconds_import": 18.259
       },
       "synth": {
         "seed": 2,
-        "seconds": 62.841,
-        "slices": 1133,
-        "lut_sites": 3633,
+        "seconds": 74.072,
+        "slices": 1153,
+        "lut_sites": 3658,
         "ffs": 2214,
         "bram18": 4,
         "dsp48": 0,
-        "int_pips": 37335,
-        "estimate_mhz": 131.7,
-        "vivado_mhz": 126.7,
+        "int_pips": 37895,
+        "estimate_mhz": 149.9,
+        "vivado_mhz": 141.0,
         "vivado_unrouted": 0,
         "vivado_unfixed": 404
       }
@@ -168,7 +168,7 @@
       },
       "synth": {
         "seed": 3,
-        "seconds": 19.206,
+        "seconds": 18.46,
         "slices": 149,
         "lut_sites": 505,
         "ffs": 187,
@@ -202,35 +202,35 @@
         "fmax_mhz": 327.1
       },
       "netlist": {
-        "seconds": 46.95,
-        "seconds_synth": 0.063,
-        "seconds_impl": 27.76,
+        "seconds": 41.078,
+        "seconds_synth": 0.064,
+        "seconds_impl": 22.091,
         "unrouted": 0.0,
-        "slices": 110,
-        "lut_sites": 205,
+        "slices": 86,
+        "lut_sites": 194,
         "ffs": 300,
         "bram18": 6,
         "dsp48": 0,
-        "lut": 207,
-        "carry4": 60,
+        "lut": 196,
+        "carry4": 54,
         "muxf7": 0,
         "muxf8": 0,
         "lutram": 0,
         "srl": 0,
-        "fmax_mhz": 304.2,
-        "seconds_import": 15.908
+        "fmax_mhz": 323.4,
+        "seconds_import": 15.685
       },
       "synth": {
         "seed": 1,
-        "seconds": 12.194,
-        "slices": 110,
-        "lut_sites": 256,
+        "seconds": 9.247,
+        "slices": 91,
+        "lut_sites": 229,
         "ffs": 300,
         "bram18": 6,
         "dsp48": 0,
-        "int_pips": 3520,
-        "estimate_mhz": 273.7,
-        "vivado_mhz": 273.5,
+        "int_pips": 3225,
+        "estimate_mhz": 289.3,
+        "vivado_mhz": 287.7,
         "vivado_unrouted": 0,
         "vivado_unfixed": 0
       }
@@ -276,17 +276,17 @@
       },
       "synth": {
         "seed": 2,
-        "seconds": 161.067,
-        "slices": 1225,
-        "lut_sites": 3734,
+        "seconds": 126.355,
+        "slices": 1218,
+        "lut_sites": 3722,
         "ffs": 1497,
         "bram18": 0,
         "dsp48": 0,
-        "int_pips": 39562,
-        "estimate_mhz": 88.2,
-        "vivado_mhz": 89.0,
+        "int_pips": 38910,
+        "estimate_mhz": 90.9,
+        "vivado_mhz": 88.6,
         "vivado_unrouted": 0,
-        "vivado_unfixed": 129
+        "vivado_unfixed": 134
       }
     },
     {
@@ -382,7 +382,7 @@
       },
       "synth": {
         "seed": 3,
-        "seconds": 20.758,
+        "seconds": 22.32,
         "slices": 352,
         "lut_sites": 1056,
         "ffs": 601,
@@ -435,18 +435,18 @@
         "seconds_import": 18.659
       },
       "synth": {
-        "seed": 2,
-        "seconds": 238.444,
-        "slices": 1219,
-        "lut_sites": 3675,
+        "seed": 3,
+        "seconds": 108.956,
+        "slices": 1220,
+        "lut_sites": 3674,
         "ffs": 2028,
         "bram18": 0,
         "dsp48": 0,
-        "int_pips": 44889,
-        "estimate_mhz": 129.2,
-        "vivado_mhz": 129.2,
+        "int_pips": 45463,
+        "estimate_mhz": 135.6,
+        "vivado_mhz": 132.5,
         "vivado_unrouted": 0,
-        "vivado_unfixed": 985
+        "vivado_unfixed": 971
       }
     },
     {
@@ -490,7 +490,7 @@
       },
       "synth": {
         "seed": 2,
-        "seconds": 33.929,
+        "seconds": 33.038,
         "slices": 577,
         "lut_sites": 1742,
         "ffs": 2616,
