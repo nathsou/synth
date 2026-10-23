@@ -170,13 +170,16 @@ const SHARED_REGION: f64 = 80.0;
 const SHARED_ROW: f64 = 36.0;
 
 /// Hold checks use Vivado's fast corner, timed as the slow delays scaled
-/// by its ratio to them (routes 0.31-0.35 on the Euler designs, flip-flop
-/// clock-to-out 0.34). A flip-flop's hold time, and the capture clock's
+/// by the low end of its ratio to them (routes 0.31-0.35 on the Euler
+/// designs, flip-flop clock-to-out 0.34). A flip-flop's hold time, and the capture clock's
 /// lateness over the launch's: within a region, and per row of regions
 /// the capture is farther from the global buffers (Vivado: 352 ps for one
 /// row up, 30-60 ps within one region).
-pub const FAST: f64 = 0.33;
+pub const FAST: f64 = 0.30;
 const FF_HOLD: f64 = 63.0;
+/// Block RAM hold times by input class (Vivado), and for the others.
+const BRAM_HOLD: [(&str, f64); 3] = [("ADDR", 183.0), ("DI", 155.0), ("WE", 89.0)];
+const BRAM_HOLD_OTHER: f64 = 183.0;
 const HOLD_SKEW: f64 = 50.0;
 const HOLD_REGION: f64 = 300.0;
 /// Across the spine within one row of regions (Vivado: 262-264 ps).
@@ -971,15 +974,16 @@ impl<'a> Timer<'a> {
         Analysis { clocks: clocks.into_values().collect(), slack }
     }
 
-    /// Hold checks of flip-flop inputs at the fast corner: the shortest
+    /// Hold checks of flip-flop and block RAM inputs at the fast corner: the shortest
     /// path to each, against the capture clock's lateness over the
-    /// launch's. For each input that fails, the last routed connection on
-    /// its shortest path (the cell input it reaches) and the slack (ps,
-    /// negative).
+    /// launch's. For each input with less than `margin` slack (ps), the
+    /// last routed connection on its shortest path (the cell input it
+    /// reaches) and the slack.
     pub fn hold(
         &self,
         wire: &dyn Fn(CellId, u32, NetId) -> f64,
         clock: &dyn Fn(CellId) -> ClockSite,
+        margin: f64,
     ) -> Vec<((CellId, u32), f64)> {
         let nl = self.nl;
         let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
@@ -1030,10 +1034,25 @@ impl<'a> Timer<'a> {
         };
         let mut fails = Vec::new();
         for (s, site) in self.seq.iter().zip(&sites) {
-            let (Some(capture), true) = (&s.capture, pack::is_ff(nl.cell_kind(s.cell))) else {
+            let bram = nl.cell_kind(s.cell) == "RAMB18E1";
+            let Some(capture) =
+                s.capture.as_ref().filter(|_| bram || pack::is_ff(nl.cell_kind(s.cell)))
+            else {
                 continue;
             };
             for &(i, _, _) in capture {
+                // A block RAM's clock comes later, and its inputs hold
+                // longer.
+                let (hold, late) = if bram {
+                    let name = nl.str(nl.cells[s.cell].pins[i as usize].name);
+                    let hold = BRAM_HOLD
+                        .iter()
+                        .find(|(class, _)| name.starts_with(class))
+                        .map_or(BRAM_HOLD_OTHER, |&(_, d)| d);
+                    (hold, BRAM_LATENCY)
+                } else {
+                    (FF_HOLD, 0.0)
+                };
                 for (launch, t) in at_input(&early, s.cell, i).unwrap_or_default() {
                     let ((edge, region), h) = (launch, hops.get(&launch.1));
                     if edge != s.edge {
@@ -1049,8 +1068,8 @@ impl<'a> Timer<'a> {
                         }
                         _ => HOLD_SKEW,
                     };
-                    let slack = FAST * t - skew - FF_HOLD;
-                    if slack < 0.0
+                    let slack = FAST * t - skew - late - hold;
+                    if slack < margin
                         && let Some(at) = routed(launch, (s.cell, i))
                     {
                         fails.push((at, slack));
@@ -1100,7 +1119,8 @@ impl<'a> Timer<'a> {
     }
 }
 
-/// Routing delay to each cell input pin (none for in-site paths).
+/// Routing delay to each cell input pin (none for in-site paths): the
+/// worst over the routed connections reaching it.
 pub fn routed_wires(
     db: &Device,
     nl: &Netlist,
@@ -1110,11 +1130,34 @@ pub fn routed_wires(
     routes: &[synth_route::NetRoute],
     owners: &Owners,
 ) -> FxHashMap<(CellId, u32), f64> {
-    let routed = net_delays(db, graph, requests, routes);
     if let Ok(path) = std::env::var("SYNTH_XC7_DELAYS") {
+        let routed = net_delays(db, graph, requests, routes);
         dump_delays(db, graph, requests, routes, &routed, &path);
     }
-    let mut wire: FxHashMap<(CellId, u32), f64> = FxHashMap::default();
+    routed_sinks(db, nl, graph, requests, request_nets, routes, owners)
+        .into_iter()
+        .map(|(pin, sinks)| (pin, sinks.iter().fold(0.0, |w: f64, s| w.max(s.2))))
+        .collect()
+}
+
+/// Request, sink node and delay of routed connections, by cell input pin.
+pub type RoutedSinks = FxHashMap<(CellId, u32), Vec<(usize, u32, f64)>>;
+
+/// The routed connections reaching each cell input pin: request, sink node
+/// and delay. Slice sinks are owned by netlist pin; block RAM and DSP sinks
+/// by site pin, which reaches every one of the cell's pins on the net (a
+/// block RAM write enable bit drives two site pins).
+pub fn routed_sinks(
+    db: &Device,
+    nl: &Netlist,
+    graph: &RoutingGraph,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    routes: &[synth_route::NetRoute],
+    owners: &Owners,
+) -> RoutedSinks {
+    let routed = net_delays(db, graph, requests, routes);
+    let mut sinks = RoutedSinks::default();
     for (i, req) in requests.iter().enumerate() {
         let Some(net) = request_nets[i] else { continue };
         for &sink in &req.sinks {
@@ -1123,21 +1166,17 @@ pub fn routed_wires(
                     continue;
                 }
                 let d = routed.get(&(i, sink)).copied().unwrap_or(0.0);
-                // Slice sinks are owned by netlist pin; block RAM and DSP
-                // sinks by site pin, so those take the worst over the cell's
-                // pins on the net.
                 let pins = &nl.cells[*c].pins;
                 let on_net = |k: &usize| pins[*k].dir == Dir::Input && pins[*k].net == Some(net);
                 let named = (0..pins.len()).find(|k| on_net(k) && nl.str(pins[*k].name) == name);
                 for k in named.map_or_else(|| (0..pins.len()).filter(on_net).collect(), |k| vec![k])
                 {
-                    let w = wire.entry((*c, k as u32)).or_insert(0.0);
-                    *w = w.max(d);
+                    sinks.entry((*c, k as u32)).or_default().push((i, sink, d));
                 }
             }
         }
     }
-    wire
+    sinks
 }
 
 /// Writes each routed connection's sink site pin (`SITE/PIN`; the LUT input

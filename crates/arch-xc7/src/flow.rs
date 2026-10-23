@@ -365,7 +365,7 @@ fn implement_seed(
     );
     if rerouted + failing > 0 {
         log.push(format!(
-            "hold: {rerouted} connections rerouted slower, {failing} still estimated to fail"
+            "hold: {rerouted} connections rerouted slower, {failing} still short of the margin"
         ));
     }
     crate::routing::verify(graph.graph(), &requests, &routes)?;
@@ -524,8 +524,9 @@ fn repair_hold(
     blocked_edges: &[u32],
     routes: &mut [synth_route::NetRoute],
 ) -> (usize, usize) {
-    // Margin over the estimate, in fast-corner ps.
-    const MARGIN: f64 = 40.0;
+    // Margin over the estimate, in fast-corner ps: Vivado timed some
+    // connections 40 ps faster than the estimate.
+    const MARGIN: f64 = 50.0;
     let mut used = vec![0u16; graph.x.len()];
     for (req, route) in requests.iter().zip(routes.iter()) {
         used[req.source as usize] += 1;
@@ -534,39 +535,54 @@ fn repair_hold(
         }
     }
     let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
-    // The routed connection reaching each cell input.
-    let mut sink_of: FxHashMap<(CellId, u32), (usize, u32)> = FxHashMap::default();
-    for (i, req) in requests.iter().enumerate() {
-        let Some(net) = request_nets[i] else { continue };
-        for &sink in &req.sinks {
-            for (c, name, n) in owners.get(&sink).into_iter().flatten() {
-                let pins = &nl.cells[*c].pins;
-                if let Some(k) = (0..pins.len()).find(|&k| {
-                    *n == net && pins[k].net == Some(net) && nl.str(pins[k].name) == name
-                }) {
-                    sink_of.insert((*c, k as u32), (i, sink));
-                }
-            }
-        }
-    }
     let (mut rerouted, mut failing) = (0, 0);
+    let mut index = None;
     for _ in 0..3 {
-        let wires = crate::sta::routed_wires(db, nl, graph, requests, request_nets, routes, owners);
+        let sinks = crate::sta::routed_sinks(db, nl, graph, requests, request_nets, routes, owners);
+        // Hold is checked on the fastest connection into each pin.
+        let fastest = |c: CellId, i: u32| {
+            sinks.get(&(c, i)).map_or(0.0, |s| s.iter().fold(f64::INFINITY, |w, s| w.min(s.2)))
+        };
         // The slowest repair each connection needs.
         let mut need: BTreeMap<(CellId, u32), f64> = BTreeMap::new();
-        for (at, slack) in timer.hold(&|c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0), clocks)
-        {
+        for (at, slack) in timer.hold(&|c, i, _| fastest(c, i), clocks, MARGIN) {
             let v = need.entry(at).or_insert(0.0);
             *v = v.max(MARGIN - slack);
         }
         failing = need.len();
         let mut any = false;
+        // A site pin reaching several cell pins is detoured once a round.
+        let mut done = FxHashSet::default();
         for (at, fast) in need {
-            let Some(&(net, sink)) = sink_of.get(&at) else { continue };
-            let extra = fast / crate::sta::FAST;
-            if crate::hold::detour(graph, requests, routes, &mut used, &blocked, net, sink, extra) {
-                rerouted += 1;
-                any = true;
+            let target = fastest(at.0, at.1) + fast / crate::sta::FAST;
+            for &(net, sink, d) in sinks.get(&at).into_iter().flatten() {
+                if d >= target || !done.insert((net, sink)) {
+                    continue;
+                }
+                let index = index.get_or_insert_with(|| crate::hold::Index::new(graph));
+                let ok = crate::hold::detour(
+                    graph,
+                    index,
+                    requests,
+                    routes,
+                    &mut used,
+                    &blocked,
+                    net,
+                    sink,
+                    target - d,
+                );
+                if std::env::var("SYNTH_XC7_HOLD_TRACE").is_ok() {
+                    eprintln!(
+                        "hold trace: {}.{} need {fast:.0} fast, sink {sink} {:.0} slow more: {ok}",
+                        nl.str(nl.cells[at.0].name),
+                        nl.str(nl.cells[at.0].pins[at.1 as usize].name),
+                        target - d
+                    );
+                }
+                if ok {
+                    rerouted += 1;
+                    any = true;
+                }
             }
         }
         if !any {

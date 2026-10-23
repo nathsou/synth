@@ -147,11 +147,16 @@ def fmax(prefix):
 
 
 def implement(top, prefix, sources, xdc, part, threads):
+    report = REPORT.replace("{prefix}", str(prefix))
+    # VIVADO_SKIP=opt_design,phys_opt_design leaves those steps out, to
+    # measure what they gain.
+    for step in filter(None, os.environ.get("VIVADO_SKIP", "").split(",")):
+        report = report.replace(f"\n{step}\n", "\n")
     reads = "".join(f"read_verilog {{{s}}}\n" for s in sources)
     tcl = (f"set_param general.maxThreads {threads}\n{reads}read_xdc {{{xdc}}}\n"
            f"set t [clock milliseconds]\nsynth_design -top {top} -part {part}\n"
            f"puts \"QOR seconds_synth [expr {{([clock milliseconds] - $t) / 1000.0}}]\"\n"
-           f"report_utilization -file {{{prefix}.synth_util.rpt}}\n" + REPORT.replace("{prefix}", str(prefix)))
+           f"report_utilization -file {{{prefix}.synth_util.rpt}}\n" + report)
     path = Path(f"{prefix}.tcl")
     path.write_text(tcl)
     seconds, error = vivado(path, Path(f"{prefix}.log"), prefix.parent)

@@ -106,8 +106,6 @@ pub enum Scope {
     /// Positions of single-atom slices for clustering: the legalized
     /// analytical placement, each slice's area its fill.
     Global,
-    /// The same, annealed.
-    Annealed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -904,14 +902,6 @@ pub fn place(
         }
     }
     let mut placement = snapshot();
-    if scope == Scope::Annealed {
-        placement.spread = (0..p.slices.len())
-            .map(|s| {
-                let (x, y) = slice_xy[loc[s].get()];
-                (f64::from(x), f64::from(y))
-            })
-            .collect();
-    }
     let mut clocks = BTreeMap::new();
     let buffers = sites(db, |k| k == "BUFGCTRL")?;
     let mut used = BTreeSet::new();

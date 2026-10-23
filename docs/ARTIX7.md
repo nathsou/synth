@@ -232,15 +232,24 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   Timing it lets placement and the choice of seed avoid it (Euler 14 +3%,
   geomean +0.5% over six seeds), and brings the estimate to within 1% of
   Vivado on most runs. Hold is checked at Vivado's fast corner, timed as
-  the slow delays times 0.33 (its routes measured 0.31-0.35 of synth's
+  the slow delays times 0.30 (its routes measured 0.31-0.35 of synth's
   estimates), against a capture clock 50 ps late within a region, 265 ps
-  across the spine and 350 ps one row of regions up. After routing, the
-  last routed connection of each failing path is rerouted through unused
-  wires near its sink until 40 ps past the requirement, and carry chains
-  stay within one clock region, whose dedicated links could not be
-  slowed. Synth's bitstreams had failed Vivado's hold check on 14 of 48
-  runs (by up to 60 ps, all across the region boundary at row 150); after
-  the repair none failed, at no cost in Fmax. There is no I/O timing.
+  across the spine and 350 ps one row of regions up, at flip-flops and at
+  block RAM inputs (Vivado's hold times: 183 ps for addresses, 155 for
+  data, 89 for write enables, on a clock 40 ps later still). After
+  routing, the last routed connection of each path short of the
+  requirement by less than 50 ps is rerouted through unused wires near
+  its sink: a detour pairs a search forward from where its branch leaves
+  the net with one backward from the sink, turning where the two meet
+  slow enough, and where the sink's branch is too short it reroutes the
+  branch above. A pin reached through several site pins (a block RAM
+  write enable bit drives two) is timed and slowed on all of them. Carry
+  chains stay within one clock region, whose dedicated links could not
+  be slowed. Synth's bitstreams had failed Vivado's hold check on 14 of
+  48 runs (by up to 60 ps, all across the region boundary at row 150);
+  the first repair, of flip-flop inputs only, left 4 of 24 failing, and
+  with block RAM inputs 1 of 48 (a write enable timed on one of its two
+  site pins), at no cost in Fmax. There is no I/O timing.
 - **Constraints.** An explicit XDC subset: `set_property` (including
   `-dict`), `get_ports` and `create_clock`; every port needs PACKAGE_PIN and
   LVCMOS33. Unknown commands or properties are errors.
