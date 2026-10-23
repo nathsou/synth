@@ -124,7 +124,7 @@ jobs:
       - name: Web app syntax
         run: for f in crates/synth-playground/web/*.js editors/vscode/*.js; do node --check "$f"; done
       - name: Web app unit tests
-        run: node --test crates/synth-playground/web/tests/web.test.mjs
+        run: node --test crates/synth-playground/web/tests/*.test.mjs
 
   # The simulation suites share one build of synth and one install of the
   # oracles; each runs only when the change can affect it.

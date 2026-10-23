@@ -2433,6 +2433,9 @@ impl<'a> ModCx<'a> {
         rr: bool,
     ) -> R<Value> {
         let name = callee.name.as_str();
+        if let Some(hover) = super::index::builtin_hover(name) {
+            d.note(callee.span, None, RefKind::Function, hover);
+        }
         let positional = |d: &mut Design<'a>, n: usize| -> R<()> {
             if args.len() != n {
                 return d.err(

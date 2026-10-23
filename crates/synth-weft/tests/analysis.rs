@@ -84,3 +84,31 @@ fn no_top_needed() {
     assert!(text.contains("`z` is not declared"), "{text}");
     assert!(!text.contains("top module"), "{text}");
 }
+
+#[test]
+fn builtins_have_hover_text() {
+    let src = "\
+const N: int = 200;
+module top(in a: uint<4>, in b: uint<4>, out y: uint<bits_for(N)>, out z: uint<8>) {
+    y = uint<bits_for(N)>(max(3, 5));
+    z = concat(a, b);
+}
+";
+    let mut sm = SourceMap::new();
+    let f = sm.add("t.weft", src);
+    let a = synth_weft::analyze(&mut sm, &[f], &[], None, &Default::default());
+    assert!(!a.diags.has_errors(), "{}", a.diags.render(&sm));
+    let at = |pos: u32| {
+        a.refs.iter().find(|r| r.span.file == f && r.span.start <= pos && pos < r.span.end)
+    };
+    for (needle, nth, sig) in [
+        ("bits_for", 0, "fn bits_for(v: int) -> int"),
+        ("bits_for", 1, "fn bits_for(v: int) -> int"),
+        ("max", 0, "fn max(a: int, b: int) -> int"),
+        ("concat", 0, "fn concat(a, b, …)"),
+    ] {
+        let r = at(find(src, needle, nth)).unwrap_or_else(|| panic!("no reference for {needle}"));
+        assert!(r.hover.contains(sig), "{}", r.hover);
+        assert!(r.decl.is_none());
+    }
+}

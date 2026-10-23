@@ -120,10 +120,10 @@ export function cssVar(name) {
 
 // ----- misc -----
 
-export function toast(msg) {
-  const t = h('div', { class: 'toast' }, msg);
+export function toast(msg, ms = 2500) {
+  const t = h('div', { class: 'toast', style: { animationDuration: `${ms}ms` } }, msg);
   document.body.append(t);
-  setTimeout(() => t.remove(), 2500);
+  setTimeout(() => t.remove(), ms);
 }
 
 export function fmtNum(n) {

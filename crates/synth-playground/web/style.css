@@ -440,7 +440,7 @@ table.path .sw { width: 8px; height: 8px; border-radius: 2px; display: inline-bl
 
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 120;
-  background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 14px; box-shadow: var(--shadow);
+  background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 14px; max-width: min(720px, 90vw); box-shadow: var(--shadow);
   animation: toast 2.4s ease forwards;
 }
 @keyframes toast { 0% { opacity: 0; transform: translate(-50%, 8px); } 10%, 85% { opacity: 1; transform: translate(-50%, 0); } 100% { opacity: 0; } }

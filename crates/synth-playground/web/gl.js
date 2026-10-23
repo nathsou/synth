@@ -26,7 +26,7 @@ void main() {
 }`;
 
 const RECT_FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 vLocal; in vec2 vHalf; in vec4 vFill; in vec4 vStroke; in float vRadius; in float vBorder;
 uniform float dpr;
 out vec4 color;
@@ -67,7 +67,7 @@ void main() {
 }`;
 
 const LINE_FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec4 vCol; in float vAcross; in float vHalf;
 uniform float dpr;
 out vec4 color;

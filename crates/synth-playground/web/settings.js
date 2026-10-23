@@ -10,7 +10,9 @@ const DEFAULTS = {
   accent: '#7aa2ff',
   layout: 'left', // editor position: left, right or hidden
   codeSize: 13,
-  autoRun: true,
+  // Off by default: a long flow on every pause in typing gets in the way.
+  // (A new key, so the old default saved in browsers does not carry over.)
+  runOnEdit: false,
   liveCheck: true,
   // Run options.
   seed: 1,
@@ -90,7 +92,7 @@ apply(settings.v);
 
 // ----- controls -----
 
-function toggle(key) {
+export function toggle(key) {
   const input = h('input', { type: 'checkbox', checked: settings.get(key), onchange: (e) => settings.set(key, e.target.checked) });
   return h('label', { class: 'switch' }, input, h('span'));
 }
@@ -154,7 +156,7 @@ const SECTIONS = [
     row('Code font size', null, range('codeSize', 10, 20, 1, (x) => `${x}px`)),
   ]],
   ['Flow', () => [
-    row('Run after edits', 'Re-run the flow shortly after you stop typing', toggle('autoRun')),
+    row('Run after edits', 'Re-run the flow shortly after you stop typing', toggle('runOnEdit')),
     row('Check as you type', 'Diagnostics, hover and go to definition in the editor', toggle('liveCheck')),
     row('Placement seed', null, number('seed', 0, 1e9)),
     row('Target frequency', 'MHz, for clocks without `set_frequency` (0: none)', number('freq', 0, 1000)),

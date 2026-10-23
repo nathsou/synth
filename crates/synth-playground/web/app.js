@@ -5,7 +5,9 @@ import { Editor, langOf } from './editor.js';
 import { Schematic } from './schematic.js';
 import { ChipView } from './chipview.js';
 import { BitstreamView, renderPipeline, renderTiming, renderProblems, renderLog } from './panels.js';
-import { settings, openSettings } from './settings.js';
+import { settings, openSettings, toggle } from './settings.js';
+import { requestFtdi, supported as usbSupported } from './ftdi.js';
+import { programBoard } from './program.js';
 import { SimView } from './simview.js';
 import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
 import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins } from './util.js';
@@ -66,6 +68,8 @@ class App {
     this.sim = new SimView($('simulation'), this);
     this.setupChrome();
     this.project = (await this.fromHash()) || store.get('project', null) || this.exampleProject(this.examples[0]);
+    // The example the design started from (none: a design of your own).
+    $('example').value = this.examples.some((e) => e.id === this.project.example) ? this.project.example : '';
     this.fillDevices();
     this.renderFiles();
     this.openFile(this.project.active || this.project.files[0].name);
@@ -112,7 +116,7 @@ class App {
       const e = this.examples.find((x) => x.id === ex.value);
       if (!e) return;
       if (this.project.modified && !confirm('Replace the current files with the example?')) {
-        ex.value = '';
+        ex.value = this.project.example || '';
         return;
       }
       this.project = this.exampleProject(e);
@@ -124,7 +128,6 @@ class App {
       this.openFile(this.project.active);
       this.analyze();
       this.run();
-      ex.value = '';
     });
     $('part').addEventListener('change', (e) => {
       this.project.part = e.target.value;
@@ -143,6 +146,7 @@ class App {
     $('download').addEventListener('click', () => {
       if (this.result?.bin) download(this.result.bin_name || `${this.result.top || 'design'}.bin`, fromBase64(this.result.bin));
     });
+    $('program').addEventListener('click', () => this.program());
     $('run-options').addEventListener('click', (e) => this.runOptions(e.currentTarget));
     for (const b of $('view-tabs').querySelectorAll('button')) b.addEventListener('click', () => this.openView(b.dataset.view));
     for (const b of $('bottom-tabs').querySelectorAll('button')) {
@@ -261,6 +265,7 @@ class App {
       onchange: (e) => { this.project.top = e.target.value.trim(); this.save(); this.analyze(); this.run(); } });
     const pop = h('div', { class: 'popover', style: { left: `${r.left}px`, top: `${r.bottom + 6}px` } },
       h('div', { class: 'form' },
+        h('div', { class: 'row' }, h('div', { class: 'lbl' }, 'Run after edits'), toggle('runOnEdit')),
         h('div', { class: 'row' }, h('div', { class: 'lbl' }, 'Top module'), top),
         field('Placement seed', 'seed', { min: 0 }),
         field('Target MHz (0: none)', 'freq', { min: 0, step: 1 }),
@@ -380,7 +385,7 @@ class App {
     if (isPins(f.name)) this.project.pcfAuto = false;
     this.modified();
     if (settings.get('liveCheck')) this.scheduleAnalyze();
-    if (settings.get('autoRun')) this.scheduleRun();
+    if (settings.get('runOnEdit')) this.scheduleRun();
   }
 
   /** Opens a file at a range of string indices. */
@@ -576,6 +581,7 @@ class App {
     this.result = out;
     $('empty').hidden = true;
     $('download').disabled = !out.bin;
+    $('program').disabled = !out.bin;
     const errors = (out.diagnostics || []).filter((d) => d.severity === 'error').length;
     if (out.ok) {
       const clk = out.timing?.clocks?.[0];
@@ -601,6 +607,36 @@ class App {
     if (!out.ok && errors) {
       const first = $('bottom-tabs').querySelector('[data-tab="problems"]');
       first.click();
+    }
+  }
+
+  /** Programs the board connected over USB with the last bitstream. */
+  async program() {
+    const r = this.result;
+    if (!r?.bin || this.programming) return;
+    if (!usbSupported()) {
+      toast('Programming a board needs WebUSB: open the playground in Chrome, Edge or another Chromium-based browser');
+      return;
+    }
+    const dev = this.devices.find((d) => d.part === this.project.part);
+    const board = dev?.boards?.[this.project.package] || '';
+    this.programming = true;
+    let ftdi = null;
+    try {
+      ftdi = await requestFtdi();
+      this.status('busy', `Programming ${board || ftdi.name}…`);
+      const res = await programBoard(ftdi, r, board, fromBase64(r.bin), (stage, f) => this.status('busy', `${stage}… ${Math.round(100 * f)}%`));
+      if (res.done) this.status('ok', `Programmed ${board || ftdi.name}: the FPGA is running ${r.top}`);
+      else this.status('error', 'Programmed, but the FPGA did not start (DONE stayed low)');
+    } catch (e) {
+      if (e.message === 'no board chosen') this.status('idle', 'Programming cancelled');
+      else {
+        this.status('error', 'Programming failed');
+        toast(`Programming failed: ${e.message}`, 15000);
+      }
+    } finally {
+      await ftdi?.close().catch(() => {});
+      this.programming = false;
     }
   }
 

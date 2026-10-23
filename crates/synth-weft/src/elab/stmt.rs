@@ -413,6 +413,9 @@ impl<'a> ModCx<'a> {
         if let ExprKind::Call { callee, args, .. } = &e.kind
             && (callee.name == "hex_file" || callee.name == "bin_file")
         {
+            if let Some(hover) = super::index::builtin_hover(&callee.name) {
+                d.note(callee.span, None, RefKind::Function, hover);
+            }
             let Some(Arg { value: Expr { kind: ExprKind::Str(_), .. }, .. }) = args.first() else {
                 return d.err(
                     Diagnostic::error(e.span, format!("`{}` takes a file name", callee.name))

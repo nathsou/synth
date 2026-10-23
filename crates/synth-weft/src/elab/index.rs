@@ -72,6 +72,48 @@ pub(crate) fn code(s: &str) -> String {
     format!("```weft\n{s}\n```")
 }
 
+/// The hover text of a builtin function: its signature and what it does.
+pub(crate) fn builtin_hover(name: &str) -> Option<String> {
+    let (sig, doc) = match name {
+        "concat" => (
+            "fn concat(a, b, …) -> uint<sum of widths>",
+            "Joins `bool`, `uint` and `sint` values, the first argument most significant. \
+             Every argument needs a width: binary and hexadecimal literals have theirs, \
+             other constants need a conversion (`uint<3>(5)`).",
+        ),
+        "from_bits" => (
+            "fn from_bits(x: uint<N>) -> T",
+            "Rebuilds a value of the expected type `T` from a `uint` of exactly its width \
+             (or a constant that fits it). For `bool`, integers except `index`, and structs \
+             and arrays of these.",
+        ),
+        "unsafe_cross" => (
+            "fn unsafe_cross(x: T) -> T",
+            "Returns `x` with a static timing tag, accepted by every clock domain. The \
+             expression inside is not tag-checked: for values stable when sampled, and \
+             dual-clock memory reads.",
+        ),
+        "hex_file" => (
+            "hex_file(path: string)",
+            "Memory contents from a file in `$readmemh` format, relative to this source file.",
+        ),
+        "bin_file" => (
+            "bin_file(path: string)",
+            "Memory contents from a file in `$readmemb` format, relative to this source file.",
+        ),
+        "clog2" => ("fn clog2(n: int) -> int", "The smallest k with 2^k ≥ n (`clog2(1) == 0`)."),
+        "bits_for" => (
+            "fn bits_for(v: int) -> int",
+            "The width of the `uint` needed to hold v, at least 1: \
+             `bits_for(255) == 8`, `bits_for(256) == 9`.",
+        ),
+        "min" => ("fn min(a: int, b: int) -> int", "The smaller of two compile-time integers."),
+        "max" => ("fn max(a: int, b: int) -> int", "The larger of two compile-time integers."),
+        _ => return None,
+    };
+    Some(format!("{}\n\n{doc}\n\nbuiltin", code(sig)))
+}
+
 impl<'a> ModCx<'a> {
     /// The declaration of a name visible here.
     pub fn decl_of(&self, d: &Design<'a>, name: &str) -> Option<Span> {

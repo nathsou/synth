@@ -51,11 +51,12 @@ WebGL2.
 **Editor.** Files are tabs: Weft (`.weft`), Verilog (`.v`) and the pin
 constraints (`.pcf` for iCE40, `.xdc` for Artix-7). As you type, the Weft sources are checked: errors and
 lint warnings are underlined, hovering a name shows its type, value range,
-width and clock domain, Ctrl+click (⌘+click) goes to its definition, uses of
+width and clock domain (or, for a builtin such as `bits_for`, what it does), Ctrl+click (⌘+click) goes to its definition, uses of
 the name under the cursor are highlighted, and `.` after an instance lists its
 ports. Registers, ports, instances and domains are coloured by what they are,
 not only by syntax. The format button (Shift+Alt+F) lays out a Weft file as
-`synth fmt` does. The flow runs again shortly after you stop typing.
+`synth fmt` does. The flow runs when you press Run (Ctrl+Enter); with **Run
+after edits** (in the run options) it also runs shortly after you stop typing.
 
 **Examples.** Blinky, a UART greeting and echo, breathing LEDs, Conway's Game
 of Life over a UART, three RV32I cores running the same program (one
@@ -116,6 +117,22 @@ IceStorm's `B<row>[<col>]` layout, coloured by purpose. Click a tile to decode
 it: its logic cells (LUT contents, carry, flip-flop) and every routing switch,
 read back from the bits rather than from the router. Download the `.bin`
 (iCE40) or the `.bit` (Artix-7, for `openFPGALoader`).
+
+**Programming.** The USB button programs the board plugged into the
+computer, from Chrome, Edge or another Chromium-based browser (WebUSB): every
+supported board has an FTDI FT2232H bridge, driven in MPSSE mode. The iCE40
+boards (Go Board, Alchitry Cu) get the bitstream written to their SPI
+configuration flash, as `iceprog` does: the FPGA is held in reset, the flash
+erased, written and read back, then the FPGA released, and it keeps the
+design after a power cycle. The Artix-7 boards (Alchitry Au, Nexys A7) are
+configured over JTAG, as `openFPGALoader` does: the device ID is checked
+against the bitstream's part, then `JPROGRAM`, `CFG_IN` with the
+configuration data and `JSTART`, and the FPGA's DONE is checked (the design
+is lost at power off). The browser must be allowed to claim the bridge's
+first interface: on Linux, a udev rule giving your user access to the device
+(`SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", MODE="0666"`); on Windows, the
+WinUSB driver for interface 0 (Zadig installs it); on macOS, no other driver
+or program holding it.
 
 **Simulation.** The design running on a virtual board, simulated cycle by
 cycle with synth-sim (in the browser's own worker, or by the server): its
@@ -215,6 +232,11 @@ fragment, so it is not sent to any server).
   ends it. `web/simview.js` paces the
   requests in real time and draws the board; `web/terminal.js` is the
   terminal.
+- `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
+  stripped from reads); `web/program.js` holds the protocols, SPI flash
+  writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`
+  pair, which the tests (`web/tests/program.test.mjs`) give an emulated
+  bridge with a flash or a 7-series TAP behind it.
 - `server.rs` is the `synth playground` server: a few lines of HTTP over
   `std::net`, serving the embedded app and `/api/<method>`.
 - The schematic, chip and bitstream views draw with WebGL2 (`gl.js`: instanced
