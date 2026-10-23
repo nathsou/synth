@@ -436,6 +436,278 @@ pub fn use_counts(m: &Module) -> synth_core::FxHashMap<SigBit, u32> {
     u
 }
 
+/// Folds a constant added or subtracted to a sum or difference with a
+/// constant: `(x ± k1) ± k2` (the inner result read by nothing else, the
+/// outer as wide or narrower) becomes `x + k`, `k = ±k1 ± k2` modulo the
+/// outer width. Expressions such as `i + 3 - C` otherwise take two carry
+/// chains in series. Returns the number of operations folded.
+pub fn fold_constant_sums(m: &mut Module) -> usize {
+    use crate::BinaryOp as B;
+    use synth_core::FxHashMap;
+    let uses = use_counts(m);
+    let mut driver: FxHashMap<SigBit, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if c.alive
+            && let CellKind::Binary { op: B::Add | B::Sub, y, .. } = &c.kind
+        {
+            for (i, &b) in y.iter().enumerate() {
+                if i == 0 {
+                    driver.insert(b, ci);
+                }
+            }
+        }
+    }
+    // `x ± k` as (x, k, k negated), with k constant on the right (or on
+    // either side of an addition).
+    let split = |kind: &CellKind| -> Option<(Sig, synth_core::LogicVec, bool, Sig)> {
+        let CellKind::Binary { op, a, b, y, .. } = kind else { return None };
+        match (op, a.as_const(), b.as_const()) {
+            (B::Add | B::Sub, None, Some(k)) => Some((a.clone(), k, *op == B::Sub, y.clone())),
+            (B::Add, Some(k), None) => Some((b.clone(), k, false, y.clone())),
+            _ => None,
+        }
+    };
+    let mut n = 0;
+    for ci in m.live_cells().collect::<Vec<_>>() {
+        let Some((inner_y, k2, neg2, y)) = split(&m.cells[ci].kind) else { continue };
+        let w = y.width();
+        // The operand is the low bits of another such cell's result, read
+        // only here.
+        let Some(&inner) = inner_y.iter().next().and_then(|b| driver.get(b)) else { continue };
+        if inner == ci || !m.cells[inner].alive {
+            continue;
+        }
+        let Some((x, k1, neg1, iy)) = split(&m.cells[inner].kind) else { continue };
+        if inner_y.width() != w || iy.iter().any(|b| uses.get(b).copied().unwrap_or(0) > 1) {
+            continue;
+        }
+        // Either the operand is the inner result's low bits (arithmetic
+        // modulo the outer width), or all of it zero-extended, from an
+        // addition that cannot overflow its width.
+        let wi = iy.width();
+        let low = wi >= w && inner_y.0 == iy.0[..w];
+        let exact = wi < w
+            && inner_y.0[..wi] == iy.0[..]
+            && inner_y.0[wi..].iter().all(|b| *b == SigBit::ZERO)
+            && !neg1
+            && eff_width(&x).max(eff_width(&Sig::from_const(&k1))) < wi;
+        if !low && !exact {
+            continue;
+        }
+        let term = |k: &synth_core::LogicVec, neg: bool| {
+            let k = k.resize(w, false);
+            if neg { synth_core::LogicVec::zeros(w).sub(&k) } else { k }
+        };
+        let k = term(&k1, neg1).add(&term(&k2, neg2));
+        if !k.is_known() {
+            continue;
+        }
+        let x = if low { x.slice(0, w) } else { x.extend(w, false) };
+        let sum = m.binary(B::Add, false, x, Sig::from_const(&k));
+        m.cells[ci].alive = false;
+        m.connect(y, sum);
+        n += 1;
+    }
+    n
+}
+
+/// Balances chains of running maxima or minima: `if (best < x[k]) best =
+/// x[k], arg = n[k];` over k makes a chain of compare-and-select stages,
+/// each comparing the previous stage's result. Comparing pairs, then the
+/// winners, gives the same result in logarithmic depth: the earlier of
+/// equal values wins (the later for `<=`) on both sides and at the root.
+/// Multiplexers on the same selects (the `arg`s) follow. Returns the number
+/// of chains rebuilt.
+pub fn balance_select_chains(m: &mut Module) -> usize {
+    use crate::BinaryOp as B;
+    use synth_core::FxHashMap;
+    const MIN_STAGES: usize = 3;
+    // Narrower values compare in a LUT or two, which LUT mapping merges
+    // along the chain better than across a tree (3-bit values: 5 LUT levels
+    // chained, 7 balanced; 10-bit: 17 chained, 7.5 balanced).
+    const MIN_WIDTH: usize = 6;
+    let uses = use_counts(m);
+    let mut compares: Vec<CellId> = Vec::new();
+    let mut by_select: FxHashMap<SigBit, Vec<CellId>> = FxHashMap::default();
+    let mut by_y: FxHashMap<Vec<SigBit>, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        if !c.alive {
+            continue;
+        }
+        match &c.kind {
+            CellKind::Binary { op: B::Lt | B::Le | B::Gt | B::Ge, .. } => compares.push(ci),
+            CellKind::Mux { s, y, .. } => {
+                by_select.entry(*s).or_default().push(ci);
+                by_y.insert(y.0.clone(), ci);
+            }
+            _ => {}
+        }
+    }
+    // A stage: a comparison of the running value with a new one (`prev <
+    // new`, or `<=`), and the multiplexers on its result: the one taking the
+    // new value when it wins (absent where nothing reads the result), and
+    // the companions.
+    struct Stage {
+        prev: Sig,
+        new: Sig,
+        op: B,
+        signed: bool,
+        select: SigBit,
+        value: Option<CellId>,
+    }
+    let stage = |m: &Module, cmp: CellId| -> Option<Stage> {
+        let CellKind::Binary { op, signed, a: p, b: q, y } = &m.cells[cmp].kind else {
+            return None;
+        };
+        let (prev, new, op) = match op {
+            B::Lt | B::Le => (p.clone(), q.clone(), *op),
+            B::Gt => (q.clone(), p.clone(), B::Lt),
+            B::Ge => (q.clone(), p.clone(), B::Le),
+            _ => return None,
+        };
+        let select = y.0[0];
+        let value = by_select.get(&select).into_iter().flatten().copied().find(|&ci| {
+            matches!(&m.cells[ci].kind, CellKind::Mux { a, b, .. } if *a == prev && *b == new)
+        });
+        Some(Stage { prev, new, op, signed: *signed, select, value })
+    };
+    let all: Vec<Stage> = compares.iter().filter_map(|&c| stage(m, c)).collect();
+    // The stage of each value multiplexer.
+    let of_value: FxHashMap<CellId, usize> =
+        all.iter().enumerate().filter_map(|(i, s)| s.value.map(|v| (v, i))).collect();
+    let mut continued = vec![false; all.len()];
+    for st in &all {
+        if let Some(&v) = by_y.get(&st.prev.0)
+            && let Some(&i) = of_value.get(&v)
+        {
+            continued[i] = true;
+        }
+    }
+    let exclusive = |s: &Sig, n: u32| s.iter().all(|b| uses.get(b).copied().unwrap_or(0) <= n);
+    let mut n = 0;
+    for end in (0..all.len()).filter(|&i| !continued[i]) {
+        // Walk back while each previous value is the value multiplexer of a
+        // stage of the same comparison, read only by this stage.
+        let mut chain = vec![end];
+        loop {
+            let last = &all[*chain.last().unwrap()];
+            let Some(&v) = by_y.get(&last.prev.0) else { break };
+            let Some(&i) = of_value.get(&v) else { break };
+            if all[i].op != last.op || all[i].signed != last.signed || !exclusive(&last.prev, 2) {
+                break;
+            }
+            chain.push(i);
+        }
+        if chain.len() < MIN_STAGES || all[end].prev.width() < MIN_WIDTH {
+            continue;
+        }
+        chain.reverse();
+        let stages: Vec<&Stage> = chain.iter().map(|&i| &all[i]).collect();
+        // Companions: muxes on each stage's select, chained like the values;
+        // a companion continues the previous one when its previous input is
+        // made of that one's result bits and constants (narrower stages are
+        // widened by constants).
+        let companions: Vec<Vec<(CellId, Sig, Sig, Sig)>> = stages
+            .iter()
+            .map(|st| {
+                by_select
+                    .get(&st.select)
+                    .into_iter()
+                    .flatten()
+                    .filter(|&&ci| Some(ci) != st.value)
+                    .filter_map(|&ci| match &m.cells[ci].kind {
+                        CellKind::Mux { a, b, y, .. } => {
+                            Some((ci, a.clone(), b.clone(), y.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let continues = |a: &Sig, prev_y: &Sig| {
+            a.iter().any(|b| prev_y.0.contains(b))
+                && a.iter().all(|b| prev_y.0.contains(b) || matches!(b, SigBit::Const(_)))
+        };
+        let mut ok = companions.iter().all(|c| c.len() == companions[0].len());
+        let mut chains: Vec<Vec<(CellId, Sig, Sig, Sig)>> = Vec::new();
+        for first in &companions[0] {
+            let mut list = vec![first.clone()];
+            for later in &companions[1..] {
+                let prev_y = &list.last().unwrap().3;
+                match later.iter().find(|c| continues(&c.1, prev_y)) {
+                    Some(c) if exclusive(prev_y, 1) => list.push(c.clone()),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            chains.push(list);
+        }
+        if !ok {
+            continue;
+        }
+        // Leaves: the first stage's previous value, then each stage's new.
+        // A companion's value from stage k is what the later stages make of
+        // it when each keeps its previous input.
+        let carry = |list: &[(CellId, Sig, Sig, Sig)], k: usize, mut v: Sig| {
+            for j in k + 1..list.len() {
+                let (prev_y, a) = (&list[j - 1].3, &list[j].1);
+                v = Sig(a
+                    .iter()
+                    .map(|b| prev_y.0.iter().position(|x| x == b).map_or(*b, |t| v.0[t]))
+                    .collect());
+            }
+            v
+        };
+        let (op, signed) = (stages[0].op, stages[0].signed);
+        let mut leaves: Vec<(Sig, Vec<Sig>)> = vec![(
+            stages[0].prev.clone(),
+            chains.iter().map(|c| carry(c, 0, c[0].1.clone())).collect(),
+        )];
+        for (k, st) in stages.iter().enumerate() {
+            leaves.push((
+                st.new.clone(),
+                chains.iter().map(|c| carry(c, k, c[k].2.clone())).collect(),
+            ));
+        }
+        let value_y = stages.last().unwrap().value.map(|v| match &m.cells[v].kind {
+            CellKind::Mux { y, .. } => y.clone(),
+            _ => unreachable!(),
+        });
+        let dead: Vec<CellId> = stages
+            .iter()
+            .filter_map(|st| st.value)
+            .chain(chains.iter().flatten().map(|c| c.0))
+            .collect();
+        let ends: Vec<Sig> = chains.iter().map(|c| c.last().unwrap().3.clone()).collect();
+        fn tree(m: &mut Module, op: B, signed: bool, items: &[(Sig, Vec<Sig>)]) -> (Sig, Vec<Sig>) {
+            if items.len() == 1 {
+                return items[0].clone();
+            }
+            let (l, r) = items.split_at(items.len() / 2);
+            let (lv, lc) = tree(m, op, signed, l);
+            let (rv, rc) = tree(m, op, signed, r);
+            let s = m.binary(op, signed, lv.clone(), rv.clone()).0[0];
+            let v = m.mux(s, lv, rv);
+            let c = lc.into_iter().zip(rc).map(|(a, b)| m.mux(s, a, b)).collect();
+            (v, c)
+        }
+        let (v, c) = tree(m, op, signed, &leaves);
+        for ci in dead {
+            m.cells[ci].alive = false;
+        }
+        if let Some(y) = value_y {
+            m.connect(y, v);
+        }
+        for (y, cv) in ends.into_iter().zip(c) {
+            m.connect(y, cv);
+        }
+        n += 1;
+    }
+    n
+}
+
 /// Shares arithmetic between the inputs of a multiplexer:
 /// `s ? x op z : x op w` becomes `x op (s ? w : z)` (for `+ - & | ^`), and
 /// `s ? x - z : x + z` one adder, `x + (z ^ s) + s`. Only when the operations

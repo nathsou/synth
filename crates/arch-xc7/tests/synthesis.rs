@@ -113,6 +113,61 @@ fn arithmetic_across_carry4_boundaries() {
 }
 
 #[test]
+fn constants_added_in_sequence_fold_into_one_carry_chain() {
+    // `i + 3 - c` with an integer `c`: widened to 32 bits, then truncated.
+    for (k1, k2) in [(3u64, 5u64), (3, 200), (17, 4), (250, 3)] {
+        let src = format!(
+            "module top(input [7:0] x, output [7:0] y, output [7:0] z, output [9:0] w); \
+             localparam integer C = {k2}; \
+             assign y = x + 8'd{k1} - C; assign z = x - 8'd{k1} + C; \
+             assign w = {{2'b0, x}} + 10'd{k1} - 10'd{k2}; endmodule"
+        );
+        let nl = synth(&src);
+        for x in 0..256u64 {
+            let out = evaluate(&nl, &[("x", x)]);
+            assert_eq!(out["y"], (x + k1).wrapping_sub(k2) & 0xff, "y, x {x}, {k1} {k2}");
+            assert_eq!(out["z"], x.wrapping_sub(k1).wrapping_add(k2) & 0xff, "z, x {x}");
+            assert_eq!(out["w"], (x + k1).wrapping_sub(k2) & 0x3ff, "w, x {x}");
+        }
+    }
+    // One chain for `x + 3 - C` (two CARRY4s of eight bits), not two.
+    let nl = synth(
+        "module top(input [7:0] x, output [7:0] y); localparam integer C = 50; \
+         assign y = x + 8'd3 - C; endmodule",
+    );
+    assert!(count(&nl, "CARRY4") <= 2, "{} CARRY4", count(&nl, "CARRY4"));
+}
+
+#[test]
+fn running_maxima_balance_with_first_or_last_winner_on_ties() {
+    // Five 6-bit values packed in `v`, most of their bits equal: frequent
+    // ties.
+    let nl = synth(
+        "module top(input [29:0] v, output reg [5:0] best, output reg [2:0] arg, \
+         output reg [5:0] lbest, output reg [2:0] last); integer k; \
+         always @* begin best = v[5:0]; arg = 0; lbest = v[5:0]; last = 0; \
+           for (k = 1; k < 5; k = k + 1) if (best < v[6*k +: 6]) begin best = v[6*k +: 6]; arg = k; end \
+           for (k = 1; k < 5; k = k + 1) if (lbest <= v[6*k +: 6]) begin lbest = v[6*k +: 6]; last = k; end \
+         end endmodule",
+    );
+    for i in 0..8192u64 {
+        let r = i.wrapping_mul(2654435761) >> 5;
+        // Values 32-35: the low two bits vary.
+        let v = (0..5).fold(0, |v, k| v | ((32 | (r >> (2 * k)) & 3) << (6 * k)));
+        let x = |k: u64| (v >> (6 * k)) & 63;
+        let max = (0..5).map(x).max().unwrap();
+        let first = (0..5).find(|&k| x(k) == max).unwrap();
+        let last = (0..5).rev().find(|&k| x(k) == max).unwrap();
+        let out = evaluate(&nl, &[("v", v)]);
+        assert_eq!(
+            (out["best"], out["arg"], out["lbest"], out["last"]),
+            (max, first, max, last),
+            "v {v:030b}"
+        );
+    }
+}
+
+#[test]
 fn three_bit_addition_fits_lut6s_without_a_carry_block() {
     let nl = synth("module top(input [2:0] a,b,output [2:0] y); assign y=a+b; endmodule");
     assert!(!nl.live_cells().any(|c| nl.cell_kind(c) == "CARRY4"));
