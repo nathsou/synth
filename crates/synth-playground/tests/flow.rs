@@ -176,3 +176,28 @@ fn examples_build_for_artix7_boards() {
     }
     run_on_boards(&[("xc7a35t", "ftg256", &[]), ("xc7a100t", "csg324", &[])]);
 }
+
+/// The Game of Life simulated: its first generations come over the UART,
+/// each redrawn in place (cursor home, then eight rows).
+#[test]
+fn life_simulates_to_frames() {
+    let exs = synth_playground::examples();
+    let ex = exs.as_array().iter().find(|e| e.at(&["id"]).as_str() == Some("life")).unwrap();
+    let req = Json::obj().with("files", ex.at(&["files"]).clone());
+    let info = Json::parse(&synth_playground::handle("sim_start", &req.dump())).unwrap();
+    assert_eq!(info.at(&["ok"]).as_bool(), Some(true), "{}", info.dump());
+    assert_eq!(info.at(&["uart_tx"]).as_bool(), Some(true));
+    let mut text = Vec::new();
+    // A generation every half second of simulated time.
+    let step = Json::obj().with("cycles", 600_000).with("budget_ms", 600_000);
+    for _ in 0..3 {
+        let r = Json::parse(&synth_playground::handle("sim_step", &step.dump())).unwrap();
+        text.extend(r.at(&["tx"]).as_array().iter().map(|b| b.as_i64().unwrap() as u8));
+    }
+    let text = String::from_utf8(text).unwrap();
+    let frames: Vec<&str> = text.split("\x1b[H").filter(|f| !f.is_empty()).collect();
+    assert!(frames.len() >= 2, "{text:?}");
+    // The glider of the first generation.
+    assert!(frames[0].starts_with(".#......\r\n..#.....\r\n###....."), "{:?}", frames[0]);
+    synth_playground::handle("sim_stop", "{}");
+}

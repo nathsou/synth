@@ -117,6 +117,22 @@ it: its logic cells (LUT contents, carry, flip-flop) and every routing switch,
 read back from the bits rather than from the router. Download the `.bin`
 (iCE40) or the `.bit` (Artix-7, for `openFPGALoader`).
 
+**Simulation.** The design running on a virtual board, simulated cycle by
+cycle with synth-sim (in the browser's own worker, or by the server): its
+clock driven in real time (or as fast as the simulator goes), its outputs as
+LEDs lit by their duty cycle (so a PWM dims them), its 1-bit inputs as
+buttons to hold, and its serial port as a terminal: `tx` decoded at 115200
+baud, and what you type sent on `rx`. The terminal understands enough VT100
+for the examples (cursor home, clearing, line endings) and counts the frames
+of a design that redraws in place; **Pixels** draws its text as cells, every
+character other than a space or a dot lit, so the Game of Life shows as
+frames of a grid. The design is elaborated with its `CLK_HZ` at 921.6 kHz,
+eight clock cycles per bit at 115200 baud, a clock the simulator keeps up
+with in real time for most examples (the RISC-V cores run at a fraction of
+it): the examples derive their rates from `CLK_HZ`, so they behave as on the
+board. `synth_pll` is simulated as a wire, locked from the start. The view
+starts when opened and restarts when the design changes.
+
 **Progress.** While the flow runs, the status bar shows a bar with a segment
 per step (elaborating, synthesising, loading the device, packing, placing,
 routing, timing, the bitstream), the step and what it is doing (the mapping
@@ -182,6 +198,12 @@ fragment, so it is not sent to any server).
   streams them (`/api/run?progress`: a line of JSON per report, then the
   result) and the WebAssembly module calls the import `env.synth_progress`,
   which the worker posts to the page. `web/progress.js` lays out the bar.
+- `sim.rs` runs the simulation: `sim_start` elaborates the design and
+  compiles it with synth-sim, `sim_step` sets the inputs, runs up to a number
+  of cycles or milliseconds and returns the bytes the UART sent and each
+  output's duty cycle, `sim_stop` ends it. `web/simview.js` paces the
+  requests in real time and draws the board; `web/terminal.js` is the
+  terminal.
 - `server.rs` is the `synth playground` server: a few lines of HTTP over
   `std::net`, serving the embedded app and `/api/<method>`.
 - The schematic, chip and bitstream views draw with WebGL2 (`gl.js`: instanced

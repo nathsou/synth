@@ -18,6 +18,7 @@ pub mod chip;
 pub mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+pub mod sim;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -482,6 +483,12 @@ pub fn handle(method: &str, body: &str) -> String {
         }
         "examples" => examples(),
         "devices" => devices(),
+        "sim_start" => sim_start(&req),
+        "sim_step" => sim::step(&req).unwrap_or_else(|e| Json::obj().with("error", e)),
+        "sim_stop" => {
+            sim::stop();
+            Json::obj()
+        }
         other => Json::obj().with("error", format!("unknown method `{other}`")),
     };
     out.dump()
@@ -752,10 +759,10 @@ pub fn run(req: &Json) -> Json {
     out
 }
 
-fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
-    // Elaboration.
-    let t = Instant::now();
-    progress::step("elaborate", "");
+/// Elaborates the request's sources (Weft or Verilog), its board clock as
+/// the top's `CLK_HZ`: the module, if there were no errors, the
+/// diagnostics and the number of errors.
+fn elaborate(req: &Json) -> Result<(Option<synth_rtl::Module>, Json, usize), String> {
     let mut sm = SourceMap::new();
     let files = sources(req, &mut sm);
     if files.is_empty() {
@@ -789,10 +796,39 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         diags.extend(d);
         m
     };
-    out.set("diagnostics", diagnostics_json(&sm, &diags));
+    Ok((module, diagnostics_json(&sm, &diags), diags.error_count()))
+}
+
+/// Starts a simulation of the design (see [`sim`]): its clock at
+/// `sim::DEFAULT_HZ`, given to the design as `CLK_HZ`.
+fn sim_start(req: &Json) -> Json {
+    let mut req = req.clone();
+    req.set("clock_hz", sim::DEFAULT_HZ);
+    let (module, diagnostics, errors) = match elaborate(&req) {
+        Ok(e) => e,
+        Err(e) => return Json::obj().with("ok", false).with("error", e),
+    };
+    let Some(module) = module else {
+        return Json::obj()
+            .with("ok", false)
+            .with("error", format!("{} error(s)", errors.max(1)))
+            .with("diagnostics", diagnostics);
+    };
+    match sim::start(module, sim::DEFAULT_HZ) {
+        Ok(info) => info.with("ok", true).with("diagnostics", diagnostics),
+        Err(e) => Json::obj().with("ok", false).with("error", e).with("diagnostics", diagnostics),
+    }
+}
+
+fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
+    // Elaboration.
+    let t = Instant::now();
+    progress::step("elaborate", "");
+    let (module, diagnostics, errors) = elaborate(req)?;
+    out.set("diagnostics", diagnostics);
     r.time("elaborate", t);
     let Some(module) = module else {
-        return Err(format!("{} error(s)", diags.error_count().max(1)));
+        return Err(format!("{} error(s)", errors.max(1)));
     };
     out.set("top", module.name.as_str());
     let part = req.at(&["part"]).as_str().unwrap_or("hx1k").to_string();

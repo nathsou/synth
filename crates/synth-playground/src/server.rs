@@ -24,6 +24,8 @@ pub const ASSETS: &[(&str, &[u8])] = &[
     ("settings.js", include_bytes!("../web/settings.js")),
     ("util.js", include_bytes!("../web/util.js")),
     ("progress.js", include_bytes!("../web/progress.js")),
+    ("terminal.js", include_bytes!("../web/terminal.js")),
+    ("simview.js", include_bytes!("../web/simview.js")),
     ("favicon.svg", include_bytes!("../web/favicon.svg")),
 ];
 
