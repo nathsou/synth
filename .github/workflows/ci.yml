@@ -138,9 +138,11 @@ jobs:
       FRONTEND: ${{ needs.changes.outputs.frontend }}
       PNR: ${{ needs.changes.outputs.pnr }}
       ARTIX7: ${{ needs.changes.outputs.artix7 }}
-      XILINX_UNISIM: ${{ runner.temp }}/unisim
     steps:
       - uses: actions/checkout@v4
+      # The runner context is not available to the job's env.
+      - name: Simulation model directory
+        run: echo "XILINX_UNISIM=$RUNNER_TEMP/unisim" >> "$GITHUB_ENV"
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
