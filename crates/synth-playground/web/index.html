@@ -9,36 +9,48 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><svg viewBox="0 0 24 24" class="logo" aria-hidden="true"><use href="#i-chip"/></svg><span>synth</span><span class="muted">playground</span></div>
-  <div class="tb-group">
-    <label class="tb-field" title="Load an example design"><span>Example</span><select id="example"></select></label>
-    <label class="tb-field" title="Device"><span>Device</span><select id="part"></select></label>
-    <label class="tb-field" title="Package"><span>Package</span><select id="package"></select></label>
-    <button id="run-options" class="icon-btn" title="Run options"><svg><use href="#i-sliders"/></svg></button>
+  <div class="tb-left">
+    <a class="brand" href="https://github.com/nathsou/synth" target="_blank" rel="noopener" title="synth on GitHub"><svg viewBox="0 0 24 24" class="logo" aria-hidden="true"><use href="#i-logo"/></svg><span>synth</span></a>
+    <span class="slash" aria-hidden="true">/</span>
+    <button id="project" class="ghost project" title="Open an example" aria-haspopup="menu"><span id="project-name">Playground</span><span id="project-dot" class="edited-dot" title="Edited" hidden></span><svg class="chev"><use href="#i-chevron"/></svg></button>
   </div>
-  <div class="tb-group grow">
-    <button id="run" class="primary" title="Run the whole flow (Ctrl+Enter)"><svg><use href="#i-play"/></svg><span>Run</span></button>
-    <div id="status" class="status" role="status"></div>
+  <div class="tb-center">
+    <button id="board" class="board-btn" title="Board, device and package" aria-haspopup="dialog">
+      <span class="board-ico"><svg><use href="#i-board"/></svg></span>
+      <span id="board-name" class="board-name">Board</span>
+      <span id="board-meta" class="board-meta mono"></span>
+      <svg class="chev"><use href="#i-chevron"/></svg>
+    </button>
+    <div class="run-split" id="run-split">
+      <button id="run" class="run-main" title="Run the whole flow (Ctrl+Enter)"><svg><use href="#i-play"/></svg><span>Run</span><kbd class="run-kbd" id="run-kbd">Ctrl ↵</kbd></button>
+      <button id="run-options" class="run-more" title="Run options" aria-label="Run options" aria-haspopup="dialog"><svg><use href="#i-chevron"/></svg></button>
+    </div>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
   </div>
-  <div class="tb-group">
-    <button id="share" class="icon-btn" title="Copy a link to this design"><svg><use href="#i-link"/></svg></button>
-    <button id="download" class="icon-btn" title="Download the bitstream (.bin for iCE40, .bit for Artix-7)" disabled><svg><use href="#i-download"/></svg></button>
-    <button id="program" class="icon-btn" title="Program the board connected over USB (Chrome, Edge and other Chromium-based browsers): the flash of an iCE40 board, or the FPGA of an Artix-7 board" disabled><svg><use href="#i-usb"/></svg></button>
-    <button id="theme" class="icon-btn" title="Toggle light and dark theme"><svg><use href="#i-moon"/></svg></button>
-    <button id="settings" class="icon-btn" title="Settings"><svg><use href="#i-gear"/></svg></button>
+  <div class="tb-right">
+    <button id="palette" class="palette-btn" title="Jump to a step, a cell, an example or an action"><svg><use href="#i-search"/></svg><span>Jump to…</span><kbd id="palette-kbd">Ctrl K</kbd></button>
+    <button id="share" class="icon-btn" title="Copy a link to this design" aria-label="Copy a link to this design"><svg><use href="#i-link"/></svg></button>
+    <button id="download" class="icon-btn" title="Download the bitstream (.bin for iCE40, .bit for Artix-7)" aria-label="Download the bitstream" disabled><svg><use href="#i-download"/></svg></button>
+    <button id="program" class="icon-btn" title="Program the board connected over USB (Chrome, Edge and other Chromium-based browsers): the flash of an iCE40 board, or the FPGA of an Artix-7 board" aria-label="Program the board over USB" disabled><svg><use href="#i-usb"/></svg></button>
+    <button id="settings" class="icon-btn" title="Settings" aria-label="Settings"><svg><use href="#i-sliders"/></svg></button>
   </div>
   <div id="progress-line" class="progress-line" aria-hidden="true"></div>
 </header>
 
 <main id="main" class="main">
-  <section id="left" class="pane left">
+  <nav id="files-rail" class="files-rail" aria-label="Files"></nav>
+  <section id="left" class="pane left" aria-label="Editor">
     <div class="tabs files" id="file-tabs"></div>
     <div id="editor" class="editor-host"></div>
     <div class="split-h" id="split-bottom" title="Drag to resize"></div>
-    <div class="bottom">
-      <div class="tabs" id="bottom-tabs">
-        <button data-tab="problems" class="active">Problems <span class="badge" id="problem-count"></span></button>
-        <button data-tab="log">Log</button>
+    <div class="bottom" id="bottom">
+      <div class="bottom-bar" id="bottom-bar">
+        <div class="tabs" id="bottom-tabs" role="tablist">
+          <button data-tab="problems" class="active" role="tab">Problems <span class="badge" id="problem-count"></span></button>
+          <button data-tab="log" role="tab">Log</button>
+        </div>
+        <span id="problem-peek" class="problem-peek mono"></span>
+        <button id="bottom-toggle" class="icon-btn sm" title="Show or hide problems and the log" aria-label="Show or hide problems and the log"><svg><use href="#i-chevron"/></svg></button>
       </div>
       <div class="tab-body" id="bottom-body">
         <div data-pane="problems" id="problems" class="list"></div>
@@ -47,15 +59,15 @@
     </div>
   </section>
   <div class="split-v" id="split-main" title="Drag to resize"></div>
-  <section id="right" class="pane right">
-    <div class="tabs views" id="view-tabs">
-      <button data-view="pipeline" class="active"><svg><use href="#i-flow"/></svg>Pipeline</button>
-      <button data-view="schematic"><svg><use href="#i-graph"/></svg>Schematic</button>
-      <button data-view="chip"><svg><use href="#i-chip"/></svg>Chip</button>
-      <button data-view="timing"><svg><use href="#i-clock"/></svg>Timing</button>
-      <button data-view="bitstream"><svg><use href="#i-bits"/></svg>Bitstream</button>
-      <button data-view="simulation"><svg><use href="#i-wave"/></svg>Simulation</button>
-    </div>
+  <section id="right" class="pane right" aria-label="Flow">
+    <nav class="rail" id="rail" aria-label="Steps of the flow">
+      <div class="seg mode" id="mode" role="tablist">
+        <button data-mode="flow" class="on" role="tab">Flow</button>
+        <button data-mode="simulate" role="tab">Simulate</button>
+      </div>
+      <span class="rail-div" aria-hidden="true"></span>
+      <div class="rail-steps" id="rail-steps"></div>
+    </nav>
     <div class="views-body">
       <div data-view-pane="pipeline" id="pipeline" class="view scroll"></div>
       <div data-view-pane="schematic" id="schematic" class="view" hidden></div>
@@ -64,17 +76,37 @@
       <div data-view-pane="bitstream" id="bitstream" class="view" hidden></div>
       <div data-view-pane="simulation" id="simulation" class="view scroll" hidden></div>
       <div id="empty" class="empty-state">
-        <svg><use href="#i-play"/></svg>
-        <p>Press <kbd>Run</kbd> (<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to elaborate, synthesise, place, route and generate a bitstream.</p>
+        <svg><use href="#i-logo"/></svg>
+        <p>Press <kbd>Run</kbd> to elaborate, synthesise, place, route and write a bitstream.</p>
       </div>
     </div>
   </section>
 </main>
 
+<footer class="statusbar" id="statusbar">
+  <span class="sb-item" id="sb-mode"><span class="dot"></span><span></span></span>
+  <button class="sb-item" id="sb-problems" title="Problems"></button>
+  <span class="grow"></span>
+  <span class="sb-item mono" id="sb-usage"></span>
+  <span class="sb-item mono" id="sb-fmax"></span>
+  <span class="sb-item mono" id="sb-cursor"></span>
+  <span class="sb-item" id="sb-lang"></span>
+</footer>
+
 <div id="tooltip" class="tooltip" hidden></div>
 <div id="popover-host"></div>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-logo" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="currentColor"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-board" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="8" y="9" width="5" height="6" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="9" r="1" fill="currentColor"/><circle cx="17" cy="15" r="1" fill="currentColor"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 4v16" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-dasharray="30 60" stroke-linecap="round"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 10h1M10 10h1M14 10h1M18 10h0M7 14h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
   <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9.5" y="9.5" width="5" height="5" fill="currentColor"/><path d="M9 2v3M12 2v3M15 2v3M9 19v3M12 19v3M15 19v3M2 9h3M2 12h3M2 15h3M19 9h3M19 12h3M19 15h3" stroke="currentColor" stroke-width="1.8"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></symbol>
