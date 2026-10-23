@@ -7,6 +7,12 @@
 //! simulator can keep up with, so the examples (which derive their rates
 //! from `CLK_HZ`) behave as on the board, in real time. `synth_pll` is
 //! simulated as a wire, locked from the start.
+//!
+//! A register marked as a frame (`#[attr("frame", "WxH")]` in Weft,
+//! `(* frame = "WxH" *)` in Verilog) is read directly at the end of each
+//! request and shown as an image: pixel (x, y) is bits `(y·W + x)·B` to
+//! `(y·W + x + 1)·B` of it, `B` (the bits per pixel) its width over `W·H`.
+//! The page sees the design's picture without decoding it from the UART.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -89,6 +95,39 @@ impl Transmitter {
     }
 }
 
+/// A register shown as an image.
+#[derive(Debug)]
+struct Frame {
+    name: String,
+    sig: Signal,
+    width: usize,
+    height: usize,
+    bpp: usize,
+    /// The pixels last reported, and how many times they changed.
+    last: Vec<u64>,
+    changes: u64,
+}
+
+impl Frame {
+    fn pixels(&self, sim: &Sim) -> Vec<u64> {
+        let v = sim.peek_vec(&self.sig);
+        (0..self.width * self.height)
+            .map(|i| {
+                (0..self.bpp).fold(0, |p, k| {
+                    p | u64::from(v.get(i * self.bpp + k) == synth_core::Logic::One) << k
+                })
+            })
+            .collect()
+    }
+}
+
+/// Parses a frame's size, `WxH`.
+fn frame_size(s: &str) -> Option<(usize, usize)> {
+    let (w, h) = s.trim().split_once(['x', 'X', '×'])?;
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
 /// A port of the design shown or driven by the page.
 #[derive(Debug)]
 struct Port {
@@ -108,6 +147,7 @@ pub struct Session {
     rx: Option<(Signal, Transmitter)>,
     outputs: Vec<Port>,
     inputs: Vec<Port>,
+    frames: Vec<Frame>,
     cycles: u64,
 }
 
@@ -144,6 +184,18 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
         .filter_map(|w| w.port.map(|(d, pos)| (pos, w.name.clone(), d, w.width as usize)))
         .collect();
     ports.sort_by_key(|p| p.0);
+    let marked: Vec<(String, usize, Option<(usize, usize)>, String)> = module
+        .wires
+        .iter()
+        .filter_map(|w| {
+            w.attrs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                ("frame", synth_rtl::Attr::Str(size)) => {
+                    Some((w.name.clone(), w.width as usize, frame_size(size), size.clone()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
     let sim = Sim::new(&module, &Options::default())?;
     let clocks = sim.clocks();
     let signal = |name: &str| sim.signal(name).ok_or_else(|| format!("no signal {name}"));
@@ -186,7 +238,28 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
             _ => {}
         }
     }
-    let mut s = Session { sim, hz, clock, tx, rx, outputs, inputs, cycles: 0 };
+    let (mut frames, mut warnings) = (Vec::new(), Vec::new());
+    for (name, width, size, text) in marked {
+        let Some((w, h)) = size else {
+            warnings.push(format!("frame `{name}`: `{text}` is not a size like `8x8`"));
+            continue;
+        };
+        if width % (w * h) != 0 {
+            warnings.push(format!("frame `{name}`: its {width} bits are not {w}×{h} pixels"));
+            continue;
+        }
+        let Some(sig) = sim.signal(&name) else { continue };
+        frames.push(Frame {
+            name,
+            sig,
+            width: w,
+            height: h,
+            bpp: width / (w * h),
+            last: Vec::new(),
+            changes: 0,
+        });
+    }
+    let mut s = Session { sim, hz, clock, tx, rx, outputs, inputs, frames, cycles: 0 };
     // Inputs start low, a serial line idle (high).
     for p in &s.inputs {
         s.sim.poke(&p.sig, 0);
@@ -203,8 +276,25 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
         .with("uart_tx", s.tx.is_some())
         .with("uart_rx", s.rx.is_some())
         .with(
+            "frames",
+            Json::Arr(
+                s.frames
+                    .iter()
+                    .map(|f| {
+                        Json::obj()
+                            .with("name", f.name.as_str())
+                            .with("width", f.width)
+                            .with("height", f.height)
+                            .with("bpp", f.bpp)
+                    })
+                    .collect(),
+            ),
+        )
+        .with(
             "warnings",
-            Json::Arr(s.sim.warnings().iter().map(|w| Json::from(w.as_str())).collect()),
+            Json::Arr(
+                s.sim.warnings().iter().chain(&warnings).map(|w| Json::from(w.as_str())).collect(),
+            ),
         );
     *SESSION.lock().unwrap() = Some(s);
     Ok(info)
@@ -213,8 +303,9 @@ pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
 /// Runs the simulation: `{inputs: {name: value}, rx: [bytes], cycles,
 /// budget_ms}` sets the inputs, queues the bytes on `rx`, then runs up to
 /// `cycles` cycles or `budget_ms` milliseconds. Returns the cycles run, the
-/// simulated time, the bytes received on `tx` and each output's value and
-/// the share of the cycles each of its bits was high.
+/// simulated time, the bytes received on `tx`, each output's value and
+/// the share of the cycles each of its bits was high, and each frame's
+/// pixels (only when they changed since the last request).
 pub fn step(req: &Json) -> Result<Json, String> {
     let mut guard = SESSION.lock().unwrap();
     let s = guard.as_mut().ok_or("no simulation running")?;
@@ -276,12 +367,28 @@ pub fn step(req: &Json) -> Result<Json, String> {
                 .with("duty", Json::Arr(duty))
         })
         .collect();
+    let frames = s
+        .frames
+        .iter_mut()
+        .map(|f| {
+            let px = f.pixels(&s.sim);
+            let o = Json::obj().with("name", f.name.as_str());
+            if px == f.last {
+                return o.with("changes", f.changes);
+            }
+            f.changes += 1;
+            f.last = px;
+            o.with("changes", f.changes)
+                .with("pixels", Json::Arr(f.last.iter().map(|&p| Json::from(p)).collect()))
+        })
+        .collect();
     Ok(Json::obj()
         .with("cycles", run)
         .with("total", s.cycles)
         .with("time", s.cycles as f64 / s.hz as f64)
         .with("tx", Json::Arr(received))
-        .with("outputs", Json::Arr(outputs)))
+        .with("outputs", Json::Arr(outputs))
+        .with("frames", Json::Arr(frames)))
 }
 
 /// Ends the simulation.

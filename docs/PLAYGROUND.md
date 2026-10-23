@@ -133,6 +133,16 @@ it): the examples derive their rates from `CLK_HZ`, so they behave as on the
 board. `synth_pll` is simulated as a wire, locked from the start. The view
 starts when opened and restarts when the design changes.
 
+**Frames.** A register marked as a frame is read straight from the
+simulator and drawn as an image, with no protocol to decode: in Weft
+`#[attr("frame", "WxH")] reg grid: [[bool; 8]; 8] = …;`, in Verilog
+`(* frame = "WxH" *) reg [63:0] grid;`. Pixel (x, y) is the bits from
+`(y·W + x)·B` of the register, where `B`, the bits per pixel, is its width
+over `W·H`: one bit lights a cell, more shade it. The image is read after
+each request (about 25 times a second) and sent only when it changed; its
+label counts the changes. The Game of Life marks its grid this way, so it
+shows both the grid itself and what it draws over the UART.
+
 **Progress.** While the flow runs, the status bar shows a bar with a segment
 per step (elaborating, synthesising, loading the device, packing, placing,
 routing, timing, the bitstream), the step and what it is doing (the mapping
@@ -200,8 +210,9 @@ fragment, so it is not sent to any server).
   which the worker posts to the page. `web/progress.js` lays out the bar.
 - `sim.rs` runs the simulation: `sim_start` elaborates the design and
   compiles it with synth-sim, `sim_step` sets the inputs, runs up to a number
-  of cycles or milliseconds and returns the bytes the UART sent and each
-  output's duty cycle, `sim_stop` ends it. `web/simview.js` paces the
+  of cycles or milliseconds and returns the bytes the UART sent, each
+  output's duty cycle and the pixels of frames that changed, `sim_stop`
+  ends it. `web/simview.js` paces the
   requests in real time and draws the board; `web/terminal.js` is the
   terminal.
 - `server.rs` is the `synth playground` server: a few lines of HTTP over

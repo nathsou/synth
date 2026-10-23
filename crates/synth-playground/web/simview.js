@@ -3,7 +3,8 @@
 // as LEDs lit by their duty cycle, its 1-bit inputs as buttons, and its
 // UART (`tx`, `rx`) as a terminal, drawn as text or as pixels (each
 // character other than a space or a dot a lit cell) for designs that draw
-// frames, like the Game of Life.
+// frames, like the Game of Life. Registers the design marks as frames
+// (`#[attr("frame", "WxH")]`) are read directly and drawn as images.
 
 import { h, icon, store } from './util.js';
 import { Terminal } from './terminal.js';
@@ -41,6 +42,7 @@ export class SimView {
     this.speed.value = this.realtime ? 'real' : 'fast';
     this.status = h('span', { class: 'muted sim-status' });
     this.board = h('div', { class: 'sim-board' });
+    this.framesBox = h('div', { class: 'sim-frames' });
     this.screen = h('pre', { class: 'sim-screen', tabindex: 0, onkeydown: (e) => this.key(e) });
     this.canvas = h('canvas', { class: 'sim-pixels', tabindex: 0, onkeydown: (e) => this.key(e) });
     this.frameInfo = h('span', { class: 'muted' });
@@ -55,7 +57,7 @@ export class SimView {
       'Runs the design on a virtual board: its clock, LEDs, buttons and serial port. Press Run to start.');
     this.el.replaceChildren(
       h('div', { class: 'sim-bar' }, this.playBtn, this.resetBtn, this.speed, this.status),
-      this.message, this.board, this.termBox);
+      this.message, this.board, this.framesBox, this.termBox);
     this.updateControls();
     this.setMode(this.mode);
   }
@@ -104,6 +106,7 @@ export class SimView {
     if (!info.ok) {
       this.message.textContent = `Cannot simulate: ${info.error || 'error'}`;
       this.board.replaceChildren();
+      this.framesBox.replaceChildren();
       return;
     }
     this.session = info;
@@ -112,6 +115,7 @@ export class SimView {
     this.inputs = Object.fromEntries(info.inputs.map((p) => [p.name, 0]));
     this.rx = [];
     this.buildBoard(info);
+    this.buildFrames(info);
     this.termBox.hidden = !info.uart_tx && !info.uart_rx;
     this.total = 0;
     this.running = true;
@@ -196,6 +200,18 @@ export class SimView {
     this.board.replaceChildren(...groups, ...buttons);
   }
 
+  buildFrames(info) {
+    this.frames = (info.frames || []).map((f) => {
+      const canvas = h('canvas', { class: 'sim-pixels' });
+      const label = h('span', { class: 'muted' });
+      const el = h('div', { class: 'sim-frame' },
+        h('div', { class: 'sim-term-bar' }, h('span', {}, f.name), label), canvas);
+      return { ...f, canvas, label, el, pixels: null };
+    });
+    this.framesBox.replaceChildren(...this.frames.map((f) => f.el));
+    this.framesBox.hidden = !this.frames.length;
+  }
+
   async loop() {
     if (!this.running || this.busy || !this.session) return;
     this.busy = true;
@@ -236,6 +252,15 @@ export class SimView {
 
   show(r, ms) {
     this.total = r.total;
+    for (const f of r.frames || []) {
+      const fr = this.frames.find((x) => x.name === f.name);
+      if (!fr) continue;
+      fr.label.textContent = `${fr.width}×${fr.height} · frame ${f.changes}`;
+      if (f.pixels) {
+        fr.pixels = f.pixels;
+        this.drawFrame(fr);
+      }
+    }
     if (r.tx.length) {
       this.term.write(r.tx);
       this.draw();
@@ -267,6 +292,26 @@ export class SimView {
     }
   }
 
+  /** Draws a frame: each pixel a cell lit by its value. */
+  drawFrame(f) {
+    const box = this.framesBox.getBoundingClientRect();
+    const cell = Math.max(2, Math.min(40, Math.floor(Math.min(((box.width || 400) - 24) / f.width, 320 / f.height))));
+    const colors = this.colors();
+    const max = 2 ** f.bpp - 1;
+    paint(f.canvas, f.width, f.height, cell, (x, y) => {
+      const v = f.pixels[y * f.width + x] / max;
+      return v > 0 ? mix(colors.dim, colors.lit, v) : colors.dim;
+    });
+  }
+
+  colors() {
+    const css = getComputedStyle(document.documentElement);
+    return {
+      lit: css.getPropertyValue('--accent').trim() || '#7aa2ff',
+      dim: css.getPropertyValue('--bg-3').trim() || '#242938',
+    };
+  }
+
   draw() {
     this.frameInfo.textContent = this.term.frames ? `frame ${this.term.frames}` : '';
     if (this.mode === 'text') {
@@ -279,23 +324,39 @@ export class SimView {
     const rows = Math.max(1, lines.length);
     const box = this.canvas.parentElement?.getBoundingClientRect();
     const cell = Math.max(4, Math.min(40, Math.floor(Math.min(((box?.width || 400) - 24) / cols, 320 / rows))));
-    const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = cols * cell * dpr;
-    this.canvas.height = rows * cell * dpr;
-    this.canvas.style.width = `${cols * cell}px`;
-    this.canvas.style.height = `${rows * cell}px`;
-    const g = this.canvas.getContext('2d');
-    g.scale(dpr, dpr);
-    const css = getComputedStyle(document.documentElement);
-    const lit = css.getPropertyValue('--accent').trim() || '#7aa2ff';
-    const dim = css.getPropertyValue('--bg-3').trim() || '#242938';
-    lines.forEach((l, y) => {
-      for (let x = 0; x < cols; x++) {
-        const c = l[x] || ' ';
-        if (c === ' ') continue;
-        g.fillStyle = c === '.' ? dim : lit;
-        g.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
-      }
+    const { lit, dim } = this.colors();
+    paint(this.canvas, cols, rows, cell, (x, y) => {
+      const c = lines[y][x] || ' ';
+      return c === ' ' ? null : c === '.' ? dim : lit;
     });
   }
+}
+
+/** Paints a grid of cells, each `color(x, y)` (none: left blank). */
+function paint(canvas, cols, rows, cell, color) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = cols * cell * dpr;
+  canvas.height = rows * cell * dpr;
+  canvas.style.width = `${cols * cell}px`;
+  canvas.style.height = `${rows * cell}px`;
+  const g = canvas.getContext('2d');
+  g.scale(dpr, dpr);
+  // Small cells touch, larger ones keep a gap between them.
+  const gap = cell >= 6 ? 1 : 0;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const c = color(x, y);
+      if (!c) continue;
+      g.fillStyle = c;
+      g.fillRect(x * cell + gap, y * cell + gap, cell - 2 * gap, cell - 2 * gap);
+    }
+  }
+}
+
+/** The color a share `t` of the way from `a` to `b` (both `#rrggbb`). */
+function mix(a, b, t) {
+  const rgb = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+  if (!/^#[0-9a-f]{6}$/i.test(a) || !/^#[0-9a-f]{6}$/i.test(b)) return t >= 0.5 ? b : a;
+  const [p, q] = [rgb(a), rgb(b)];
+  return `rgb(${p.map((v, i) => Math.round(v + (q[i] - v) * t)).join(',')})`;
 }
