@@ -6,8 +6,8 @@
 //! arcs are the slow-corner SDF characterization, but for flip-flops, timed
 //! as Vivado times them. Vivado's arcs have equal rise and fall delays, so
 //! one delay per arc loses nothing. Only register-to-register paths within
-//! one clock are analyzed, without clock skew; block RAM arcs are the worst
-//! over its modes and pins.
+//! one clock are analyzed, with clock skew between clock regions as Vivado
+//! times it; block RAM arcs are the worst over its modes and pins.
 use crate::device::Device;
 use crate::flow::Owners;
 use crate::pack::{self, Packed};
@@ -18,6 +18,55 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use synth_core::FxHashMap;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
+
+/// The global clock tree's geometry: the rows of its horizontal clock
+/// lines (one per row of clock regions, in its middle), the column of its
+/// spine and the row of the global buffers between the regions.
+#[derive(Debug)]
+pub struct ClockTree {
+    rows: Vec<i16>,
+    spine: i16,
+    buffers: f64,
+}
+impl ClockTree {
+    pub fn new(db: &Device) -> Self {
+        let mut rows: Vec<i16> = db
+            .tiles
+            .iter()
+            .filter(|t| t.kind.starts_with("HCLK_L") || t.kind.starts_with("HCLK_R"))
+            .map(|t| t.y)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let spine = db.tiles.iter().find(|t| t.kind.starts_with("CLK_HROW")).map_or(0, |t| t.x);
+        let buffers: Vec<f64> = db
+            .tiles
+            .iter()
+            .filter(|t| t.kind.starts_with("CLK_BUFG_TOP") || t.kind.starts_with("CLK_BUFG_BOT"))
+            .map(|t| f64::from(t.y))
+            .collect();
+        let buffers = buffers.iter().sum::<f64>() / buffers.len().max(1) as f64;
+        ClockTree { rows, spine, buffers }
+    }
+
+    /// The clock site of tile (x, y), for a block RAM or not.
+    pub fn site(&self, x: i16, y: i16, bram: bool) -> ClockSite {
+        if self.rows.is_empty() {
+            return ClockSite::NONE;
+        }
+        let row = (0..self.rows.len()).min_by_key(|&r| (self.rows[r] - y).abs()).unwrap_or(0);
+        let h = f64::from(self.rows[row]);
+        let (lo, hi) = (h.min(self.buffers), h.max(self.buffers));
+        let hops =
+            self.rows.iter().map(|&r| f64::from(r)).filter(|&r| r > lo && r < hi).count() as f64;
+        let extra = if bram { BRAM_LATENCY } else { 0.0 };
+        ClockSite {
+            region: row as u16 * 2 + u16::from(x > self.spine),
+            late: hops * REGION_LATE + extra + CLOCK_DERATE,
+            early: hops * REGION_EARLY + extra,
+        }
+    }
+}
 
 /// The worst register-to-register path of one clock.
 #[derive(Clone, Debug)]
@@ -99,6 +148,50 @@ const BRAM_INPUTS: [&str; 7] = ["ADDR", "DI", "EN", "WE", "RSTREG", "RSTRAM", "R
 
 /// A clock edge: the clock net and whether it is the falling edge.
 type Edge = (NetId, bool);
+/// Paths are timed by launch edge and launch clock region (`NO_REGION`
+/// before placement), since skew depends on both ends' regions.
+type Launch = (Edge, u16);
+pub const NO_REGION: u16 = u16::MAX;
+
+/// Clock latency (ps) a region farther from the global buffer adds, at the
+/// slow corner's maximum and minimum delays, and its block RAM excess:
+/// fitted to Vivado's clock delays on the Euler designs (2-3 ps per tile
+/// within a region is left out).
+pub const REGION_LATE: f64 = 165.0;
+pub const REGION_EARLY: f64 = 150.0;
+pub const BRAM_LATENCY: f64 = 40.0;
+/// Within a site, a launch clock's maximum delay past an early capture's.
+pub const CLOCK_DERATE: f64 = 120.0;
+/// Pessimism Vivado removes on the clock path that launch and capture
+/// share past the global buffer: within one region, and across the spine
+/// in one row of regions.
+const SHARED_REGION: f64 = 80.0;
+const SHARED_ROW: f64 = 36.0;
+
+/// Where a sequential cell is clocked: its clock region (row times two
+/// plus side of the spine) and latency from the global buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct ClockSite {
+    pub region: u16,
+    pub late: f64,
+    pub early: f64,
+}
+impl ClockSite {
+    pub const NONE: ClockSite = ClockSite { region: NO_REGION, late: 0.0, early: 0.0 };
+    /// The capture clock's lead over the period for a launch in `from`.
+    fn capture(&self, from: u16) -> f64 {
+        let shared = if from == NO_REGION || self.region == NO_REGION {
+            0.0
+        } else if from == self.region {
+            SHARED_REGION
+        } else if from / 2 == self.region / 2 {
+            SHARED_ROW
+        } else {
+            0.0
+        };
+        self.early + shared
+    }
+}
 
 /// The delay model of every cell kind the physical flow implements.
 struct Model {
@@ -722,19 +815,31 @@ impl<'a> Timer<'a> {
     /// Analyzes the design with wire delays `wire(cell, pin, net)` (ps) from
     /// each net's driver to each cell input pin reading it.
     pub fn analyze(&self, wire: &dyn Fn(CellId, u32, NetId) -> f64) -> Analysis {
+        self.analyze_clocked(wire, &|_| ClockSite::NONE)
+    }
+
+    /// Analyzes the design with wire delays and each sequential cell's
+    /// clock site.
+    pub fn analyze_clocked(
+        &self,
+        wire: &dyn Fn(CellId, u32, NetId) -> f64,
+        clock: &dyn Fn(CellId) -> ClockSite,
+    ) -> Analysis {
         let nl = self.nl;
-        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>> = FxHashMap::default();
-        for s in &self.seq {
+        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>> =
+            FxHashMap::default();
+        let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
+        for (s, site) in self.seq.iter().zip(&sites) {
             for (i, pin) in nl.cells[s.cell].pins.iter().enumerate() {
                 if pin.dir == Dir::Output && pin.net.is_some() {
-                    let a = Arrival { time: s.clk_to_out, from: None };
-                    arrival.entry((s.cell, i as u32)).or_default().insert(s.edge, a);
+                    let a = Arrival { time: s.clk_to_out + site.late, from: None };
+                    arrival.entry((s.cell, i as u32)).or_default().insert((s.edge, site.region), a);
                 }
             }
         }
         // The arrivals at an input pin: its driver's, plus the wire.
         let at_input =
-            |arrival: &FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>>, c: CellId, i: u32| {
+            |arrival: &FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>>, c: CellId, i: u32| {
                 let n = nl.cells[c].pins[i as usize].net?;
                 let d = nl.nets[n].driver?;
                 let w = wire(c, i, n);
@@ -780,17 +885,17 @@ impl<'a> Timer<'a> {
                 .collect()
         };
         let mut clocks: BTreeMap<NetId, Clock> = BTreeMap::new();
-        for s in &self.seq {
+        for (s, site) in self.seq.iter().zip(&sites) {
             let (clk, falling) = s.edge;
             for (i, setup) in checks(s) {
-                for ((launch, launch_falling), t) in
+                for (((launch, launch_falling), region), t) in
                     at_input(&arrival, s.cell, i).unwrap_or_default()
                 {
                     if launch != clk {
                         continue;
                     }
                     let factor = if launch_falling == falling { 1.0 } else { 0.5 };
-                    let period = (t + setup) / factor;
+                    let period = (t + setup - site.capture(region)) / factor;
                     let worst = clocks.entry(clk).or_insert(Clock {
                         net: clk,
                         period: 0.0,
@@ -798,7 +903,11 @@ impl<'a> Timer<'a> {
                     });
                     if period > worst.period {
                         worst.period = period;
-                        worst.path = self.trace(&arrival, (launch, launch_falling), (s.cell, i));
+                        worst.path = self.trace(
+                            &arrival,
+                            ((launch, launch_falling), region),
+                            (s.cell, i),
+                        );
                     }
                 }
             }
@@ -822,10 +931,17 @@ impl<'a> Timer<'a> {
                 let r = required.entry((d.cell, d.pin)).or_insert(f64::MAX);
                 *r = r.min(req - w);
             };
-        for s in &self.seq {
+        for (s, site) in self.seq.iter().zip(&sites) {
             let Some(t) = clocks.get(&s.edge.0).map(|c| c.period) else { continue };
             for (i, setup) in checks(s) {
-                sink(&mut required, s.cell, i, t - setup);
+                // The capture clock's lead for the worst launch region.
+                let lead = at_input(&arrival, s.cell, i)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&((_, region), _)| site.capture(region))
+                    .fold(f64::MAX, f64::min);
+                let lead = if lead == f64::MAX { site.early } else { lead };
+                sink(&mut required, s.cell, i, t - setup + lead);
             }
         }
         for &c in self.order.iter().rev() {
@@ -846,8 +962,8 @@ impl<'a> Timer<'a> {
     /// The cell pins of the path ending at input `end`, launch first.
     fn trace(
         &self,
-        arrival: &FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>>,
-        edge: Edge,
+        arrival: &FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>>,
+        edge: Launch,
         end: (CellId, u32),
     ) -> Vec<String> {
         let nl = self.nl;
@@ -1056,5 +1172,21 @@ impl DelayModel {
                 / 8.0;
         }
         d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_clocks_share_more_pessimism_the_closer_the_launch_region() {
+        // Region 2 is row 1, left of the spine; region 3 is row 1, right.
+        let site = ClockSite { region: 2, late: 300.0, early: 200.0 };
+        assert_eq!(site.capture(2), 200.0 + SHARED_REGION);
+        assert_eq!(site.capture(3), 200.0 + SHARED_ROW);
+        assert_eq!(site.capture(0), 200.0);
+        assert_eq!(site.capture(NO_REGION), 200.0);
+        assert_eq!(ClockSite::NONE.capture(NO_REGION), 0.0);
     }
 }

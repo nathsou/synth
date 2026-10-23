@@ -40,6 +40,7 @@ struct Shared {
     graph: RoutingGraph,
     clocked: Vec<bool>,
     model: crate::sta::DelayModel,
+    tree: crate::sta::ClockTree,
 }
 
 pub fn implement(
@@ -55,7 +56,8 @@ pub fn implement(
     let graph = RoutingGraph::new(&db)?;
     let clocked = graph.clocked(&db)?;
     let model = graph.slice_delays(&db)?;
-    let shared = Shared { db, graph, clocked, model };
+    let tree = crate::sta::ClockTree::new(&db);
+    let shared = Shared { db, graph, clocked, model, tree };
     // Seeds run on threads of their own (one where there are none, as in
     // WebAssembly), where progress reports are dropped.
     let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
@@ -120,7 +122,7 @@ fn implement_seed(
     start: Instant,
     verbose: bool,
 ) -> Result<FlowResult, String> {
-    let Shared { db, graph, clocked, model } = shared;
+    let Shared { db, graph, clocked, model, tree } = shared;
     let mut log = Vec::new();
     // As in Vivado, constraints of ports the design does not have are
     // dropped, so one board's file serves every design on it.
@@ -157,7 +159,10 @@ fn implement_seed(
         let ps = pack::pack_timed(&mut single, &critical, pack::Clustering::Single)?;
         let timer = crate::sta::Timer::new(root, &single, &ps)?;
         let mut criticality = |pl: &place::Placement| {
-            let a = timer.analyze(&predictor(db, model, &single, &ps, pl));
+            let a = timer.analyze_clocked(
+                &predictor(db, model, &single, &ps, pl),
+                &clocking(db, tree, &single, &ps, pl),
+            );
             a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
         };
         let global = place::place(
@@ -190,7 +195,8 @@ fn implement_seed(
     // Timing-driven placement: criticalities from the delays the placement
     // being annealed predicts.
     let mut criticality = |pl: &place::Placement| {
-        let a = timer.analyze(&predictor(db, model, &nl, &p, pl));
+        let a = timer
+            .analyze_clocked(&predictor(db, model, &nl, &p, pl), &clocking(db, tree, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
     progress::step("place", "");
@@ -210,7 +216,10 @@ fn implement_seed(
     // Detailed placement: lanes move between the placed slices, with
     // criticalities from the delays the new slice contents predict.
     let mut retime = |q: &Packed| {
-        let a = timer.analyze(&predictor(db, model, &nl, q, &placement));
+        let a = timer.analyze_clocked(
+            &predictor(db, model, &nl, q, &placement),
+            &clocking(db, tree, &nl, q, &placement),
+        );
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
     progress::advance(0.95, || "detailed placement".into());
@@ -231,7 +240,8 @@ fn implement_seed(
     // Timing-driven routing: criticalities from delays predicted by the
     // placement, then from the routes as they converge.
     let predicted = predictor(db, model, &nl, &p, &placement);
-    let estimate = timer.analyze(&predicted);
+    let clocks = clocking(db, tree, &nl, &p, &placement);
+    let estimate = timer.analyze_clocked(&predicted, &clocks);
     let criticality = |a: &crate::sta::Analysis, i: usize, sink: u32| -> f32 {
         let Some(net) = request_nets[i] else { return 0.0 };
         owners
@@ -297,8 +307,10 @@ fn implement_seed(
         let wires =
             crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, routes, &owners);
         // Connections not routed yet keep their predicted delays.
-        let a = timer
-            .analyze(&|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)));
+        let a = timer.analyze_clocked(
+            &|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)),
+            &clocks,
+        );
         let criticality = requests
             .iter()
             .enumerate()
@@ -363,7 +375,7 @@ fn implement_seed(
     let wires =
         crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, &routes, &owners);
     let routed = |c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0);
-    let full = timer.analyze(&routed);
+    let full = timer.analyze_clocked(&routed, &clocks);
     let timing = full.clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
@@ -395,7 +407,7 @@ fn implement_seed(
     }
     // For comparison with nextpnr-xilinx, which does not time them.
     if nl.live_cells().any(|c| matches!(nl.cell_kind(c), "RAMB18E1" | "DSP48E1")) {
-        for clock in timer.fabric().analyze(&routed).clocks {
+        for clock in timer.fabric().analyze_clocked(&routed, &clocks).clocks {
             log.push(format!(
                 "timing estimate without block RAM and DSP paths: clock {}: {:.3} ns ({:.1} MHz)",
                 nl.str(nl.nets[clock.net].name),
@@ -406,10 +418,11 @@ fn implement_seed(
     }
     log.push(
         "timing is not certified: the estimate uses nextpnr-xilinx's routing model of X-Ray data, \
-         uncalibrated against vendor timing or hardware, without clock skew or I/O paths"
+         uncalibrated against vendor timing or hardware, without I/O paths"
             .into(),
     );
     drop(predicted);
+    drop(clocks);
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
 /// The target period (ns) of a clock net: its port's `create_clock`, or the
@@ -476,6 +489,20 @@ fn local_constants(
         }
     }
     out
+}
+
+/// Each sequential cell's clock site in a placement.
+fn clocking<'a>(
+    db: &'a Device,
+    tree: &'a crate::sta::ClockTree,
+    nl: &'a Netlist,
+    p: &'a Packed,
+    pl: &'a Placement,
+) -> impl Fn(CellId) -> crate::sta::ClockSite + 'a {
+    move |c| match location(db, p, pl, c) {
+        Some(((x, y), _)) => tree.site(x, y, nl.cell_kind(c) == "RAMB18E1"),
+        None => crate::sta::ClockSite::NONE,
+    }
 }
 
 /// The tile coordinates of a placed cell and the site it is in.
