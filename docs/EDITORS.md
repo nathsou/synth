@@ -6,7 +6,8 @@ Protocol over standard input and output. It gives any LSP-capable editor:
 - errors and lint warnings as you type, with the related locations of each
   message and its `help:` suggestions;
 - hover: the type, value range, width and clock domain of signals, the
-  signature of modules and functions, the ports of instances;
+  signature and `///` doc comment of modules and functions (the standard
+  library's included), what each builtin does, the ports of instances;
 - go to definition, find references, highlights of the name under the cursor,
   and rename, across the files of a design;
 - the outline of a file (modules with their ports and declarations,

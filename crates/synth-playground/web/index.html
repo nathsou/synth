@@ -64,6 +64,7 @@
       <div class="seg mode" id="mode" role="tablist">
         <button data-mode="flow" class="on" role="tab">Flow</button>
         <button data-mode="simulate" role="tab">Simulate</button>
+        <button data-mode="reference" role="tab" title="The Weft language: types, statements, builtins and the standard library">Reference</button>
       </div>
       <span class="rail-div" aria-hidden="true"></span>
       <div class="rail-steps" id="rail-steps"></div>
@@ -75,6 +76,7 @@
       <div data-view-pane="timing" id="timing" class="view scroll" hidden></div>
       <div data-view-pane="bitstream" id="bitstream" class="view" hidden></div>
       <div data-view-pane="simulation" id="simulation" class="view scroll" hidden></div>
+      <div data-view-pane="reference" id="reference" class="view scroll reference" hidden></div>
       <div id="empty" class="empty-state">
         <svg><use href="#i-logo"/></svg>
         <p>Press <kbd>Run</kbd> to elaborate, synthesise, place, route and write a bitstream.</p>
@@ -129,6 +131,8 @@
   <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3 2.5 8 12 13l9.5-5zM2.5 12.5 12 17.5l9.5-5M2.5 16.5 12 21.5l9.5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5zM4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 7.5h8M8 11h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15.5 8.5V5.5a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 3 2 20.5h20z" fill="currentColor"/><path d="M12 10v5M12 17.5v.5" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/></symbol>

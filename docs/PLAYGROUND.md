@@ -57,19 +57,22 @@ the page is the flow: a rail of its steps, each with its headline number
 (cells, AND gates, LUTs, logic cells, the share of the die, routed wires,
 Fmax, the bitstream's size) and how it changed from the step before, then the
 view of the step that is open. **Simulate**, at the head of the rail, runs
-the design instead. A status bar at the bottom shows where the flow runs (in
+the design instead, and **Reference** shows the Weft reference beside the
+editor: the language in sections (the rail lists them), every builtin and the
+standard library, with a filter and a copy button on each example. A status bar at the bottom shows where the flow runs (in
 the browser or on the local server), the problems, the logic used, Fmax
 against its target and the cursor's position.
 
 **Jump to.** One list of the steps, the files, actions (run, simulate,
 format, show problems or the log, share, download, program, the critical
-path on the chip, the theme, the settings, the board), the examples and,
+path on the chip, the theme, the settings, the board), the examples, the
+sections and entries of the reference (`concat`, `sync`, …) and,
 once two letters are typed, the cells and signals of the schematic's step.
 
 **Editor.** Files are tabs: Weft (`.weft`), Verilog (`.v`) and the pin
 constraints (`.pcf` for iCE40, `.xdc` for Artix-7). As you type, the Weft sources are checked: errors and
 lint warnings are underlined, hovering a name shows its type, value range,
-width and clock domain (or, for a builtin such as `bits_for`, what it does), Ctrl+click (⌘+click) goes to its definition, uses of
+width and clock domain (or, for a builtin such as `bits_for` or a module of the standard library, what it does), Ctrl+click (⌘+click) goes to its definition (or opens a builtin's entry in the reference), uses of
 the name under the cursor are highlighted, and `.` after an instance lists its
 ports. Registers, ports, instances and domains are coloured by what they are,
 not only by syntax. The format button (Shift+Alt+F) lays out a Weft file as

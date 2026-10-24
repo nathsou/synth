@@ -237,7 +237,20 @@ names).
 spaces per open bracket, with one more level for the continuation of a
 statement, and aligns the port names of a port list written one per line
 (`in  start: bool,` above `out tx: bool,`). It changes only layout, never the
-code on a line.
+code on a line, except for a module header longer than 100 characters: its
+ports go one per line, and so do its generic parameters if the header is still
+too long:
+
+```weft
+module top<
+    CLK_HZ: int = 12_000_000,
+    MAX_HZ: int = 25_000_000,
+    SYS_HZ: int = min(CLK_HZ, MAX_HZ),
+>(
+    in  clk: clock,
+    out tx: bool,
+) {
+```
 
 **Scopes.** Items are visible everywhere. Module-level declarations (§7.3) are
 visible throughout their module body, before and after the declaration.
