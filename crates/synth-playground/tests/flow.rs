@@ -32,7 +32,7 @@ fn examples_run_end_to_end() {
         assert_eq!(stages.last(), Some(&"packed"), "{id}: {stages:?}");
         for s in out.at(&["stages"]).as_array() {
             let text = s.at(&["text"]).as_str().unwrap_or("");
-            assert!(text.starts_with("module ") && text.ends_with("endmodule\n"), "{id}: text");
+            assert!(text.starts_with("module ") && text.ends_with("}\n"), "{id}: text");
             let g = s.at(&["graph"]);
             let n = g.at(&["nodes"]).as_array().len();
             for e in g.at(&["edges"]).as_array() {

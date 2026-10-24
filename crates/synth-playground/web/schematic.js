@@ -175,8 +175,8 @@ export class Schematic {
     const mode = (on, attrs, ...label) => h('button', { class: on ? 'on' : '', ...attrs }, ...label);
     fill(tb,
       h('div', { class: 'group', role: 'tablist' },
-        mode(!text, { title: this.stage && !this.stage.graph ? 'Too large to draw' : 'The stage as a graph', disabled: !this.stage?.graph, onclick: () => settings.set('schText', false) }, icon('graph'), 'Graph'),
-        mode(text, { title: 'The stage as text', disabled: !this.stage?.text, onclick: () => settings.set('schText', true) }, icon('file'), 'Text')),
+        mode(text, { title: 'The stage as text', disabled: !this.stage?.text, onclick: () => settings.set('schText', true) }, icon('file'), 'Text'),
+        mode(!text, { title: this.stage && !this.stage.graph ? 'Too large to draw' : 'The stage as a graph', disabled: !this.stage?.graph, onclick: () => settings.set('schText', false) }, icon('graph'), 'Graph')),
       text
         ? h('div', { class: 'group' },
           h('button', { title: 'Download the text', onclick: () => this.downloadText() }, icon('download'), 'Download'))
@@ -190,7 +190,7 @@ export class Schematic {
 
   downloadText() {
     if (!this.stage?.text) return;
-    download(`${this.stage.id}.v`, this.stage.text, 'text/plain');
+    download(`${this.stage.id}.txt`, this.stage.text, 'text/plain');
   }
 
   collapseAll() {

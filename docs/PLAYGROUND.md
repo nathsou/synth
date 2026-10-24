@@ -117,19 +117,41 @@ block RAMs, DSPs and IOs used; the Chip and Bitstream views are iCE40 only. Besi
 split into the delay of cells and of wires, and the problems. Click a step to
 open it.
 
-**Schematic.** The design at any of the synthesis steps, and after packing,
-as a graph. Instances start
+**Text and graph.** The design at any of the synthesis steps, and after
+packing, as text (the default) or as a graph.
+
+The text writes the IR as it is, cell by cell, in a notation borrowed from
+Weft (ports, `uint<N>` types, literals, `concat`, `if`, `match`, `inst`):
+
+```
+module top(in clk: bool, out led: uint<4>) {
+    wire count: uint<26>;
+    wire $n3: uint<26>;
+
+    led = count[25:22];
+
+    $n3 = count + 1; // $binary0
+    count := dff($n3, clk: clk, init: 0); // count
+}
+```
+
+`=` is a combinational cell (a parallel mux is a `match` on its one-hot
+select), `:=` a state element written as the cell it is
+(`dff(d, clk: …, en: …, srst: r => 0, arst: r => 0, init: 0)`, a memory's
+`.write(…)` and clocked `.read(…)`), and each line ends with the cell's name.
+The gate level is one line per AND gate (`$g<n> = a & !b;`), flip-flop
+(named per bit), carry chain and instance; netlists are one `inst` per
+primitive with its parameters, its inputs as `PIN: net` and its outputs as
+`PIN -> net`. It is not meant to be compiled. Search jumps from match to
+match, and **Download** saves it.
+
+The graph starts with instances
 collapsed into blocks with their boundary signals as ports (the module-level
 view); double-click a block, or use **Cells**, to open it down to the
 operators, gates, LUTs and flip-flops. The gate level shows the and-inverter
 graph with its inversions as bubbles. Hover for properties, click to inspect a
 node (with a truth table for LUTs) and follow its connections, search for a
-cell or signal by name. **Text** shows the same step as text instead, in a
-Verilog-like notation: the word-level cells as `assign` and `always`
-statements, the gate level as one line per AND gate (`$g<n>`), flip-flop,
-carry chain and instance, netlists as one line per primitive with its
-parameters and the nets on its pins. Search jumps from match to match, and
-**Download** saves it.
+cell or signal by name.
 
 **Chip.** The die as it is (**Place** shows the cells on their sites,
 **Route** the routed wires over them): logic tiles with their eight logic cells, RAM

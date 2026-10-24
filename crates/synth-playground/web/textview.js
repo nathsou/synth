@@ -1,5 +1,6 @@
-// The text of a stage: its IR in a Verilog-like notation, highlighted. Only
-// the visible lines are in the page (a stage can have tens of thousands).
+// The text of a stage: its IR in a Weft-like notation (see src/text.rs),
+// highlighted. Only the visible lines are in the page (a stage can have tens
+// of thousands).
 
 import { h } from './util.js';
 import { highlightHtml } from './highlight.js';
@@ -59,7 +60,7 @@ export class TextView {
       const line = this.lines[i];
       const cls = i === this.hit ? ' class="hit"' : q && line.toLowerCase().includes(q) ? ' class="match"' : '';
       nums += `<div${cls}>${i + 1}</div>`;
-      code += `<div${cls}>${line ? highlightHtml(line, 'verilog') : ' '}</div>`;
+      code += `<div${cls}>${line ? highlightHtml(line, 'weft') : ' '}</div>`;
     }
     this.gutter.innerHTML = nums;
     this.code.innerHTML = code;

@@ -26,7 +26,7 @@ const DEFAULTS = {
   schNetLabels: true,
   schMaxNodes: 2500,
   // Stages as text rather than as graphs.
-  schText: false,
+  schText: true,
   colLogic: '#3b4a6b',
   colReg: '#5b3f72',
   colMux: '#2f5d62',
