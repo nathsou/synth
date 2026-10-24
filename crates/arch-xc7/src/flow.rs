@@ -10,9 +10,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
-use synth_core::FxHashMap;
 use synth_core::progress;
 use synth_core::time::Instant;
+use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, Dir, NetId, Netlist};
 
 #[derive(Clone, Debug)]
@@ -20,6 +20,9 @@ pub struct FlowOptions {
     pub part: String,
     pub seed: u64,
     pub effort: f64,
+    /// Placement seeds implemented in parallel, the fastest by the timing
+    /// estimate kept.
+    pub tries: usize,
 }
 #[derive(Debug)]
 pub struct FlowResult {
@@ -31,13 +34,95 @@ pub struct FlowResult {
     pub timing: Vec<crate::sta::Clock>,
 }
 
+/// The device data every placement seed shares.
+struct Shared {
+    db: Device,
+    graph: RoutingGraph,
+    clocked: Vec<bool>,
+    model: crate::sta::DelayModel,
+    tree: crate::sta::ClockTree,
+}
+
 pub fn implement(
-    mut nl: Netlist,
+    nl: Netlist,
     root: &Path,
     xdc: &Constraints,
     opts: &FlowOptions,
 ) -> Result<FlowResult, String> {
     let start = Instant::now();
+    progress::step("device", &format!("loading {}", opts.part));
+    let db = Device::load(root, &opts.part)?;
+    progress::advance(0.6, || "building the routing graph".into());
+    let graph = RoutingGraph::new(&db)?;
+    let clocked = graph.clocked(&db)?;
+    let model = graph.slice_delays(&db)?;
+    let tree = crate::sta::ClockTree::new(&db);
+    let shared = Shared { db, graph, clocked, model, tree };
+    // Seeds run on threads of their own (one where there are none, as in
+    // WebAssembly), where progress reports are dropped.
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    let tries = opts.tries.clamp(1, threads);
+    // Seeds after the first are far from it, so that two runs' sets do
+    // not overlap.
+    let seeds: Vec<u64> =
+        (0..tries as u64).map(|k| opts.seed.wrapping_add(k * 1_000_003)).collect();
+    let mut results: Vec<Result<FlowResult, String>> = if tries == 1 {
+        vec![implement_seed(nl, root, xdc, opts, seeds[0], &shared, start, true)]
+    } else {
+        progress::step("place", &format!("{tries} placement seeds"));
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = seeds
+                .iter()
+                .map(|&seed| {
+                    let (nl, shared) = (nl.clone(), &shared);
+                    scope.spawn(move || {
+                        implement_seed(nl, root, xdc, opts, seed, shared, start, false)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err("a placement seed panicked".into())))
+                .collect()
+        })
+    };
+    let period = |r: &FlowResult| r.timing.iter().map(|c| c.period).fold(0.0, f64::max);
+    let periods: Vec<String> = results
+        .iter()
+        .zip(&seeds)
+        .map(|(r, s)| match r {
+            Ok(r) => format!("seed {s}: {:.3} ns", period(r) / 1000.0),
+            Err(e) => format!("seed {s}: {e}"),
+        })
+        .collect();
+    let best = (0..results.len()).filter(|&i| results[i].is_ok()).min_by(|&a, &b| {
+        let p = |i: usize| results[i].as_ref().map(period).unwrap_or(f64::MAX);
+        p(a).total_cmp(&p(b))
+    });
+    let Some(best) = best else { return results.swap_remove(0) };
+    let mut result = results.swap_remove(best)?;
+    if tries > 1 {
+        result.log.push(format!(
+            "kept seed {} of {tries} placement seeds ({})",
+            seeds[best],
+            periods.join(", ")
+        ));
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn implement_seed(
+    mut nl: Netlist,
+    root: &Path,
+    xdc: &Constraints,
+    opts: &FlowOptions,
+    seed: u64,
+    shared: &Shared,
+    start: Instant,
+    verbose: bool,
+) -> Result<FlowResult, String> {
+    let Shared { db, graph, clocked, model, tree } = shared;
     let mut log = Vec::new();
     // As in Vivado, constraints of ports the design does not have are
     // dropped, so one board's file serves every design on it.
@@ -63,10 +148,41 @@ pub fn implement(
     // Timing-driven packing: the cells critical in the first packing, timed
     // with a fixed delay between slices, are packed again on outputs that
     // leave their slice directly.
-    let critical = crate::sta::Timer::new(root, &nl, &p)?.packing_critical(&p);
-    if !critical.is_empty() {
+    let critical = crate::sta::Timer::new(root, &nl, &p)?.packing_critical(&p, model);
+    {
+        // Placement-driven packing: the atoms are placed globally one per
+        // slice, then clustered by position. Against clustering by shared
+        // nets alone, this gained 1-9% by Vivado's timer on every Euler
+        // design (Euler 31 and 57 9%, 58 7%), for 9-36% more slices: Vivado
+        // placing synth's own clusters had reached no better than synth.
+        let mut single = original.clone();
+        let ps = pack::pack_timed(&mut single, &critical, pack::Clustering::Single)?;
+        let timer = crate::sta::Timer::new(root, &single, &ps)?;
+        let mut criticality = |pl: &place::Placement| {
+            let a = timer.analyze_clocked(
+                &predictor(db, model, &single, &ps, pl),
+                &clocking(db, tree, &single, &ps, pl),
+            );
+            a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
+        };
+        let global = place::place(
+            db,
+            &single,
+            &ps,
+            xdc,
+            clocked,
+            seed,
+            opts.effort,
+            Some(&mut criticality),
+            model,
+            place::Scope::Global,
+        )?;
+        let mut pos: FxHashMap<CellId, (f64, f64)> = FxHashMap::default();
+        for (&c, &(s, _)) in &ps.slots {
+            pos.insert(c, global.spread[s]);
+        }
         nl = original;
-        p = pack::pack_timed(&mut nl, &critical)?;
+        p = pack::pack_timed(&mut nl, &critical, pack::Clustering::Placed(&pos))?;
     }
     log.push(format!(
         "packed {} slices, {} carry chains ({} critical cells)",
@@ -74,33 +190,50 @@ pub fn implement(
         p.chains.len(),
         critical.len()
     ));
-    progress::step("device", &format!("loading {}", opts.part));
-    let db = Device::load(root, &opts.part)?;
     log.push(format!("loaded {} nodes in {:.2}s", db.node_x.len(), start.elapsed().as_secs_f64()));
     let timer = crate::sta::Timer::new(root, &nl, &p)?;
     // Timing-driven placement: criticalities from the delays the placement
     // being annealed predicts.
     let mut criticality = |pl: &place::Placement| {
-        let a = timer.analyze(&predictor(&db, &nl, &p, pl));
+        let a = timer
+            .analyze_clocked(&predictor(db, model, &nl, &p, pl), &clocking(db, tree, &nl, &p, pl));
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
-    progress::advance(0.6, || "building the routing graph".into());
-    let graph = RoutingGraph::new(&db)?;
-    let clocked = graph.clocked(&db)?;
     progress::step("place", "");
-    let placement =
-        place::place(&db, &nl, &p, xdc, &clocked, opts.seed, opts.effort, Some(&mut criticality))?;
+    let placement = place::place(
+        db,
+        &nl,
+        &p,
+        xdc,
+        clocked,
+        seed,
+        opts.effort,
+        Some(&mut criticality),
+        model,
+        place::Scope::Full,
+    )?;
     log.push(format!("placed: HPWL {:.0} ({:.1}s)", placement.hpwl, start.elapsed().as_secs_f64()));
     // Detailed placement: lanes move between the placed slices, with
     // criticalities from the delays the new slice contents predict.
     let mut retime = |q: &Packed| {
-        let a = timer.analyze(&predictor(&db, &nl, q, &placement));
+        let a = timer.analyze_clocked(
+            &predictor(db, model, &nl, q, &placement),
+            &clocking(db, tree, &nl, q, &placement),
+        );
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
     progress::advance(0.95, || "detailed placement".into());
-    let moves = crate::detail::refine(&db, &nl, &mut p, &placement, opts.seed, &mut retime)?;
+    let tables = crate::lanes::Tables::new(db, graph);
+    let moves = crate::detail::refine(db, model, &nl, &mut p, &placement, seed, &mut retime)?;
     log.push(format!(
         "detailed placement: {moves} lane moves ({:.1}s)",
+        start.elapsed().as_secs_f64()
+    ));
+    // Lane order within tiles, for the critical connections within them.
+    let crit = retime(&p);
+    let reordered = crate::lanes::order(&tables, &nl, &mut p, &placement, &crit);
+    log.push(format!(
+        "lane order: {reordered} tiles reordered ({:.1}s)",
         start.elapsed().as_secs_f64()
     ));
     if let Ok(path) = std::env::var("SYNTH_XC7_PLACEMENT") {
@@ -111,11 +244,12 @@ pub fn implement(
     }
     progress::step("route", "");
     let (mut requests, names, request_nets, owners, blocked_edges) =
-        requests(&db, &nl, &p, &placement, &graph)?;
+        requests(db, &nl, &p, &placement, graph)?;
     // Timing-driven routing: criticalities from delays predicted by the
     // placement, then from the routes as they converge.
-    let predicted = predictor(&db, &nl, &p, &placement);
-    let estimate = timer.analyze(&predicted);
+    let predicted = predictor(db, model, &nl, &p, &placement);
+    let clocks = clocking(db, tree, &nl, &p, &placement);
+    let estimate = timer.analyze_clocked(&predicted, &clocks);
     let criticality = |a: &crate::sta::Analysis, i: usize, sink: u32| -> f32 {
         let Some(net) = request_nets[i] else { return 0.0 };
         owners
@@ -142,8 +276,10 @@ pub fn implement(
         graph.dst.len(),
         start.elapsed().as_secs_f64()
     ));
-    for line in &log {
-        progress::info(line);
+    if verbose {
+        for line in &log {
+            progress::info(line);
+        }
     }
     let route_opts = synth_route::RouteOptions {
         // Wires span up to 18 tiles: a lookahead by wire class bounds the
@@ -166,6 +302,9 @@ pub fn implement(
         ..Default::default()
     };
     let mut iterations = |iteration: usize, routed: usize, overused: &[usize]| {
+        if !verbose {
+            return;
+        }
         progress::info(&format!(
             "route iteration {iteration}: {routed} nets, {} congested nodes ({:.1}s)",
             overused.len(),
@@ -174,21 +313,25 @@ pub fn implement(
     };
     let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
         let wires =
-            crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, routes, &owners);
+            crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, routes, &owners);
         // Connections not routed yet keep their predicted delays.
-        let a = timer
-            .analyze(&|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)));
+        let a = timer.analyze_clocked(
+            &|c, i, n| wires.get(&(c, i)).copied().unwrap_or_else(|| predicted(c, i, n)),
+            &clocks,
+        );
         let criticality = requests
             .iter()
             .enumerate()
             .map(|(i, r)| r.sinks.iter().map(|&k| criticality(&a, i, k)).collect())
             .collect();
         let score = a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
-        progress::info(&format!(
-            "routed timing estimate: {:.3} ns ({:.1}s)",
-            score / 1000.0,
-            start.elapsed().as_secs_f64()
-        ));
+        if verbose {
+            progress::info(&format!(
+                "routed timing estimate: {:.3} ns ({:.1}s)",
+                score / 1000.0,
+                start.elapsed().as_secs_f64()
+            ));
+        }
         synth_route::Retimed { criticality, score }
     };
     let hooks = synth_route::RouteHooks {
@@ -198,7 +341,7 @@ pub fn implement(
         blocked_edges: &blocked_edges,
         ..Default::default()
     };
-    let (routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
+    let (mut routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
         .map_err(|e| match &e {
             synth_route::RouteError::Congested { nodes, nets, .. } => {
                 let nets: Vec<_> = nets.iter().map(|&i| names[i].as_str()).collect();
@@ -206,7 +349,7 @@ pub fn implement(
                     .iter()
                     .map(|n| match owners.get(n) {
                         Some(pins) => format!("node {n}: {}", describe(&nl, pins)),
-                        None => format!("node {n}: {}", node_name(&db, *n)),
+                        None => format!("node {n}: {}", node_name(db, *n)),
                     })
                     .collect();
                 format!("{e}; nets {}; {}", nets.join(", "), at.join("; "))
@@ -216,18 +359,56 @@ pub fn implement(
                 format!("{e} ({}; {pins})", names[*net])
             }
         })?;
+    let pins_start = Instant::now();
+    let reassigned = repair_pins(
+        db,
+        &nl,
+        &p,
+        &placement,
+        graph,
+        &timer,
+        &clocks,
+        &requests,
+        &request_nets,
+        &owners,
+        &blocked_edges,
+        &mut routes,
+    );
+    if reassigned > 0 {
+        log.push(format!(
+            "LUT inputs: {reassigned} critical lanes reassigned ({:.1}s)",
+            pins_start.elapsed().as_secs_f64()
+        ));
+    }
+    let (rerouted, failing) = repair_hold(
+        db,
+        &nl,
+        graph,
+        &timer,
+        &clocks,
+        &requests,
+        &request_nets,
+        &owners,
+        &blocked_edges,
+        &mut routes,
+    );
+    if rerouted + failing > 0 {
+        log.push(format!(
+            "hold: {rerouted} connections rerouted slower, {failing} still short of the margin"
+        ));
+    }
     crate::routing::verify(graph.graph(), &requests, &routes)?;
     progress::step("bitstream", "");
-    let pins = lut_pins(&graph, &nl, &p, &placement, &routes);
-    let mut features = cell_features(&db, &nl, &p, &placement, xdc, &pins)?;
-    features.extend(graph.features(&db, &routes));
-    let coverage = crate::timing::coverage(root, &db, &graph, &routes)?;
+    let pins = lut_pins(graph, &nl, &p, &placement, &routes);
+    let mut features = cell_features(db, &nl, &p, &placement, xdc, &pins)?;
+    features.extend(graph.features(db, &routes));
+    let coverage = crate::timing::coverage(root, db, graph, &routes)?;
     log.push(coverage.report());
     for pip in &coverage.missing_pip_types {
         log.push(format!("uncharacterized routed pip: {pip}"));
     }
     // Verify frame consistency after all cell and routing features are combined.
-    let frames = crate::fasm::Assembler::new(&db, root).assemble(&features)?;
+    let frames = crate::fasm::Assembler::new(db, root).assemble(&features)?;
     let bitstream = crate::bitstream::encode(&db.part, &frames, true)?;
     crate::bitstream::decode(&db.part, &bitstream)?;
     log.push(format!(
@@ -238,9 +419,10 @@ pub fn implement(
     ));
     progress::step("timing", "");
     let wires =
-        crate::sta::routed_wires(&db, &nl, &graph, &requests, &request_nets, &routes, &owners);
+        crate::sta::routed_wires(db, &nl, graph, &requests, &request_nets, &routes, &owners);
     let routed = |c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0);
-    let timing = timer.analyze(&routed).clocks;
+    let full = timer.analyze_clocked(&routed, &clocks);
+    let timing = full.clocks;
     if !coverage.missing_pip_types.is_empty() {
         log.push(format!(
             "timing estimate counts {} uncharacterized pip types as zero delay",
@@ -271,7 +453,7 @@ pub fn implement(
     }
     // For comparison with nextpnr-xilinx, which does not time them.
     if nl.live_cells().any(|c| matches!(nl.cell_kind(c), "RAMB18E1" | "DSP48E1")) {
-        for clock in timer.fabric().analyze(&routed).clocks {
+        for clock in timer.fabric().analyze_clocked(&routed, &clocks).clocks {
             log.push(format!(
                 "timing estimate without block RAM and DSP paths: clock {}: {:.3} ns ({:.1} MHz)",
                 nl.str(nl.nets[clock.net].name),
@@ -282,10 +464,11 @@ pub fn implement(
     }
     log.push(
         "timing is not certified: the estimate uses nextpnr-xilinx's routing model of X-Ray data, \
-         uncalibrated against vendor timing or hardware, without clock skew or I/O paths"
+         uncalibrated against vendor timing or hardware, without I/O paths"
             .into(),
     );
     drop(predicted);
+    drop(clocks);
     Ok(FlowResult { features, bitstream, log, placement, timing })
 }
 /// The target period (ns) of a clock net: its port's `create_clock`, or the
@@ -354,11 +537,206 @@ fn local_constants(
     out
 }
 
+/// Hold repair: connections the fast-corner check finds too fast take
+/// detours, for up to three rounds. The connections rerouted, and the
+/// inputs still failing.
+#[allow(clippy::too_many_arguments)]
+fn repair_hold(
+    db: &Device,
+    nl: &Netlist,
+    graph: &RoutingGraph,
+    timer: &crate::sta::Timer,
+    clocks: &dyn Fn(CellId) -> crate::sta::ClockSite,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    owners: &Owners,
+    blocked_edges: &[u32],
+    routes: &mut [synth_route::NetRoute],
+) -> (usize, usize) {
+    // Margin over the estimate, in fast-corner ps: Vivado timed some
+    // connections 40 ps faster than the estimate.
+    const MARGIN: f64 = 50.0;
+    let mut used = vec![0u16; graph.x.len()];
+    for (req, route) in requests.iter().zip(routes.iter()) {
+        used[req.source as usize] += 1;
+        for &e in &route.edges {
+            used[graph.dst[e as usize] as usize] += 1;
+        }
+    }
+    let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
+    let (mut rerouted, mut failing) = (0, 0);
+    let mut index = None;
+    for _ in 0..3 {
+        let sinks = crate::sta::routed_sinks(db, nl, graph, requests, request_nets, routes, owners);
+        // Hold is checked on the fastest connection into each pin.
+        let fastest = |c: CellId, i: u32| {
+            sinks.get(&(c, i)).map_or(0.0, |s| s.iter().fold(f64::INFINITY, |w, s| w.min(s.2)))
+        };
+        // The slowest repair each connection needs.
+        let mut need: BTreeMap<(CellId, u32), f64> = BTreeMap::new();
+        for (at, slack) in timer.hold(&|c, i, _| fastest(c, i), clocks, MARGIN) {
+            let v = need.entry(at).or_insert(0.0);
+            *v = v.max(MARGIN - slack);
+        }
+        failing = need.len();
+        let mut any = false;
+        // A site pin reaching several cell pins is detoured once a round.
+        let mut done = FxHashSet::default();
+        for (at, fast) in need {
+            let target = fastest(at.0, at.1) + fast / crate::sta::FAST;
+            for &(net, sink, d) in sinks.get(&at).into_iter().flatten() {
+                if d >= target || !done.insert((net, sink)) {
+                    continue;
+                }
+                let index = index.get_or_insert_with(|| crate::hold::Index::new(graph));
+                let ok = crate::hold::detour(
+                    graph,
+                    index,
+                    requests,
+                    routes,
+                    &mut used,
+                    &blocked,
+                    net,
+                    sink,
+                    target - d,
+                );
+                if std::env::var("SYNTH_XC7_HOLD_TRACE").is_ok() {
+                    eprintln!(
+                        "hold trace: {}.{} need {fast:.0} fast, sink {sink} {:.0} slow more: {ok}",
+                        nl.str(nl.cells[at.0].name),
+                        nl.str(nl.cells[at.0].pins[at.1 as usize].name),
+                        target - d
+                    );
+                }
+                if ok {
+                    rerouted += 1;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    (rerouted, failing)
+}
+
+/// Reassigns the LUT inputs of the lanes nearest the worst slack by how
+/// late each arrives (`pins::reassign`), in rounds timed again between
+/// them; keeps the routes only if the clock period they reach shortens.
+/// The lanes reassigned.
+#[allow(clippy::too_many_arguments)]
+fn repair_pins(
+    db: &Device,
+    nl: &Netlist,
+    p: &Packed,
+    pl: &Placement,
+    graph: &RoutingGraph,
+    timer: &crate::sta::Timer,
+    clocks: &dyn Fn(CellId) -> crate::sta::ClockSite,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    owners: &Owners,
+    blocked_edges: &[u32],
+    routes: &mut [synth_route::NetRoute],
+) -> usize {
+    // Lanes within this much (ps) of the worst slack, in this many rounds
+    // (300 ps and ten rounds gained no more).
+    const NEAR: f64 = 100.0;
+    const ROUNDS: usize = 4;
+    let mut used = vec![0u16; graph.x.len()];
+    for (req, route) in requests.iter().zip(routes.iter()) {
+        used[req.source as usize] += 1;
+        for &e in &route.edges {
+            used[graph.dst[e as usize] as usize] += 1;
+        }
+    }
+    let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
+    let by_net: FxHashMap<NetId, usize> =
+        request_nets.iter().enumerate().filter_map(|(i, n)| n.map(|n| (n, i))).collect();
+    let worst = |routes: &[synth_route::NetRoute]| {
+        let wires = crate::sta::routed_wires(db, nl, graph, requests, request_nets, routes, owners);
+        timer.analyze_clocked(&|c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0), clocks)
+    };
+    let saved = routes.to_vec();
+    let mut analysis = worst(routes);
+    // Slacks are against the period reached: the score is that period.
+    let wns = |a: &crate::sta::Analysis| a.slack.values().copied().fold(f64::INFINITY, f64::min);
+    let period = |a: &crate::sta::Analysis| a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
+    let first = period(&analysis);
+    let mut moved = 0;
+    for _ in 0..ROUNDS {
+        let least = wns(&analysis);
+        let mut lanes = Vec::new();
+        for (&(s, l), nets) in &lut_pins(graph, nl, p, pl, routes) {
+            let slice = &p.slices[s];
+            let cells: Vec<CellId> = slice.luts[l].iter().chain(&slice.lut5[l]).copied().collect();
+            let site = &pl.slices[s];
+            let Some(&sink) = graph.lane_sinks.get(&(site.tile as u32, site.index as u32, l as u8))
+            else {
+                continue;
+            };
+            let mut inputs = Vec::new();
+            for (i, n) in slice.lane_inputs(nl, l).into_iter().enumerate() {
+                if !nets.contains(&Some(n)) {
+                    continue;
+                }
+                let Some(&r) = by_net.get(&n) else { continue };
+                let slack = cells
+                    .iter()
+                    .filter_map(|&c| analysis.slack.get(&(c, n)))
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                inputs.push((r, sink + i as u32, slack));
+            }
+            let lane_least = inputs.iter().map(|i| i.2).fold(f64::INFINITY, f64::min);
+            if inputs.is_empty() || lane_least > least + NEAR {
+                continue;
+            }
+            let letter = char::from(b'A' + l as u8);
+            let pins = std::array::from_fn(|j| site.node(db, &format!("{letter}{}", j + 1)).ok());
+            lanes.push((lane_least, crate::pins::Lane { inputs, pins }));
+        }
+        lanes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut any = false;
+        for (_, lane) in &lanes {
+            if crate::pins::reassign(graph, requests, routes, &mut used, &blocked, lane).is_some() {
+                moved += 1;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+        analysis = worst(routes);
+    }
+    if period(&analysis) >= first {
+        routes.clone_from_slice(&saved);
+        return 0;
+    }
+    moved
+}
+
+/// Each sequential cell's clock site in a placement.
+fn clocking<'a>(
+    db: &'a Device,
+    tree: &'a crate::sta::ClockTree,
+    nl: &'a Netlist,
+    p: &'a Packed,
+    pl: &'a Placement,
+) -> impl Fn(CellId) -> crate::sta::ClockSite + 'a {
+    move |c| match location(db, p, pl, c) {
+        Some(((x, y), _)) => tree.site(x, y, nl.cell_kind(c) == "RAMB18E1"),
+        None => crate::sta::ClockSite::NONE,
+    }
+}
+
 /// The tile coordinates of a placed cell and the site it is in.
 /// Wire delays predicted from a placement: by distance between tiles,
 /// nothing within a site and a local hop within a tile.
 fn predictor<'a>(
     db: &'a Device,
+    model: &'a crate::sta::DelayModel,
     nl: &'a Netlist,
     p: &'a Packed,
     pl: &'a Placement,
@@ -369,7 +747,7 @@ fn predictor<'a>(
             (Some((a, sa)), Some((b, sb))) if a == b && sa == sb => 0.0,
             _ if crate::sta::dedicated(nl, c, i) => 0.0,
             (Some(((ax, ay), _)), Some(((bx, by), _))) => {
-                crate::sta::predicted_delay(i32::from(bx - ax), i32::from(by - ay))
+                model.predict(i32::from(bx - ax), i32::from(by - ay))
                     + crate::sta::output_delay(nl, p, n)
             }
             _ => 0.0,
@@ -484,7 +862,7 @@ type Requests = (Vec<synth_route::NetRequest>, Vec<String>, Vec<Option<NetId>>, 
 /// Whether a lane's LUT inputs may be permuted by the router: plain LUTs
 /// without constant inputs (constants route from the interconnect tile's
 /// own wires to a known pin).
-fn permutable(nl: &Netlist, slice: &pack::Slice, l: usize) -> bool {
+pub(crate) fn permutable(nl: &Netlist, slice: &pack::Slice, l: usize) -> bool {
     slice.ram.is_none()
         && slice.luts[l].iter().chain(&slice.lut5[l]).all(|&c| pack::is_lut(nl.cell_kind(c)))
         && slice.lane_inputs(nl, l).iter().all(|&n| pack::value(nl, n).is_none())
@@ -682,6 +1060,8 @@ fn requests(
                             .then(|| format!("{}X", char::from(b'A' + lane as u8)))
                     } else if name == "CI" && pack::value(nl, n).is_none() {
                         Some("CIN".into())
+                    } else if name == "CYINIT" && pack::value(nl, n).is_none() {
+                        Some("AX".into())
                     } else if matches!(name, "CI" | "CYINIT") {
                         None
                     } else {
@@ -851,6 +1231,12 @@ fn lut_config(
         };
         phys |= value(cell, j)? << j;
     }
+    // A constant-0 LUT keeps one INIT bit, at the address of every input
+    // low: an unused input reads 1, so it is never read, and the LUT stays
+    // visible to bitstream readers (fasm2bels drops LUTs without INIT bits).
+    if phys == 0 && s.lut5[l].is_none() && pins.iter().flatten().count() < 6 {
+        phys = 1;
+    }
     Ok(Some((phys, Vec::new())))
 }
 
@@ -947,6 +1333,8 @@ fn cell_features(
                     return Err("dynamic CI requires CYINIT=0".into());
                 }
                 "CIN"
+            } else if pack::value(nl, cy).is_none() {
+                "AX"
             } else if pack::value(nl, ci) == Some(true) || pack::value(nl, cy) == Some(true) {
                 "C1"
             } else {

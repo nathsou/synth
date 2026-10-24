@@ -46,8 +46,8 @@ pub(crate) struct Problem {
 }
 
 /// The cost of a tile of vertical distance against a horizontal one in
-/// spreading and legalization: rows cost about 60 ps each over short
-/// distances against 16 ps per tile column (`sta::predicted_delay`), and
+/// spreading and legalization: rows cost about 40 ps each over short
+/// distances against 20 ps per tile column (`sta::DelayModel`), and
 /// slice columns are about two tile columns apart. Spreading wide rather
 /// than tall shortens Euler 57's critical paths by rows, pressed into a
 /// corner by its pins.

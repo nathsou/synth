@@ -22,7 +22,7 @@ fn main() -> Result<(), String> {
     let xdc = arch_xc7::xdc::Constraints::parse(
         &std::fs::read_to_string(&a[3]).map_err(|e| e.to_string())?,
     )?;
-    let opts = arch_xc7::flow::FlowOptions { part: a[1].clone(), seed: 1, effort: 1.0 };
+    let opts = arch_xc7::flow::FlowOptions { part: a[1].clone(), seed: 1, effort: 1.0, tries: 1 };
     let result = arch_xc7::flow::implement(nl, std::path::Path::new(&a[0]), &xdc, &opts)?;
     for l in result.log {
         eprintln!("info: {l}");
