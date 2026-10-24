@@ -223,9 +223,17 @@ fn implement_seed(
         a.slack.keys().map(|&(c, n)| ((c, n), a.criticality(c, n))).collect()
     };
     progress::advance(0.95, || "detailed placement".into());
+    let tables = crate::lanes::Tables::new(db, graph);
     let moves = crate::detail::refine(db, model, &nl, &mut p, &placement, seed, &mut retime)?;
     log.push(format!(
         "detailed placement: {moves} lane moves ({:.1}s)",
+        start.elapsed().as_secs_f64()
+    ));
+    // Lane order within tiles, for the critical connections within them.
+    let crit = retime(&p);
+    let reordered = crate::lanes::order(&tables, &nl, &mut p, &placement, &crit);
+    log.push(format!(
+        "lane order: {reordered} tiles reordered ({:.1}s)",
         start.elapsed().as_secs_f64()
     ));
     if let Ok(path) = std::env::var("SYNTH_XC7_PLACEMENT") {
@@ -854,7 +862,7 @@ type Requests = (Vec<synth_route::NetRequest>, Vec<String>, Vec<Option<NetId>>, 
 /// Whether a lane's LUT inputs may be permuted by the router: plain LUTs
 /// without constant inputs (constants route from the interconnect tile's
 /// own wires to a known pin).
-fn permutable(nl: &Netlist, slice: &pack::Slice, l: usize) -> bool {
+pub(crate) fn permutable(nl: &Netlist, slice: &pack::Slice, l: usize) -> bool {
     slice.ram.is_none()
         && slice.luts[l].iter().chain(&slice.lut5[l]).all(|&c| pack::is_lut(nl.cell_kind(c)))
         && slice.lane_inputs(nl, l).iter().all(|&n| pack::value(nl, n).is_none())

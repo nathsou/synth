@@ -178,6 +178,22 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   Euler design against Vivado's 86; six seeds took as long as Vivado).
   The estimate after placement predicts the routed one too loosely to
   choose seeds before routing them.
+- **Lane order.** Each slice output has direct pips into six of its tile's
+  LUT pins (L_A into M_A3, L_A5, M_B3, L_B5, L_C1 and L_D1, for instance),
+  about 180 ps against 350-850 ps through other wires, and in Vivado's
+  worst paths of synth's bitstreams hops within one tile took 0.4-0.8 ns.
+  Placement and the timer count a tile's connections as free whatever
+  their lanes, so after detailed placement each tile with a critical
+  connection inside it reorders its slices' movable lanes and trades them
+  between its two slices: every order of each slice's lanes, then every
+  swap across them, two passes, keeping the order whose inputs (weighted by
+  criticality to the eighth power, each on its fastest free pin) arrive
+  soonest. Delays come from a search of each tile template's routing graph
+  from each output to each pin within a tile of it. This gained 1.3% by
+  Vivado's timer over six seeds of the eight Euler designs (140.5 to 142.3
+  MHz; Euler 92 +2.0%, 25 and 58 +1.9%, 14 unchanged), for under 0.1 s of
+  each seed's run. Pricing the same delays in detailed placement's costs
+  gained 0.3% more by the estimate, within its noise, and is not done.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
   and distance, found by searching backwards from sample sinks. Nets in

@@ -8,6 +8,7 @@ mod dsp;
 pub mod fasm;
 mod hold;
 mod json;
+mod lanes;
 mod lutram;
 mod physical_dsp;
 mod pins;
