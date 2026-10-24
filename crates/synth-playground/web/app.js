@@ -482,7 +482,7 @@ class App {
     this.editor.setDoc(name, f.text, this.docState.get(name));
     for (const b of $('file-tabs').children) b.classList.toggle('active', b.dataset.file === name);
     for (const b of $('files-rail').children) b.classList.toggle('active', b.title === name);
-    $('sb-lang').textContent = { weft: 'Weft', v: 'Verilog', sv: 'SystemVerilog', pcf: 'PCF', xdc: 'XDC' }[name.split('.').pop()] || '';
+    $('sb-lang').textContent = { weft: 'Weft', v: 'Verilog', sv: 'SystemVerilog', pcf: 'PCF', xdc: 'XDC', rtl: 'RTL', gates: 'Gates', netlist: 'Netlist' }[name.split('.').pop()] || '';
     this.renderCursor();
     this.applyAnalysis();
     this.saveSoon();
@@ -855,8 +855,10 @@ class App {
       this.mode = mode;
       this.renderRail();
     }
-    if (name === 'chip') this.step = this.step === 'route' ? 'route' : 'place';
-    else if (name === 'timing') this.step = 'timing';
+    if (name === 'chip') {
+      this.step = this.step === 'route' ? 'route' : 'place';
+      this.chip.setStep(this.step);
+    } else if (name === 'timing') this.step = 'timing';
     else if (name === 'bitstream') this.step = 'bitstream';
     else if (name === 'pipeline' && !['pnr', 'bitstream'].includes(this.step)) this.step = 'summary';
     this.markRail();
@@ -914,7 +916,7 @@ class App {
         const delta = st.delta ? h('span', { class: st.delta < 0 ? 'down' : 'up' }, ` ${st.delta < 0 ? '−' : '+'}${fmtNum(Math.abs(st.delta))}`) : null;
         const btn = h('button', {
           class: `step${pending && !busy ? ' pending' : ''}${busy ? ' busy' : ''}${(this.running || stale) && !busy && st.id !== 'summary' ? ' stale' : ''}${st.bad ? ' bad' : ''}`, 'data-step': st.id,
-          title: `${stageInfo(st.id)[1] || st.label}${st.view === 'schematic' && st.metric && !st.has ? ' (too large to draw)' : ''}`,
+          title: `${stageInfo(st.id)[1] || st.label}${st.view === 'schematic' && st.metric && !st.graph ? ' (too large to draw: shown as text)' : ''}`,
           disabled: !st.metric || (st.view === 'schematic' && !st.has),
           onclick: () => this.openStep(st.id),
         }, h('span', { class: 'l' }, st.label), h('span', { class: 'm' }, busy ? 'running' : st.metric ?? '—', busy ? null : delta));
@@ -999,6 +1001,7 @@ class App {
   }
 
   showCriticalPath(ci) {
+    this.step = 'route';
     this.openView('chip');
     this.chip.crit = ci;
     this.chip.renderToolbar();

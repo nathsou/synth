@@ -729,7 +729,7 @@ pub fn aig_graph(net: &LogicNet) -> Json {
 
 // ----- netlists of primitives -----
 
-fn param_text(p: &synth_netlist::Param, name: &str) -> String {
+pub(crate) fn param_text(p: &synth_netlist::Param, name: &str) -> String {
     if name == "LUT_INIT"
         && let Some(v) = p.as_u64()
     {

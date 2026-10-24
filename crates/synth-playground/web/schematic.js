@@ -1,15 +1,19 @@
 // The schematic view: any stage's graph (RTL, gates, cells), with instances
-// collapsible from the module level down to individual gates.
+// collapsible from the module level down to individual gates, or its text.
 
 import { Renderer, rgba, zoomBar } from './gl.js';
 import { layout } from './layout.js';
 import { settings } from './settings.js';
-import { h, fill, icon, rgb, cssVar, mix, esc, showTooltip, hideTooltip, toast } from './util.js';
+import { TextView } from './textview.js';
+import { h, fill, icon, rgb, cssVar, mix, esc, showTooltip, hideTooltip, toast, download } from './util.js';
 
 const PORT_DY = 16;
 const HEADER = 22;
 const FONT = '11px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace';
 const FONT_UI = '600 11.5px system-ui, -apple-system, "Segoe UI", sans-serif';
+
+/** The IR language of a stage's text (docs/IR_TEXT.md), by its kind. */
+const irLang = (stage) => ({ rtl: 'rtl', aig: 'gates', netlist: 'netlist' })[stage.kind] || 'text';
 
 const KIND_COLOR = {
   op: 'colLogic', and: 'colLogic', dff: 'colReg', ff: 'colReg', latch: 'colReg',
@@ -56,7 +60,8 @@ export class Schematic {
     this.toolbar = h('div', { class: 'toolbar' });
     this.inspector = h('div', { class: 'inspector', hidden: true });
     this.legend = h('div', { class: 'legend' });
-    el.append(this.toolbar, this.inspector, this.legend);
+    this.text = new TextView();
+    el.append(this.text.el, this.toolbar, this.inspector, this.legend);
     try {
       this.r = new Renderer(el);
     } catch (e) {
@@ -83,7 +88,8 @@ export class Schematic {
       if (e.key === 'Escape') this.select(-1);
     });
     settings.on('change', (k) => {
-      if (k.startsWith('sch') || k.startsWith('col') || k === 'theme' || k === 'accent') {
+      if (k === 'schText') this.applyMode();
+      else if (k.startsWith('sch') || k.startsWith('col') || k === 'theme' || k === 'accent') {
         if (k === 'schDepth') this.resetCollapse();
         this.rebuild(k === 'schDepth');
       }
@@ -91,16 +97,35 @@ export class Schematic {
     this.renderToolbar();
   }
 
+  /** Whether the stage shows as text: when chosen, or when its graph is too
+   *  large to have been made. */
+  isText() {
+    return !!this.stage?.text && (settings.get('schText') || !this.stage.graph);
+  }
+
+  /** Shows the graph or the text of the stage, as chosen. */
+  applyMode() {
+    const text = this.isText();
+    this.el.classList.toggle('text-mode', text);
+    this.text.el.hidden = !text;
+    if (text) {
+      this.inspector.hidden = true;
+      this.text.setText(this.stage.text, irLang(this.stage));
+      this.text.render(true);
+    } else if (this.stale) this.rebuild(true);
+    this.renderToolbar();
+  }
+
   /** New run results. */
   show(result) {
-    this.stages = (result.stages || []).filter((s) => s.graph);
+    this.stages = (result.stages || []).filter((s) => s.graph || s.text);
     const keep = this.stage && this.stages.find((s) => s.id === this.stage.id);
     this.stage = keep || this.stages.find((s) => s.id === 'optimised') || this.stages[0] || null;
     this.selected = -1;
     this.inspector.hidden = true;
     this.resetCollapse();
-    this.renderToolbar();
     this.rebuild(true);
+    this.applyMode();
   }
 
   setStage(id) {
@@ -110,13 +135,13 @@ export class Schematic {
     this.selected = -1;
     this.inspector.hidden = true;
     this.resetCollapse();
-    this.renderToolbar();
     this.rebuild(true);
+    this.applyMode();
   }
 
   resetCollapse() {
     this.collapsed = new Set();
-    if (!this.stage) return;
+    if (!this.stage?.graph) return;
     const depth = settings.get('schDepth');
     for (const n of this.stage.graph.nodes) {
       for (const a of ancestors(n.path)) if (a.split('.').length > depth) this.collapsed.add(a);
@@ -149,22 +174,36 @@ export class Schematic {
       type: 'search', placeholder: 'Find a cell or signal…',
       onkeydown: (e) => { if (e.key === 'Enter') this.find(e.target.value); },
     });
-    fill(tb, 
-      h('div', { class: 'group' },
-        h('button', { title: 'Collapse every instance (module level)', onclick: () => this.collapseAll() }, icon('minus'), 'Modules'),
-        h('button', { title: 'Expand every instance (down to the cells)', onclick: () => this.expandAll() }, icon('plus'), 'Cells')),
+    const text = this.isText();
+    const mode = (on, attrs, ...label) => h('button', { class: on ? 'on' : '', ...attrs }, ...label);
+    fill(tb,
+      h('div', { class: 'group', role: 'tablist' },
+        mode(text, { title: 'The stage as text', disabled: !this.stage?.text, onclick: () => settings.set('schText', true) }, icon('file'), 'Text'),
+        mode(!text, { title: this.stage && !this.stage.graph ? 'Too large to draw' : 'The stage as a graph', disabled: !this.stage?.graph, onclick: () => settings.set('schText', false) }, icon('graph'), 'Graph')),
+      text
+        ? h('div', { class: 'group' },
+          h('button', { title: 'Download the text', onclick: () => this.downloadText() }, icon('download'), 'Download'))
+        : h('div', { class: 'group' },
+          h('button', { title: 'Collapse every instance (module level)', onclick: () => this.collapseAll() }, icon('minus'), 'Modules'),
+          h('button', { title: 'Expand every instance (down to the cells)', onclick: () => this.expandAll() }, icon('plus'), 'Cells')),
       h('div', { class: 'group' }, h('label', {}, icon('search')), search),
     );
+    search.placeholder = text ? 'Find in the text…' : 'Find a cell or signal…';
+  }
+
+  downloadText() {
+    if (!this.stage?.text) return;
+    download(`${this.stage.id}.${irLang(this.stage)}`, this.stage.text, 'text/plain');
   }
 
   collapseAll() {
-    if (!this.stage) return;
+    if (!this.stage?.graph) return;
     for (const n of this.stage.graph.nodes) for (const a of ancestors(n.path)) this.collapsed.add(a);
     this.rebuild(true);
   }
 
   expandAll() {
-    if (!this.stage) return;
+    if (!this.stage?.graph) return;
     const n = this.stage.graph.nodes.length;
     if (n > settings.get('schMaxNodes') * 2) toast(`${n} nodes: expanding everything may be slow`);
     this.collapsed.clear();
@@ -183,7 +222,10 @@ export class Schematic {
   /** Builds the visible graph and its layout. */
   rebuild(fit, focusPath) {
     if (!this.r) return;
-    if (!this.stage) {
+    // The graph is laid out once it is shown.
+    this.stale = this.isText();
+    if (this.stale) return;
+    if (!this.stage?.graph) {
       this.built = null;
       for (const b of [this.frames, this.edgeBatch, this.nodeBatch, this.hiBatch, this.portBatch]) b.inst.clear();
       this.r.update(this.frames, this.edgeBatch, this.nodeBatch, this.hiBatch, this.portBatch);
@@ -663,6 +705,10 @@ export class Schematic {
 
   find(q) {
     if (!this.stage || !q) return;
+    if (this.isText()) {
+      if (!this.text.find(q)) toast(`Nothing matches “${q}”`);
+      return;
+    }
     q = q.toLowerCase();
     const g = this.stage.graph;
     const hit = g.nodes.findIndex((n) => (n.name || '').toLowerCase().includes(q) || (n.label || '').toLowerCase() === q);
@@ -706,6 +752,7 @@ export class Schematic {
 
   visible() {
     if (this.r) this.r.resize();
+    if (this.isText()) this.text.render(true);
   }
 }
 

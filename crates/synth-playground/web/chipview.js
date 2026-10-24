@@ -53,6 +53,9 @@ export class ChipView {
     this.sel = null; // {type: 'net'|'cell'|'tile', i}
     this.hoverNet = -1;
     this.crit = null; // clock index of the critical path overlay
+    // The step shown: 'place' (the cells on their sites) or 'route' (with
+    // the routed wires).
+    this.step = 'route';
     el.classList.add('canvas-wrap');
     this.toolbar = h('div', { class: 'toolbar' });
     this.inspector = h('div', { class: 'inspector', hidden: true });
@@ -227,7 +230,7 @@ export class ChipView {
     // Wires.
     const wb = this.wireBatch.inst;
     wb.clear();
-    if (settings.get('chipRouting')) {
+    if (this.routing()) {
       const alpha = settings.get('chipWireAlpha');
       const globals = settings.get('chipGlobals');
       this.segs.forEach((list, ni) => {
@@ -385,7 +388,7 @@ export class ChipView {
   }
 
   pickNet(x, y) {
-    if (!this.data || !settings.get('chipRouting')) return -1;
+    if (!this.data || !this.routing()) return -1;
     const k = Math.floor(x / T) * 4096 + Math.floor(y / T);
     const tol = 5 / this.r.cam.scale;
     let best = -1, bd = tol;
@@ -553,8 +556,22 @@ export class ChipView {
     ins.hidden = false;
   }
 
+  /** Shows the placement, or the routing too. */
+  setStep(step) {
+    if (step === this.step) return;
+    this.step = step;
+    this.renderToolbar();
+    if (this.data && this.r) this.paint();
+  }
+
+  /** Whether the routed wires are drawn. */
+  routing() {
+    return this.step === 'route' && settings.get('chipRouting');
+  }
+
   renderToolbar() {
     if (!this.toolbar) return;
+    const route = this.step === 'route';
     const tog = (key, label, title) => h('button', { class: settings.get(key) ? 'on' : '', title, onclick: () => settings.set(key, !settings.get(key)) }, label);
     const clocks = this.timing?.clocks || [];
     const critSel = h('select', {
@@ -568,8 +585,8 @@ export class ChipView {
     const colorSel = h('select', { title: 'Wire colours', onchange: (e) => settings.set('chipColorBy', e.target.value) },
       [['net', 'Colour by net'], ['crit', 'Colour by criticality'], ['class', 'Colour by wire type']].map(([v, l]) => h('option', { value: v, selected: settings.get('chipColorBy') === v }, l)));
     fill(this.toolbar, 
-      h('div', { class: 'group' }, icon('layers'), tog('chipRouting', 'Routing', 'Show routed wires'), tog('chipGlobals', 'Globals', 'Show global networks'), tog('chipPins', 'Pins', 'Show package pin names')),
-      h('div', { class: 'group' }, colorSel),
+      h('div', { class: 'group' }, icon('layers'), route ? [tog('chipRouting', 'Routing', 'Show routed wires'), tog('chipGlobals', 'Globals', 'Show global networks')] : null, tog('chipPins', 'Pins', 'Show package pin names')),
+      route ? h('div', { class: 'group' }, colorSel) : null,
       clocks.length ? h('div', { class: 'group' }, critSel) : null,
     );
   }
@@ -577,7 +594,7 @@ export class ChipView {
   legendUpdate() {
     const sw = (k, l) => h('span', {}, h('i', { style: { background: settings.get(k) } }), l);
     const mode = settings.get('chipColorBy');
-    const wires = mode === 'class'
+    const wires = !this.routing() ? [] : mode === 'class'
       ? [sw('colSpan4', 'span 4'), sw('colSpan12', 'span 12'), sw('colLocal', 'local'), sw('colGlobal', 'global')]
       : mode === 'crit'
         ? [h('span', {}, 'slack', h('i', { class: 'gradient', style: { background: 'linear-gradient(90deg,#38bf73,#f2c740,#f24d4d)', width: '80px' } }), 'critical')]

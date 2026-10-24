@@ -117,8 +117,33 @@ block RAMs, DSPs and IOs used; the Chip and Bitstream views are iCE40 only. Besi
 split into the delay of cells and of wires, and the problems. Click a step to
 open it.
 
-**Schematic.** The design at any of the synthesis steps, and after packing,
-as a graph. Instances start
+**Text and graph.** The design at any of the synthesis steps, and after
+packing, as text (the default) or as a graph.
+
+The text writes the IR as it is, cell by cell, in the language of its level
+(see [IR_TEXT.md](IR_TEXT.md)): `.rtl` for the word-level steps, `.gates`
+for the gate level, `.netlist` for the mapped and packed netlists.
+
+```
+module top {
+    input clk: 1
+    output led: 4
+
+    wire count: 26
+    wire $n3: 26
+
+    connect led = count[25:22]
+
+    $n3 = add count, 26'd1 @$binary0
+    count = dff $n3, clk: posedge clk, init: 26'd0 @count
+}
+```
+
+It is highlighted like the editor's sources (the editor highlights `.rtl`,
+`.gates` and `.netlist` files too). Search jumps from match to match, and
+**Download** saves it with its extension.
+
+The graph starts with instances
 collapsed into blocks with their boundary signals as ports (the module-level
 view); double-click a block, or use **Cells**, to open it down to the
 operators, gates, LUTs and flip-flops. The gate level shows the and-inverter
@@ -126,7 +151,8 @@ graph with its inversions as bubbles. Hover for properties, click to inspect a
 node (with a truth table for LUTs) and follow its connections, search for a
 cell or signal by name.
 
-**Chip.** The die as it is: logic tiles with their eight logic cells, RAM
+**Chip.** The die as it is (**Place** shows the cells on their sites,
+**Route** the routed wires over them): logic tiles with their eight logic cells, RAM
 tiles, the IO ring with package pin names. Each used logic cell shows its LUT,
 flip-flop and carry; zoom in to read the LUT contents. Every routed net is
 drawn over the wires it uses (span-4, span-12, local tracks, cell inputs) and
@@ -289,4 +315,5 @@ and highlighting, with Node's built-in runner).
 
 Limits: Artix-7 shows the flow up to the mapped netlist, then the results of
 place and route, without the chip and bitstream views. Gate-level graphs above
-40,000 AND nodes are left out, and large schematics start collapsed.
+40,000 AND nodes are left out (the step opens as text), and large schematics
+start collapsed. Text beyond 1 MiB is cut.

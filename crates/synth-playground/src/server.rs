@@ -19,6 +19,7 @@ pub const ASSETS: &[(&str, &[u8])] = &[
     ("gl.js", include_bytes!("../web/gl.js")),
     ("layout.js", include_bytes!("../web/layout.js")),
     ("schematic.js", include_bytes!("../web/schematic.js")),
+    ("textview.js", include_bytes!("../web/textview.js")),
     ("chipview.js", include_bytes!("../web/chipview.js")),
     ("panels.js", include_bytes!("../web/panels.js")),
     ("settings.js", include_bytes!("../web/settings.js")),
