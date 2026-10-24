@@ -120,30 +120,28 @@ open it.
 **Text and graph.** The design at any of the synthesis steps, and after
 packing, as text (the default) or as a graph.
 
-The text writes the IR as it is, cell by cell, in a notation borrowed from
-Weft (ports, `uint<N>` types, literals, `concat`, `if`, `match`, `inst`):
+The text writes the IR as it is, cell by cell, in the language of its level
+(see [IR_TEXT.md](IR_TEXT.md)): `.rtl` for the word-level steps, `.gates`
+for the gate level, `.netlist` for the mapped and packed netlists.
 
 ```
-module top(in clk: bool, out led: uint<4>) {
-    wire count: uint<26>;
-    wire $n3: uint<26>;
+module top {
+    input clk: 1
+    output led: 4
 
-    led = count[25:22];
+    wire count: 26
+    wire $n3: 26
 
-    $n3 = count + 1; // $binary0
-    count := dff($n3, clk: clk, init: 0); // count
+    connect led = count[25:22]
+
+    $n3 = add count, 26'd1 @$binary0
+    count = dff $n3, clk: posedge clk, init: 26'd0 @count
 }
 ```
 
-`=` is a combinational cell (a parallel mux is a `match` on its one-hot
-select), `:=` a state element written as the cell it is
-(`dff(d, clk: …, en: …, srst: r => 0, arst: r => 0, init: 0)`, a memory's
-`.write(…)` and clocked `.read(…)`), and each line ends with the cell's name.
-The gate level is one line per AND gate (`$g<n> = a & !b;`), flip-flop
-(named per bit), carry chain and instance; netlists are one `inst` per
-primitive with its parameters, its inputs as `PIN: net` and its outputs as
-`PIN -> net`. It is not meant to be compiled. Search jumps from match to
-match, and **Download** saves it.
+It is highlighted like the editor's sources (the editor highlights `.rtl`,
+`.gates` and `.netlist` files too). Search jumps from match to match, and
+**Download** saves it with its extension.
 
 The graph starts with instances
 collapsed into blocks with their boundary signals as ports (the module-level

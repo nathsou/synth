@@ -1,6 +1,6 @@
-// The text of a stage: its IR in a Weft-like notation (see src/text.rs),
-// highlighted. Only the visible lines are in the page (a stage can have tens
-// of thousands).
+// The text of a stage: its IR in the IR language of its level (`rtl`,
+// `gates` or `netlist`, see docs/IR_TEXT.md), highlighted. Only the visible
+// lines are in the page (a stage can have tens of thousands).
 
 import { h } from './util.js';
 import { highlightHtml } from './highlight.js';
@@ -29,9 +29,10 @@ export class TextView {
     });
   }
 
-  setText(text) {
-    if (text === this.text) return;
+  setText(text, lang) {
+    if (text === this.text && lang === this.lang) return;
     this.text = text;
+    this.lang = lang;
     this.lines = (text || '').replace(/\n$/, '').split('\n');
     this.lower = null;
     this.hit = -1;
@@ -60,7 +61,7 @@ export class TextView {
       const line = this.lines[i];
       const cls = i === this.hit ? ' class="hit"' : q && line.toLowerCase().includes(q) ? ' class="match"' : '';
       nums += `<div${cls}>${i + 1}</div>`;
-      code += `<div${cls}>${line ? highlightHtml(line, 'weft') : ' '}</div>`;
+      code += `<div${cls}>${line ? highlightHtml(line, this.lang) : ' '}</div>`;
     }
     this.gutter.innerHTML = nums;
     this.code.innerHTML = code;

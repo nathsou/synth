@@ -482,7 +482,7 @@ class App {
     this.editor.setDoc(name, f.text, this.docState.get(name));
     for (const b of $('file-tabs').children) b.classList.toggle('active', b.dataset.file === name);
     for (const b of $('files-rail').children) b.classList.toggle('active', b.title === name);
-    $('sb-lang').textContent = { weft: 'Weft', v: 'Verilog', sv: 'SystemVerilog', pcf: 'PCF', xdc: 'XDC' }[name.split('.').pop()] || '';
+    $('sb-lang').textContent = { weft: 'Weft', v: 'Verilog', sv: 'SystemVerilog', pcf: 'PCF', xdc: 'XDC', rtl: 'RTL', gates: 'Gates', netlist: 'Netlist' }[name.split('.').pop()] || '';
     this.renderCursor();
     this.applyAnalysis();
     this.saveSoon();

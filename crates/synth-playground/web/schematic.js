@@ -12,6 +12,9 @@ const HEADER = 22;
 const FONT = '11px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace';
 const FONT_UI = '600 11.5px system-ui, -apple-system, "Segoe UI", sans-serif';
 
+/** The IR language of a stage's text (docs/IR_TEXT.md), by its kind. */
+const irLang = (stage) => ({ rtl: 'rtl', aig: 'gates', netlist: 'netlist' })[stage.kind] || 'text';
+
 const KIND_COLOR = {
   op: 'colLogic', and: 'colLogic', dff: 'colReg', ff: 'colReg', latch: 'colReg',
   mux: 'colMux', pmux: 'colMux', shiftx: 'colMux', carry: 'colMux',
@@ -107,7 +110,7 @@ export class Schematic {
     this.text.el.hidden = !text;
     if (text) {
       this.inspector.hidden = true;
-      this.text.setText(this.stage.text);
+      this.text.setText(this.stage.text, irLang(this.stage));
       this.text.render(true);
     } else if (this.stale) this.rebuild(true);
     this.renderToolbar();
@@ -190,7 +193,7 @@ export class Schematic {
 
   downloadText() {
     if (!this.stage?.text) return;
-    download(`${this.stage.id}.txt`, this.stage.text, 'text/plain');
+    download(`${this.stage.id}.${irLang(this.stage)}`, this.stage.text, 'text/plain');
   }
 
   collapseAll() {

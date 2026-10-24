@@ -73,6 +73,46 @@ test('highlighting: semantic kinds and languages', () => {
   assert.equal(pcf[pcf.length - 1][2], 'tok-com');
 });
 
+test('highlighting: the IR languages', () => {
+  const src = [
+    'module top {',
+    '    input clk: 1',
+    '    $n3 = add.s count, 26\'d1 @$binary0 // c',
+    '    q = dff d, clk: posedge clk, en: ~e, srst: r -> 2\'b0x, en_over_srst @"q[0]"',
+    '    connect led = count[25:22]',
+    '    memory rom: 128 x 32 {',
+    '    cell "a[0]$lc": SB_LUT4 {LUT_INIT: 16\'h3333} (I1: $s1, O -> $inv2)',
+    '}',
+  ].join('\n');
+  const kinds = tokenize(src, 'rtl').map(([s, e, c]) => [src.slice(s, e), c]);
+  const has = (t, c) => assert.ok(kinds.some(([a, b]) => a === t && b === c), `${t} as ${c}`);
+  const not = (t) => assert.ok(!kinds.some(([a]) => a === t), `${t} uncoloured`);
+  has('module', 'tok-kw');
+  has('input', 'tok-kw');
+  has('add.s', 'tok-fn');
+  has('dff', 'tok-fn');
+  has("26'd1", 'tok-num');
+  has("2'b0x", 'tok-num');
+  has('@$binary0', 'tok-attr');
+  has('@"q[0]"', 'tok-attr');
+  has('// c', 'tok-com');
+  has('clk', 'tok-attr');
+  has('posedge', 'tok-kw');
+  has('en_over_srst', 'tok-attr');
+  has('->', 'tok-op');
+  has('connect', 'tok-kw');
+  not('count');
+  has('x', 'tok-kw');
+  has('cell', 'tok-kw');
+  has('SB_LUT4', 'tok-type');
+  has('LUT_INIT', 'tok-attr');
+  has('I1', 'tok-attr');
+  has('O', 'tok-attr');
+  assert.equal(langOf('top.rtl'), 'rtl');
+  assert.equal(langOf('top.gates'), 'gates');
+  assert.equal(langOf('top.netlist'), 'netlist');
+});
+
 test('highlight: XDC constraints read as pin files', () => {
   assert.equal(langOf('pins.xdc'), 'pcf');
   const toks = tokenize('set_property -dict {PACKAGE_PIN E3 IOSTANDARD LVCMOS33} [get_ports {clk}] # c', 'pcf');

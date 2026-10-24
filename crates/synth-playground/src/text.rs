@@ -1,12 +1,7 @@
-//! Designs as text for the views' text mode: word-level RTL, the gate level
-//! (AIG with flip-flops and carry chains) and netlists of primitives.
-//!
-//! The notation borrows Weft's (ports, types, literals, `concat`, `if`,
-//! `match`, `inst`) to write the IR as it is, cell by cell, rather than as
-//! source: `=` for a combinational cell, `:=` for a state element written as
-//! the cell it is (`dff(d, clk: …, en: …, srst: r => 0, init: 0)`), and
-//! `->` for the outputs of instances and primitives. It is not meant to be
-//! compiled.
+//! Designs as text, in three small IR languages that share a lexical layer
+//! (specified in docs/IR_TEXT.md): word-level RTL (`.rtl`), the gate level
+//! (`.gates`) and netlists of primitives (`.netlist`). Each writes its IR as
+//! it is, cell by cell, under the IR's own names.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -16,9 +11,7 @@ use synth_logic::LogicNet;
 use synth_logic::aig::{Lit, Node};
 use synth_logic::net::Bit;
 use synth_netlist::{Const, Dir, INOUT_PORT, INPUT_PORT, Netlist, OUTPUT_PORT, Param};
-use synth_rtl::{
-    Attr, BinaryOp, CellKind, Clock, Control, Module, PortDir, Sig, SigBit, UnaryOp, WireId,
-};
+use synth_rtl::{Attr, BinaryOp, CellKind, Clock, Control, Module, PortDir, Sig, SigBit, UnaryOp};
 
 /// Above this many bytes the text is cut (at a line).
 const MAX_TEXT: usize = 1 << 20;
@@ -34,6 +27,235 @@ fn cap(mut text: String) -> String {
     text.truncate(cut);
     text.push_str("    // … the rest is cut: the text is over 1 MiB\n}\n");
     text
+}
+
+// ----- lexical layer -----
+
+/// Words that begin a statement: a name spelled like one is quoted.
+const KEYWORDS: &[&str] = &[
+    "module", "input", "output", "inout", "wire", "connect", "inst", "cell", "memory", "init",
+    "write",
+];
+
+/// A name as written: bare when it is an identifier
+/// (`[A-Za-z_$][A-Za-z0-9_$.]*`, not a keyword), quoted otherwise.
+fn name(s: &str) -> String {
+    let mut chars = s.chars();
+    let ident = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
+        && !KEYWORDS.contains(&s);
+    if ident {
+        return s.to_string();
+    }
+    let mut q = String::with_capacity(s.len() + 2);
+    q.push('"');
+    for c in s.chars() {
+        if matches!(c, '"' | '\\') {
+            q.push('\\');
+        }
+        q.push(c);
+    }
+    q.push('"');
+    q
+}
+
+/// A sized constant, least significant bit first: `W'dV` when it is fully
+/// defined and fits 64 bits, `W'hH` for wider defined values, `W'bB` (with
+/// `x` and `z`) otherwise.
+fn sized(bits: &[Logic]) -> String {
+    let w = bits.len();
+    let defined = bits.iter().all(|b| matches!(b, Logic::Zero | Logic::One));
+    if defined && w <= 64 {
+        let v = bits.iter().rev().fold(0u64, |acc, b| acc << 1 | (*b == Logic::One) as u64);
+        return format!("{w}'d{v}");
+    }
+    if defined {
+        return format!("{w}'h{}", hex(bits, false));
+    }
+    let digits: String = bits
+        .iter()
+        .rev()
+        .map(|b| match b {
+            Logic::Zero => '0',
+            Logic::One => '1',
+            Logic::Z => 'z',
+            _ => 'x',
+        })
+        .collect();
+    format!("{w}'b{digits}")
+}
+
+/// Hexadecimal digits of defined bits (least significant first): all of
+/// them with `full`, else without leading zeros.
+fn hex(bits: &[Logic], full: bool) -> String {
+    let digits: String = bits
+        .chunks(4)
+        .rev()
+        .map(|c| {
+            let d = c.iter().rev().fold(0, |a, b| a << 1 | (*b == Logic::One) as u32);
+            char::from_digit(d, 16).unwrap().to_ascii_uppercase()
+        })
+        .collect();
+    if full {
+        return digits;
+    }
+    let t = digits.trim_start_matches('0');
+    if t.is_empty() { "0".into() } else { t.into() }
+}
+
+fn logic_vec(v: &LogicVec) -> String {
+    sized(&v.bits().collect::<Vec<_>>())
+}
+
+/// A memory word: in hexadecimal with all its digits when it is defined
+/// and its width a multiple of four (memory contents read as a hex dump).
+fn word(v: &LogicVec) -> String {
+    let bits: Vec<Logic> = v.bits().collect();
+    if bits.len().is_multiple_of(4) && bits.iter().all(|b| matches!(b, Logic::Zero | Logic::One)) {
+        format!("{}'h{}", bits.len(), hex(&bits, true))
+    } else {
+        sized(&bits)
+    }
+}
+
+fn attr(a: &Attr) -> String {
+    match a {
+        Attr::Const(v) => logic_vec(v),
+        Attr::Str(s) => format!("{s:?}"),
+    }
+}
+
+/// One bit (or with `idx` None, a whole value) of a named signal, maybe
+/// complemented, or a constant bit.
+#[derive(Clone, PartialEq)]
+enum BitRef {
+    Named { base: String, idx: Option<u32>, neg: bool },
+    Const(Logic),
+}
+
+impl BitRef {
+    fn named(base: &str, idx: Option<u32>) -> BitRef {
+        BitRef::Named { base: base.to_string(), idx, neg: false }
+    }
+
+    /// The complement, when `c`.
+    fn not(mut self, c: bool) -> BitRef {
+        match &mut self {
+            BitRef::Named { neg, .. } => *neg ^= c,
+            BitRef::Const(l) if c => {
+                *l = match l {
+                    Logic::Zero => Logic::One,
+                    Logic::One => Logic::Zero,
+                    _ => *l,
+                }
+            }
+            BitRef::Const(_) => {}
+        }
+        self
+    }
+}
+
+/// Bits, most significant first: one reference, a constant, or a `{…}`
+/// concatenation in which runs of consecutive bits of one name become
+/// slices (`x[5:4]`) and runs of constant bits become one constant.
+fn bits_text(bits: &[BitRef]) -> String {
+    enum Part {
+        Slice(String, u32, u32),
+        Single(String),
+        Const(Vec<Logic>),
+    }
+    let mut parts: Vec<Part> = Vec::new();
+    for b in bits {
+        match (b, parts.last_mut()) {
+            (BitRef::Named { base, idx: Some(i), neg: false }, Some(Part::Slice(pb, _, lo)))
+                if pb == base && *lo == i + 1 =>
+            {
+                *lo = *i
+            }
+            (BitRef::Named { base, idx: Some(i), neg: false }, _) => {
+                parts.push(Part::Slice(base.clone(), *i, *i))
+            }
+            (BitRef::Named { base, idx, neg }, _) => {
+                let mut s = format!("{}{}", if *neg { "~" } else { "" }, name(base));
+                if let Some(i) = idx {
+                    let _ = write!(s, "[{i}]");
+                }
+                parts.push(Part::Single(s))
+            }
+            // Constants gather least significant last: prepend.
+            (BitRef::Const(l), Some(Part::Const(v))) => v.insert(0, *l),
+            (BitRef::Const(l), _) => parts.push(Part::Const(vec![*l])),
+        }
+    }
+    let parts: Vec<String> = parts
+        .into_iter()
+        .map(|p| match p {
+            Part::Slice(b, hi, lo) if hi == lo => format!("{}[{hi}]", name(&b)),
+            Part::Slice(b, hi, lo) => format!("{}[{hi}:{lo}]", name(&b)),
+            Part::Single(s) => s,
+            Part::Const(v) => sized(&v),
+        })
+        .collect();
+    if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        format!("{{{}}}", parts.join(", "))
+    }
+}
+
+/// `{K: v, …} ` (with its trailing space), or nothing.
+fn params_text(params: &[String]) -> String {
+    if params.is_empty() { String::new() } else { format!("{{{}}} ", params.join(", ")) }
+}
+
+/// A connection of an instance or cell pin: `P: x` for an input, `P -> x`
+/// for an output, `P <-> x` for an inout.
+fn pin(p: &str, dir: PortDir, value: &str) -> String {
+    let arrow = match dir {
+        PortDir::Input => ":",
+        PortDir::Output => " ->",
+        PortDir::Inout => " <->",
+    };
+    format!("{}{arrow} {value}", name(p))
+}
+
+fn port_dir(d: PortDir) -> &'static str {
+    match d {
+        PortDir::Input => "input",
+        PortDir::Output => "output",
+        PortDir::Inout => "inout",
+    }
+}
+
+/// The arguments of a `dff` after its data: clock, enable, resets, the
+/// enable's priority over the synchronous reset and the power-on value.
+#[allow(clippy::too_many_arguments)]
+fn dff_args(
+    clk: &str,
+    posedge: bool,
+    en: Option<String>,
+    srst: Option<(String, String)>,
+    en_over_srst: bool,
+    arst: Option<(String, String)>,
+    init: Option<String>,
+) -> String {
+    let mut a = format!(", clk: {} {clk}", if posedge { "posedge" } else { "negedge" });
+    if let Some(e) = en {
+        let _ = write!(a, ", en: {e}");
+    }
+    if let Some((r, v)) = srst {
+        let _ = write!(a, ", srst: {r} -> {v}");
+        if en_over_srst {
+            a.push_str(", en_over_srst");
+        }
+    }
+    if let Some((r, v)) = arst {
+        let _ = write!(a, ", arst: {r} -> {v}");
+    }
+    if let Some(i) = init {
+        let _ = write!(a, ", init: {i}");
+    }
+    a
 }
 
 /// Names made unique: a repeated name gets the suffix `$<index>`.
@@ -55,194 +277,45 @@ fn unique<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-/// The type of a value of `width` bits.
-fn ty(width: u32, signed: bool) -> String {
-    match (width, signed) {
-        (1, false) => "bool".into(),
-        (w, false) => format!("uint<{w}>"),
-        (w, true) => format!("sint<{w}>"),
-    }
-}
+// ----- word-level RTL (.rtl) -----
 
-fn port_dir(d: PortDir) -> &'static str {
-    match d {
-        PortDir::Input => "in",
-        PortDir::Output => "out",
-        PortDir::Inout => "inout",
-    }
-}
-
-/// `module name(ports) {`, on one line when it is short.
-fn header(name: &str, ports: &[String]) -> String {
-    let line = format!("module {name}({}) {{\n", ports.join(", "));
-    if line.len() <= 100 {
-        return line;
-    }
-    let mut s = format!("module {name}(\n");
-    for p in ports {
-        let _ = writeln!(s, "    {p},");
-    }
-    s.push_str(") {\n");
-    s
-}
-
-/// A constant, least significant bit first. Fully defined, it is a decimal
-/// number, or with `natural` (where its width is needed, as in `concat`) a
-/// hexadecimal or binary literal of the full width. Undefined bits are `?`
-/// in a binary literal, and a fully undefined value is `undef`.
-fn konst(bits: &[Logic], natural: bool) -> String {
-    if !bits.is_empty() && bits.iter().all(|b| *b == Logic::X) {
-        return "undef".into();
-    }
-    let defined = bits.iter().all(|b| matches!(b, Logic::Zero | Logic::One));
-    if defined && !natural && bits.len() <= 64 {
-        let v = bits.iter().rev().fold(0u64, |acc, b| acc << 1 | (*b == Logic::One) as u64);
-        return v.to_string();
-    }
-    if defined && bits.len().is_multiple_of(4) {
-        let digits: String = bits
-            .chunks(4)
-            .rev()
-            .map(|c| {
-                let d = c.iter().rev().fold(0, |a, b| a << 1 | (*b == Logic::One) as u32);
-                char::from_digit(d, 16).unwrap().to_ascii_uppercase()
-            })
-            .collect();
-        return format!("0x{digits}");
-    }
-    let digits: String = bits
-        .iter()
-        .rev()
-        .map(|b| match b {
-            Logic::Zero => '0',
-            Logic::One => '1',
-            Logic::Z => 'z',
-            _ => '?',
-        })
-        .collect();
-    format!("0b{digits}")
-}
-
-fn logic_vec(v: &LogicVec) -> String {
-    konst(&v.bits().collect::<Vec<_>>(), false)
-}
-
-fn attr(a: &Attr) -> String {
-    match a {
-        Attr::Const(v) => logic_vec(v),
-        Attr::Str(s) => format!("{s:?}"),
-    }
-}
-
-/// A value made of single bits, most significant first: one bit, or a
-/// `concat` in which runs of consecutive bits of one name (`x[5], x[4]`)
-/// become slices (`x[5:4]`).
-fn join_bits(parts: &[String]) -> String {
-    if parts.len() == 1 {
-        return parts[0].clone();
-    }
-    let mut runs: Vec<(String, &str, u32, u32)> = Vec::new();
-    for p in parts {
-        // A complemented bit stays on its own (`!x[3:2]` would read as one
-        // operation on a slice).
-        let indexed = p.ends_with(']') && !p.starts_with('!');
-        let (base, i) = split_index(p);
-        if let Some(last) = runs.last_mut()
-            && indexed
-            && last.1 == base
-            && last.3 == i + 1
-        {
-            last.3 = i;
-            continue;
-        }
-        runs.push((p.clone(), if indexed { base } else { "" }, i, i));
-    }
-    let parts: Vec<String> = runs
-        .into_iter()
-        .map(|(p, base, hi, lo)| if hi == lo { p } else { format!("{base}[{hi}:{lo}]") })
-        .collect();
-    if parts.len() == 1 { parts[0].clone() } else { format!("concat({})", parts.join(", ")) }
-}
-
-/// `<A: 1, B: 2>`, or nothing.
-fn generics(params: &[String]) -> String {
-    if params.is_empty() { String::new() } else { format!("<{}>", params.join(", ")) }
-}
-
-/// The arguments of a `dff(…)`: data, clock, enable, resets and power-on
-/// value. With `en_over_srst` the synchronous reset acts only when enabled,
-/// which is a reset on `en && srst`.
-#[allow(clippy::too_many_arguments)]
-fn dff_args(
-    d: String,
-    clk: String,
-    posedge: bool,
-    en: Option<String>,
-    srst: Option<(String, String)>,
-    en_over_srst: bool,
-    arst: Option<(String, String)>,
-    init: Option<String>,
-) -> String {
-    let mut a = vec![d, format!("clk: {}", if posedge { clk } else { format!("fall({clk})") })];
-    if let Some(e) = &en {
-        a.push(format!("en: {e}"));
-    }
-    if let Some((r, v)) = srst {
-        match &en {
-            Some(e) if en_over_srst => a.push(format!("srst: {e} && {r} => {v}")),
-            _ => a.push(format!("srst: {r} => {v}")),
-        }
-    }
-    if let Some((r, v)) = arst {
-        a.push(format!("arst: {r} => {v}"));
-    }
-    if let Some(i) = init {
-        a.push(format!("init: {i}"));
-    }
-    a.join(", ")
-}
-
-// ----- word-level RTL -----
-
-/// A unary cell applied to `a` (of `width` bits).
-fn unary(op: UnaryOp, a: &str, width: usize) -> String {
+fn unary_op(op: UnaryOp) -> &'static str {
     match op {
-        UnaryOp::Not => format!("~{a}"),
-        UnaryOp::Neg => format!("-{a}"),
-        UnaryOp::ReduceAnd => format!("{a}.all()"),
-        UnaryOp::ReduceOr => format!("{a}.any()"),
-        UnaryOp::ReduceXor => format!("{a}.parity()"),
-        UnaryOp::ReduceXnor => format!("!{a}.parity()"),
-        UnaryOp::LogicNot if width == 1 => format!("!{a}"),
-        UnaryOp::LogicNot => format!("!{a}.any()"),
+        UnaryOp::Not => "not",
+        UnaryOp::Neg => "neg",
+        UnaryOp::ReduceAnd => "reduce_and",
+        UnaryOp::ReduceOr => "reduce_or",
+        UnaryOp::ReduceXor => "reduce_xor",
+        UnaryOp::ReduceXnor => "reduce_xnor",
+        UnaryOp::LogicNot => "logic_not",
     }
 }
 
 fn binary_op(op: BinaryOp) -> &'static str {
     use BinaryOp::*;
     match op {
-        And => "&",
-        Or => "|",
-        Xor => "^",
-        Xnor => "~^",
-        Add => "+",
-        Sub => "-",
-        Mul => "*",
-        Div => "/",
-        Mod => "%",
-        Shl => "<<",
-        Shr => ">>",
-        Sshr => ">>>",
-        Eq => "==",
-        Ne => "!=",
-        Eqx => "===",
-        Nex => "!==",
-        Lt => "<",
-        Le => "<=",
-        Gt => ">",
-        Ge => ">=",
-        LogicAnd => "&&",
-        LogicOr => "||",
+        And => "and",
+        Or => "or",
+        Xor => "xor",
+        Xnor => "xnor",
+        Add => "add",
+        Sub => "sub",
+        Mul => "mul",
+        Div => "div",
+        Mod => "mod",
+        Shl => "shl",
+        Shr => "shr",
+        Sshr => "sshr",
+        Eq => "eq",
+        Ne => "ne",
+        Eqx => "eqx",
+        Nex => "nex",
+        Lt => "lt",
+        Le => "le",
+        Gt => "gt",
+        Ge => "ge",
+        LogicAnd => "logic_and",
+        LogicOr => "logic_or",
     }
 }
 
@@ -254,66 +327,50 @@ struct Rtl<'m> {
 }
 
 impl Rtl<'_> {
-    /// A signal: a wire or part of one, a constant, or a concatenation.
+    /// A signal: a wire, a slice of one, a constant, or a concatenation.
     fn sig(&mut self, s: &Sig) -> String {
-        enum Run {
-            Wire(WireId, u32, u32),
-            Const(Vec<Logic>),
+        if s.is_empty() {
+            return "{}".into();
         }
-        let mut runs: Vec<Run> = Vec::new();
-        for &b in s.iter() {
-            match (b, runs.last_mut()) {
-                (SigBit::Wire(w, i), Some(Run::Wire(rw, lo, n))) if *rw == w && *lo + *n == i => {
-                    *n += 1
-                }
-                (SigBit::Const(l), Some(Run::Const(v))) => v.push(l),
-                (SigBit::Wire(w, i), _) => runs.push(Run::Wire(w, i, 1)),
-                (SigBit::Const(l), _) => runs.push(Run::Const(vec![l])),
-            }
+        // A whole wire by its name alone.
+        if let SigBit::Wire(w, 0) = s.0[0]
+            && s.width() as u32 == self.m.wires[w].width
+            && s.iter().enumerate().all(|(k, b)| *b == SigBit::Wire(w, k as u32))
+        {
+            self.used[w.index()] = true;
+            return name(&self.names[w.index()]);
         }
-        let natural = runs.len() > 1;
-        let parts: Vec<String> = runs
+        let bits: Vec<BitRef> = s
             .iter()
             .rev()
-            .map(|r| match *r {
-                Run::Wire(w, lo, n) => {
+            .map(|b| match *b {
+                SigBit::Const(l) => BitRef::Const(l),
+                SigBit::Wire(w, i) => {
                     self.used[w.index()] = true;
-                    let name = &self.names[w.index()];
-                    if lo == 0 && n == self.m.wires[w].width {
-                        name.clone()
-                    } else if n == 1 {
-                        format!("{name}[{lo}]")
-                    } else {
-                        format!("{name}[{}:{lo}]", lo + n - 1)
-                    }
+                    // A one-bit wire is not indexed.
+                    let idx = (self.m.wires[w].width > 1).then_some(i);
+                    BitRef::named(&self.names[w.index()], idx)
                 }
-                Run::Const(ref v) => konst(v, natural),
             })
             .collect();
-        match parts.len() {
-            0 => "concat()".into(),
-            1 => parts.into_iter().next().unwrap(),
-            _ => format!("concat({})", parts.join(", ")),
-        }
+        bits_text(&bits)
     }
 
     fn bit(&mut self, b: SigBit) -> String {
         self.sig(&Sig::bit(b))
     }
 
-    /// A control signal as a condition: `!x` when it is active low.
+    /// A control signal: `~x` when it is active low.
     fn control(&mut self, c: Control) -> String {
-        format!("{}{}", if c.pol { "" } else { "!" }, self.bit(c.sig))
+        format!("{}{}", if c.pol { "" } else { "~" }, self.bit(c.sig))
     }
 
-    /// `clk: c`, or `clk: fall(c)` on the falling edge.
     fn clock(&mut self, c: Clock) -> String {
-        let s = self.bit(c.sig);
-        format!("clk: {}", if c.posedge { s } else { format!("fall({s})") })
+        format!("clk: {} {}", if c.posedge { "posedge" } else { "negedge" }, self.bit(c.sig))
     }
 }
 
-/// A word-level RTL module as text.
+/// A word-level RTL module in the `.rtl` language.
 pub fn rtl_text(m: &Module) -> String {
     let mut r = Rtl {
         m,
@@ -325,72 +382,50 @@ pub fn rtl_text(m: &Module) -> String {
 
     for (lhs, rhs) in &m.connections {
         let (l, rr) = (r.sig(lhs), r.sig(rhs));
-        let _ = writeln!(o, "    {l} = {rr};");
+        let _ = writeln!(o, "    connect {l} = {rr}");
     }
     if !m.connections.is_empty() {
         o.push('\n');
     }
     for c in m.live_cells() {
         let cell = &m.cells[c];
-        let name = &cell.name;
-        let mut note = String::new();
+        let label = name(&cell.name);
         let line = match &cell.kind {
             CellKind::Unary { op, a, y } => {
-                format!("{} = {};", r.sig(y), unary(*op, &r.sig(a), a.width()))
+                let a = r.sig(a);
+                format!("{} = {} {a} @{label}", r.sig(y), unary_op(*op))
             }
             CellKind::Binary { op, signed, a, b, y } => {
-                let (wa, wb) = (a.width(), b.width());
+                let s = if *signed { ".s" } else { "" };
                 let (a, b) = (r.sig(a), r.sig(b));
-                let (a, b) = match op {
-                    BinaryOp::LogicAnd | BinaryOp::LogicOr => (
-                        if wa > 1 { format!("{a}.any()") } else { a },
-                        if wb > 1 { format!("{b}.any()") } else { b },
-                    ),
-                    _ => (a, b),
-                };
-                if *signed {
-                    note = ", signed".into();
-                }
-                format!("{} = {a} {} {b};", r.sig(y), binary_op(*op))
+                format!("{} = {}{s} {a}, {b} @{label}", r.sig(y), binary_op(*op))
             }
             CellKind::Mux { a, b, s, y, .. } => {
-                format!(
-                    "{} = if {} {{ {} }} else {{ {} }};",
-                    r.sig(y),
-                    r.bit(*s),
-                    r.sig(b),
-                    r.sig(a)
-                )
+                let (s, b, a) = (r.bit(*s), r.sig(b), r.sig(a));
+                format!("{} = mux {s} ? {b} : {a} @{label}", r.sig(y))
             }
             CellKind::Pmux { default, cases, s, y } => {
-                // A one-hot select: case `i` when bit `i` of `s` is set.
-                let n = s.width();
-                let mut t = format!("{} = match {} {{\n", r.sig(y), r.sig(s));
-                for (i, case) in cases.iter().enumerate() {
-                    let pattern: String =
-                        (0..n).rev().map(|k| if k == i { '1' } else { '0' }).collect();
-                    let _ = writeln!(t, "        0b{pattern} => {},", r.sig(case));
-                }
-                let _ = write!(t, "        _ => {},\n    }};", r.sig(default));
-                t
+                let s = r.sig(s);
+                let d = r.sig(default);
+                let cases: Vec<String> = cases.iter().map(|c| r.sig(c)).collect();
+                format!(
+                    "{} = pmux {s}, default: {d}, cases: [{}] @{label}",
+                    r.sig(y),
+                    cases.join(", ")
+                )
             }
             CellKind::Shiftx { a, b, b_signed, offset, y } => {
-                let mut idx = r.sig(b);
-                match offset {
-                    0 => {}
-                    o if *o > 0 => idx = format!("{idx} + {o}"),
-                    o => idx = format!("{idx} - {}", -o),
-                }
-                if *b_signed {
-                    note = ", signed index".into();
-                }
-                format!("{} = {}[{idx} +: {}];", r.sig(y), r.sig(a), y.width())
+                let s = if *b_signed { ".s" } else { "" };
+                let (a, b) = (r.sig(a), r.sig(b));
+                let off = if *offset != 0 { format!(", offset: {offset}") } else { String::new() };
+                format!("{} = shiftx{s} {a}, {b}{off} @{label}", r.sig(y))
             }
             CellKind::Dff(d) => {
                 let defined = d.init.bits().any(|b| matches!(b, Logic::Zero | Logic::One));
+                let data = r.sig(&d.d);
+                let clk = r.bit(d.clk.sig);
                 let args = dff_args(
-                    r.sig(&d.d),
-                    r.bit(d.clk.sig),
+                    &clk,
                     d.clk.posedge,
                     d.en.map(|c| r.control(c)),
                     d.srst.as_ref().map(|(c, v)| (r.control(*c), logic_vec(v))),
@@ -398,47 +433,47 @@ pub fn rtl_text(m: &Module) -> String {
                     d.arst.as_ref().map(|(c, v)| (r.control(*c), logic_vec(v))),
                     defined.then(|| logic_vec(&d.init)),
                 );
-                format!("{} := dff({args});", r.sig(&d.q))
+                format!("{} = dff {data}{args} @{label}", r.sig(&d.q))
             }
             CellKind::Latch(l) => {
-                format!("{} = latch({}, en: {});", r.sig(&l.q), r.sig(&l.d), r.control(l.en))
+                let (d, en) = (r.sig(&l.d), r.control(l.en));
+                format!("{} = latch {d}, en: {en} @{label}", r.sig(&l.q))
             }
             CellKind::Instance(inst) => {
                 let params: Vec<String> =
-                    inst.params.iter().map(|(k, v)| format!("{k}: {}", attr(v))).collect();
-                let conns: Vec<String> = inst
-                    .conns
-                    .iter()
-                    .map(|(k, d, s)| match d {
-                        PortDir::Output => format!("{k} -> {}", r.sig(s)),
-                        _ => format!("{k}: {}", r.sig(s)),
-                    })
-                    .collect();
-                format!("inst {name} = {}{}({});", inst.module, generics(&params), conns.join(", "))
+                    inst.params.iter().map(|(k, v)| format!("{}: {}", name(k), attr(v))).collect();
+                let conns: Vec<String> =
+                    inst.conns.iter().map(|(k, d, s)| pin(k, *d, &r.sig(s))).collect();
+                format!(
+                    "inst {label}: {} {}({})",
+                    name(&inst.module),
+                    params_text(&params),
+                    conns.join(", ")
+                )
             }
         };
-        if matches!(cell.kind, CellKind::Instance(_)) {
-            let _ = writeln!(o, "    {line}");
-        } else {
-            let _ = writeln!(o, "    {line} // {name}{note}");
-        }
+        let _ = writeln!(o, "    {line}");
     }
     for (_, mem) in m.memories.iter_enumerated() {
         if !mem.alive {
             continue;
         }
-        let name = &mem.name;
-        let init = mem.init.iter().filter(|w| w.bits().any(|b| b != Logic::X)).count();
-        let mut notes = Vec::new();
-        if mem.offset != 0 {
-            notes.push(format!("addresses from {}", mem.offset));
+        let off = if mem.offset != 0 { format!(" offset {}", mem.offset) } else { String::new() };
+        let _ =
+            writeln!(o, "\n    memory {}: {} x {}{off} {{", name(&mem.name), mem.depth, mem.width);
+        // The initial contents: runs of defined words, eight to a line.
+        let defined = |w: &LogicVec| w.bits().any(|b| b != Logic::X);
+        let mut a = 0;
+        while a < mem.init.len() {
+            if !defined(&mem.init[a]) {
+                a += 1;
+                continue;
+            }
+            let n = (a..mem.init.len().min(a + 8)).take_while(|&k| defined(&mem.init[k])).count();
+            let words: Vec<String> = mem.init[a..a + n].iter().map(word).collect();
+            let _ = writeln!(o, "        init {}: {}", a as i64 + mem.offset, words.join(", "));
+            a += n;
         }
-        if init > 0 {
-            notes.push(format!("{init} words initialised"));
-        }
-        let note =
-            if notes.is_empty() { String::new() } else { format!(" // {}", notes.join(", ")) };
-        let _ = writeln!(o, "\n    mem {name}: [{}; {}];{note}", ty(mem.width, false), mem.depth);
         for wp in &mem.writes {
             let clk = r.clock(wp.clk);
             let (addr, data) = (r.sig(&wp.addr), r.sig(&wp.data));
@@ -447,46 +482,47 @@ pub fn rtl_text(m: &Module) -> String {
             } else {
                 r.sig(&wp.en)
             };
-            let _ = writeln!(o, "    {name}.write({addr}, {data}, en: {en}, {clk});");
+            let _ = writeln!(o, "        write {addr}, {data}, en: {en}, {clk}");
         }
         for rp in &mem.reads {
             let (addr, data) = (r.sig(&rp.addr), r.sig(&rp.data));
             match rp.clk {
                 Some(c) => {
-                    let clk = r.clock(c);
                     let en = if rp.en == SigBit::ONE {
                         String::new()
                     } else {
-                        format!("en: {}, ", r.bit(rp.en))
+                        format!(", en: {}", r.bit(rp.en))
                     };
-                    let _ = writeln!(o, "    {data} := {name}.read({addr}, {en}{clk});");
+                    let clk = r.clock(c);
+                    let _ = writeln!(o, "        {data} = read {addr}{en}, {clk}");
                 }
                 None => {
-                    let _ = writeln!(o, "    {data} = {name}[{addr}];");
+                    let _ = writeln!(o, "        {data} = read {addr}");
                 }
             }
         }
+        o.push_str("    }\n");
     }
 
-    let ports: Vec<String> = m
-        .ports()
-        .iter()
-        .map(|&w| {
-            let wire = &m.wires[w];
-            let dir = port_dir(wire.port.unwrap().0);
-            format!("{dir} {}: {}", r.names[w.index()], ty(wire.width, wire.signed))
-        })
-        .collect();
-    let mut out = header(&m.name, &ports);
-    let mut any = false;
+    let mut out = format!("module {} {{\n", name(&m.name));
+    for w in m.ports() {
+        let wire = &m.wires[w];
+        let signed = if wire.signed { " signed" } else { "" };
+        let dir = port_dir(wire.port.unwrap().0);
+        let _ = writeln!(out, "    {dir} {}: {}{signed}", name(&r.names[w.index()]), wire.width);
+    }
+    let mut first = true;
     for (w, wire) in m.wires.iter_enumerated() {
         if r.used[w.index()] && wire.port.is_none() {
-            let t = ty(wire.width, wire.signed);
-            let _ = writeln!(out, "    wire {}: {t};", r.names[w.index()]);
-            any = true;
+            if first {
+                out.push('\n');
+                first = false;
+            }
+            let signed = if wire.signed { " signed" } else { "" };
+            let _ = writeln!(out, "    wire {}: {}{signed}", name(&r.names[w.index()]), wire.width);
         }
     }
-    if any && !body.is_empty() {
+    if !body.is_empty() {
         out.push('\n');
     }
     out.push_str(&body);
@@ -494,86 +530,64 @@ pub fn rtl_text(m: &Module) -> String {
     cap(out)
 }
 
-// ----- gate level -----
+// ----- gate level (.gates) -----
 
-/// A logic network (AIG, flip-flops, carry chains, instances) as text. AND
-/// gates are `$g<node>`; the values the graph takes in are named after
-/// what makes them (ports, flip-flops, carry chains, instances).
+/// A logic network (AIG, flip-flops, carry chains, instances) in the
+/// `.gates` language.
 pub fn aig_text(net: &LogicNet) -> String {
     let aig = &net.aig;
-    let mut src = vec![String::new(); aig.inputs.len()];
-    let bit_name = |name: &str, bits: &[Bit], i: usize| {
-        if bits.len() == 1 { name.to_string() } else { format!("{name}[{i}]") }
-    };
+    // What each input of the graph is: a port bit, a flip-flop, a carry
+    // chain's sum or carry out, an instance's output bit.
+    let mut src: Vec<BitRef> = vec![BitRef::Const(Logic::X); aig.inputs.len()];
+    let idx = |bits: usize, i: usize| (bits > 1).then_some(i as u32);
+    let mut pad: HashMap<u32, BitRef> = HashMap::new();
     for p in &net.ports {
         for (i, b) in p.bits.iter().enumerate() {
-            if let Bit::Src(s) = b {
-                src[*s as usize] = bit_name(&p.name, &p.bits, i);
+            match b {
+                Bit::Src(s) => src[*s as usize] = BitRef::named(&p.name, idx(p.bits.len(), i)),
+                Bit::Pad(k) => {
+                    pad.insert(*k, BitRef::named(&p.name, idx(p.bits.len(), i)));
+                }
+                Bit::Snk(_) => {}
             }
         }
     }
-    // A word's flip-flops share its name: number its bits.
-    let mut bits_of: HashMap<&str, usize> = HashMap::new();
-    for ff in &net.ffs {
-        *bits_of.entry(&ff.name).or_default() += 1;
-    }
-    let mut next: HashMap<&str, usize> = HashMap::new();
-    let ff_names: Vec<String> = net
-        .ffs
-        .iter()
-        .map(|ff| {
-            if bits_of[ff.name.as_str()] == 1 {
-                return ff.name.clone();
-            }
-            let i = next.entry(&ff.name).or_default();
-            *i += 1;
-            format!("{}[{}]", ff.name, *i - 1)
-        })
-        .collect();
-    for (ff, name) in net.ffs.iter().zip(&ff_names) {
-        src[ff.q as usize] = name.clone();
+    // Flip-flops: one bit each, named after the cell they come from and
+    // their place in the network.
+    let ff_names: Vec<String> =
+        net.ffs.iter().enumerate().map(|(i, ff)| format!("{}$ff{i}", ff.name)).collect();
+    for (ff, n) in net.ffs.iter().zip(&ff_names) {
+        src[ff.q as usize] = BitRef::named(n, None);
     }
     for (ci, c) in net.carries.iter().enumerate() {
         for (i, s) in c.sum.iter().enumerate() {
-            src[*s as usize] = format!("carry{ci}.s[{i}]");
+            src[*s as usize] = BitRef::named(&format!("carry{ci}.s"), Some(i as u32));
         }
         if let Some(co) = c.cout {
-            src[co as usize] = format!("carry{ci}.cout");
+            src[co as usize] = BitRef::named(&format!("carry{ci}.cout"), None);
         }
     }
     for inst in &net.instances {
-        for (name, _, bits) in &inst.conns {
+        for (p, _, bits) in &inst.conns {
             for (i, b) in bits.iter().enumerate() {
                 if let Bit::Src(s) = b {
-                    src[*s as usize] = format!("{}.{}", inst.name, bit_name(name, bits, i));
+                    src[*s as usize] =
+                        BitRef::named(&format!("{}.{p}", inst.name), idx(bits.len(), i));
                 }
             }
         }
     }
-    let lit = |l: Lit| -> String {
-        let neg = if l.is_compl() { "!" } else { "" };
+    let lit = |l: Lit| -> BitRef {
         match aig.nodes[l.node() as usize] {
-            Node::Const => if l.is_compl() { "1" } else { "0" }.into(),
-            Node::Input(i) => format!("{neg}{}", src[i as usize]),
-            Node::And(..) => format!("{neg}$g{}", l.node()),
+            Node::Const => BitRef::Const(Logic::Zero),
+            Node::Input(i) => src[i as usize].clone(),
+            Node::And(..) => BitRef::named(&format!("$g{}", l.node()), None),
         }
+        .not(l.is_compl())
     };
-    let sink = |k: usize| lit(aig.outputs[k]);
-    let sinks = |ks: &[usize]| -> String {
-        if ks.len() == 1 {
-            return sink(ks[0]);
-        }
-        let consts: Option<Vec<Logic>> = ks
-            .iter()
-            .map(|&k| {
-                let l = aig.outputs[k];
-                l.is_const().then_some(if l.is_compl() { Logic::One } else { Logic::Zero })
-            })
-            .collect();
-        if let Some(c) = consts {
-            return konst(&c, false);
-        }
-        join_bits(&ks.iter().rev().map(|&k| sink(k)).collect::<Vec<_>>())
+    let sink = |k: usize| bits_text(&[lit(aig.outputs[k])]);
+    let sinks = |ks: &[usize]| {
+        bits_text(&ks.iter().rev().map(|&k| lit(aig.outputs[k])).collect::<Vec<_>>())
     };
 
     // The AND gates that feed a sink, in topological order.
@@ -590,66 +604,60 @@ pub fn aig_text(net: &LogicNet) -> String {
     }
     let ands = live.iter().filter(|x| **x).count();
 
-    let ports: Vec<String> = net
-        .ports
-        .iter()
-        .map(|p| format!("{} {}: {}", port_dir(p.dir), p.name, ty(p.bits.len() as u32, false)))
-        .collect();
-    let mut o = header(&net.name, &ports);
+    let mut o = format!("module {} {{\n", name(&net.name));
+    for p in &net.ports {
+        let _ = writeln!(o, "    {} {}: {}", port_dir(p.dir), name(&p.name), p.bits.len());
+    }
     let _ = writeln!(
         o,
-        "    // {ands} AND gates, {} flip-flops, {} carry chains, {} instances",
+        "\n    // {ands} AND gates, {} flip-flops, {} carry chains, {} instances",
         net.ffs.len(),
         net.carries.len(),
         net.instances.len()
     );
-    if ands > 0 {
-        o.push('\n');
-    }
     for (i, n) in aig.nodes.iter().enumerate() {
         if let Node::And(a, b) = *n
             && live[i]
         {
-            let _ = writeln!(o, "    $g{i} = {} & {};", lit(a), lit(b));
+            let (a, b) = (bits_text(&[lit(a)]), bits_text(&[lit(b)]));
+            let _ = writeln!(o, "    $g{i} = and {a}, {b}");
         }
         if o.len() > MAX_TEXT {
             break;
         }
     }
-    let outs: Vec<_> = net
-        .ports
-        .iter()
-        .flat_map(|p| p.bits.iter().enumerate().map(move |(i, b)| (p, i, b)))
-        .filter_map(|(p, i, b)| match b {
-            Bit::Snk(k) => Some((bit_name(&p.name, &p.bits, i), *k)),
-            _ => None,
-        })
-        .collect();
+    let mut outs = String::new();
+    for p in &net.ports {
+        for (i, b) in p.bits.iter().enumerate() {
+            if let Bit::Snk(k) = b {
+                let port = bits_text(&[BitRef::named(&p.name, idx(p.bits.len(), i))]);
+                let _ = writeln!(outs, "    connect {port} = {}", sink(*k));
+            }
+        }
+    }
     if !outs.is_empty() {
         o.push('\n');
-    }
-    for (name, k) in outs {
-        let _ = writeln!(o, "    {name} = {};", sink(k));
+        o.push_str(&outs);
     }
     if !net.ffs.is_empty() {
         o.push('\n');
     }
-    for (ff, q) in net.ffs.iter().zip(&ff_names) {
+    let bit = |v: bool| sized(&[if v { Logic::One } else { Logic::Zero }]);
+    for (ff, n) in net.ffs.iter().zip(&ff_names) {
         let init = match ff.init {
-            Logic::Zero | Logic::One => Some(ff.init.to_char().to_string()),
+            Logic::Zero | Logic::One => Some(sized(&[ff.init])),
             _ => None,
         };
         let args = dff_args(
-            sink(ff.d),
-            sink(ff.clk),
+            &sink(ff.clk),
             ff.posedge,
             ff.en.map(sink),
-            ff.srst.map(|(k, v)| (sink(k), (v as u8).to_string())),
+            ff.srst.map(|(k, v)| (sink(k), bit(v))),
             ff.en_over_srst,
-            ff.arst.map(|(k, v)| (sink(k), (v as u8).to_string())),
+            ff.arst.map(|(k, v)| (sink(k), bit(v))),
             init,
         );
-        let _ = writeln!(o, "    {q} := dff({args});");
+        let _ = writeln!(o, "    {} = dff {}{args}", name(n), sink(ff.d));
         if o.len() > MAX_TEXT {
             break;
         }
@@ -658,50 +666,37 @@ pub fn aig_text(net: &LogicNet) -> String {
         o.push('\n');
     }
     for (ci, c) in net.carries.iter().enumerate() {
-        let w = c.sum.len();
-        let cout = if c.cout.is_some() { format!(", carry{ci}.cout") } else { String::new() };
-        let _ = writeln!(
-            o,
-            "    carry{ci} = carry(a: {}, b: {}, cin: {}); // carry{ci}.s[{}:0]{cout}",
-            sinks(&c.a),
-            sinks(&c.b),
-            sink(c.cin),
-            w.saturating_sub(1),
-        );
+        let (a, b, cin) = (sinks(&c.a), sinks(&c.b), sink(c.cin));
+        let _ = writeln!(o, "    carry{ci} = carry {a}, {b}, cin: {cin}");
     }
     if !net.instances.is_empty() {
         o.push('\n');
     }
     for inst in &net.instances {
         let params: Vec<String> =
-            inst.params.iter().map(|(k, v)| format!("{k}: {}", attr(v))).collect();
+            inst.params.iter().map(|(k, v)| format!("{}: {}", name(k), attr(v))).collect();
         let conns: Vec<String> = inst
             .conns
             .iter()
-            .map(|(name, dir, bits)| {
-                let parts: Vec<String> = bits
+            .map(|(p, dir, bits)| {
+                let refs: Vec<BitRef> = bits
                     .iter()
-                    .enumerate()
                     .rev()
-                    .map(|(i, b)| match b {
+                    .map(|b| match b {
                         Bit::Src(s) => src[*s as usize].clone(),
-                        Bit::Snk(k) => sink(*k),
-                        Bit::Pad(_) => format!("{}.{}", inst.name, bit_name(name, bits, i)),
+                        Bit::Snk(k) => lit(aig.outputs[*k]),
+                        Bit::Pad(k) => pad.get(k).cloned().unwrap_or(BitRef::Const(Logic::Z)),
                     })
                     .collect();
-                let e = join_bits(&parts);
-                match dir {
-                    PortDir::Output => format!("{name} -> {e}"),
-                    _ => format!("{name}: {e}"),
-                }
+                pin(p, *dir, &bits_text(&refs))
             })
             .collect();
         let _ = writeln!(
             o,
-            "    inst {} = {}{}({});",
-            inst.name,
-            inst.module,
-            generics(&params),
+            "    inst {}: {} {}({})",
+            name(&inst.name),
+            name(&inst.module),
+            params_text(&params),
             conns.join(", ")
         );
     }
@@ -709,11 +704,12 @@ pub fn aig_text(net: &LogicNet) -> String {
     cap(o)
 }
 
-// ----- netlists of primitives -----
+// ----- netlists of primitives (.netlist) -----
 
-/// A parameter: bit vectors as hexadecimal or binary literals (long ones,
-/// memory contents, without their leading zeros), `LUT_INIT` in hexadecimal.
-fn param(p: &Param, name: &str) -> String {
+/// A parameter: bit vectors as sized hexadecimal constants (all their
+/// digits up to 64 bits, without leading zeros beyond), or binary ones when
+/// their width is not a multiple of four; integers and strings as they are.
+fn param(p: &Param, key: &str) -> String {
     match p {
         Param::Bits(bits) => {
             let v: Vec<Logic> = bits
@@ -725,72 +721,69 @@ fn param(p: &Param, name: &str) -> String {
                     _ => Logic::X,
                 })
                 .collect();
-            let s = konst(&v, true);
-            match s.strip_prefix("0x") {
-                Some(digits) if v.len() > 16 => {
-                    let d = digits.trim_start_matches('0');
-                    format!("0x{}", if d.is_empty() { "0" } else { d })
-                }
-                _ => s,
+            let defined = v.iter().all(|b| matches!(b, Logic::Zero | Logic::One));
+            if defined && v.len().is_multiple_of(4) {
+                format!("{}'h{}", v.len(), hex(&v, v.len() <= 64))
+            } else if defined && v.len() <= 64 {
+                let digits: String =
+                    v.iter().rev().map(|b| if *b == Logic::One { '1' } else { '0' }).collect();
+                format!("{}'b{digits}", v.len())
+            } else {
+                sized(&v)
             }
         }
-        Param::Int(v) if name == "LUT_INIT" => format!("0x{v:04X}"),
+        Param::Int(v) if key == "LUT_INIT" => format!("16'h{v:04X}"),
         Param::Int(v) => v.to_string(),
         Param::Str(s) => format!("{s:?}"),
     }
 }
 
-/// `base[i]` as (`base`, `i`); other names as (`name`, 0).
-fn split_index(name: &str) -> (&str, u32) {
-    if let Some((b, r)) = name.split_once('[')
+/// `base[i]` as (`base`, Some(i)); other names as (`name`, None).
+fn split_index(s: &str) -> (&str, Option<u32>) {
+    if let Some((b, r)) = s.split_once('[')
         && let Some(i) = r.strip_suffix(']').and_then(|i| i.parse().ok())
     {
-        return (b, i);
+        return (b, Some(i));
     }
-    (name, 0)
+    (s, None)
 }
 
-/// A netlist of primitives (mapped or packed) as text: one `inst` per cell,
-/// its inputs as `PIN: net` and its outputs as `PIN -> net`.
+/// A netlist of primitives (mapped or packed) in the `.netlist` language.
 pub fn netlist_text(nl: &Netlist) -> String {
     let net_names = unique(nl.nets.iter().map(|n| nl.str(n.name)));
     let net = |n: synth_netlist::NetId| -> String {
         match nl.nets[n].constant {
-            Some(Const::Zero) => "0".into(),
-            Some(Const::One) => "1".into(),
-            Some(Const::Undef) => "undef".into(),
-            None => net_names[n.index()].clone(),
+            Some(Const::Zero) => "1'd0".into(),
+            Some(Const::One) => "1'd1".into(),
+            Some(Const::Undef) => "1'bx".into(),
+            None => name(&net_names[n.index()]),
         }
     };
     let top = nl.top.map_or("top", |t| nl.str(t));
-    // Ports: (direction, base name) -> highest bit.
-    let mut ports: Vec<(&str, &str, u32)> = Vec::new();
-    let mut assigns = String::new();
+    // Ports by their base name: direction, highest bit, split into bits.
+    let mut ports: Vec<(&str, &str, u32, bool)> = Vec::new();
+    let mut connects: Vec<(&str, &str, Option<u32>, String)> = Vec::new();
     let mut cells = String::new();
     let mut count = 0;
     for c in nl.live_cells() {
         let cell = &nl.cells[c];
         let kind = nl.cell_kind(c);
-        let name = nl.str(cell.name);
+        let cname = nl.str(cell.name);
         if matches!(kind, INPUT_PORT | OUTPUT_PORT | INOUT_PORT) {
             let dir = match kind {
-                INPUT_PORT => "in",
-                OUTPUT_PORT => "out",
+                INPUT_PORT => "input",
+                OUTPUT_PORT => "output",
                 _ => "inout",
             };
-            let (base, i) = split_index(name);
-            match ports.iter_mut().find(|p| p.0 == dir && p.1 == base) {
-                Some(p) => p.2 = p.2.max(i),
-                None => ports.push((dir, base, i)),
+            let (base, i) = split_index(cname);
+            match ports.iter_mut().find(|p| p.1 == base) {
+                Some(p) => p.2 = p.2.max(i.unwrap_or(0)),
+                None => ports.push((dir, base, i.unwrap_or(0), i.is_some())),
             }
-            if let Some(n) = cell.pins.first().and_then(|p| p.net) {
-                let n = net(n);
-                if n != name {
-                    let _ = match kind {
-                        INPUT_PORT => writeln!(assigns, "    {n} = {name};"),
-                        _ => writeln!(assigns, "    {name} = {n};"),
-                    };
-                }
+            if let Some(n) = cell.pins.first().and_then(|p| p.net)
+                && net_names[n.index()] != cname
+            {
+                connects.push((kind, base, i, net(n)));
             }
             continue;
         }
@@ -803,10 +796,10 @@ pub fn netlist_text(nl: &Netlist) -> String {
             .iter()
             .map(|(k, v)| {
                 let k = nl.str(*k);
-                format!("{k}: {}", param(v, k))
+                format!("{}: {}", name(k), param(v, k))
             })
             .collect();
-        // Pins `P[i]` grouped into vectors, in the order of their first bit.
+        // Pins `P[i]` grouped into buses, in the order of their first bit.
         let mut order: Vec<&str> = Vec::new();
         let mut buses: HashMap<&str, (Dir, BTreeMap<u32, String>)> = HashMap::new();
         for p in &cell.pins {
@@ -819,36 +812,55 @@ pub fn netlist_text(nl: &Netlist) -> String {
                     (p.dir, BTreeMap::new())
                 })
                 .1
-                .insert(i, net(n));
+                .insert(i.unwrap_or(0), net(n));
         }
         let pins: Vec<String> = order
             .iter()
             .map(|base| {
                 let (dir, bits) = &buses[base];
                 let top = bits.keys().max().copied().unwrap_or(0);
-                let parts: Vec<String> = (0..=top)
-                    .rev()
-                    .map(|i| bits.get(&i).cloned().unwrap_or_else(|| "_".into()))
-                    .collect();
-                let e = join_bits(&parts);
-                match dir {
-                    Dir::Input => format!("{base}: {e}"),
-                    _ => format!("{base} -> {e}"),
-                }
+                let value = if top == 0 {
+                    bits[&0].clone()
+                } else {
+                    let parts: Vec<&str> =
+                        (0..=top).rev().map(|i| bits.get(&i).map_or("_", |n| n.as_str())).collect();
+                    format!("{{{}}}", parts.join(", "))
+                };
+                let dir = match dir {
+                    Dir::Input => PortDir::Input,
+                    Dir::Output => PortDir::Output,
+                    Dir::Inout => PortDir::Inout,
+                };
+                pin(base, dir, &value)
             })
             .collect();
-        let _ =
-            writeln!(cells, "    inst {name} = {kind}{}({});", generics(&params), pins.join(", "));
+        let _ = writeln!(
+            cells,
+            "    cell {}: {} {}({})",
+            name(cname),
+            name(kind),
+            params_text(&params),
+            pins.join(", ")
+        );
     }
-    let ports: Vec<String> = ports
-        .iter()
-        .map(|(dir, base, top)| format!("{dir} {base}: {}", ty(top + 1, false)))
-        .collect();
-    let mut o = header(top, &ports);
-    let _ = writeln!(o, "    // {count} cells");
-    if !assigns.is_empty() {
+    let mut o = format!("module {} {{\n", name(top));
+    for (dir, base, top, _) in &ports {
+        let _ = writeln!(o, "    {dir} {}: {}", name(base), top + 1);
+    }
+    if !ports.is_empty() {
         o.push('\n');
-        o.push_str(&assigns);
+    }
+    let _ = writeln!(o, "    // {count} cells");
+    if !connects.is_empty() {
+        o.push('\n');
+    }
+    for (kind, base, i, n) in connects {
+        let split = ports.iter().find(|p| p.1 == base).is_some_and(|p| p.3);
+        let port = bits_text(&[BitRef::named(base, if split { i } else { None })]);
+        let _ = match kind {
+            INPUT_PORT => writeln!(o, "    connect {n} = {port}"),
+            _ => writeln!(o, "    connect {port} = {n}"),
+        };
     }
     if !cells.is_empty() {
         o.push('\n');
@@ -877,23 +889,33 @@ mod tests {
     }
 
     #[test]
-    fn bit_runs() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(join_bits(&s(&["a[3]", "a[2]", "a[1]"])), "a[3:1]");
-        assert_eq!(
-            join_bits(&s(&["a[3]", "!a[2]", "!a[1]", "b", "a[0]"])),
-            "concat(a[3], !a[2], !a[1], b, a[0])"
-        );
-        assert_eq!(join_bits(&s(&["x"])), "x");
+    fn names() {
+        assert_eq!(name("uart.$n20"), "uart.$n20");
+        assert_eq!(name("count[0]$lc"), "\"count[0]$lc\"");
+        assert_eq!(name("wire"), "\"wire\"");
+        assert_eq!(name("a\"b"), "\"a\\\"b\"");
     }
 
     #[test]
     fn constants() {
         use Logic::{One as I, X, Zero as O};
-        assert_eq!(konst(&[I, O, I], false), "5");
-        assert_eq!(konst(&[I, O, I], true), "0b101");
-        assert_eq!(konst(&[I, O, I, O, O, O, O, I], true), "0x85");
-        assert_eq!(konst(&[X, I], false), "0b1?");
-        assert_eq!(konst(&[X, X], false), "undef");
+        assert_eq!(sized(&[I, O, I]), "3'd5");
+        assert_eq!(sized(&[X, I]), "2'b1x");
+        let wide: Vec<Logic> = (0..72).map(|i| if i == 4 { I } else { O }).collect();
+        assert_eq!(sized(&wide), "72'h10");
+    }
+
+    #[test]
+    fn bit_runs() {
+        let n = |b: &str, i: u32| BitRef::named(b, Some(i));
+        assert_eq!(bits_text(&[n("a", 3), n("a", 2), n("a", 1)]), "a[3:1]");
+        assert_eq!(
+            bits_text(&[n("a", 3), n("a", 2).not(true), BitRef::named("b", None), n("a", 0)]),
+            "{a[3], ~a[2], b, a[0]}"
+        );
+        assert_eq!(
+            bits_text(&[BitRef::Const(Logic::One), BitRef::Const(Logic::Zero), n("x[0]", 1)]),
+            "{2'd2, \"x[0]\"[1]}"
+        );
     }
 }
