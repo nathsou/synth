@@ -10,6 +10,7 @@ import { settings, openSettings, toggle } from './settings.js';
 import { requestFtdi, supported as usbSupported } from './ftdi.js';
 import { programBoard } from './program.js';
 import { SimView } from './simview.js';
+import { ReferenceView, SECTIONS as REF_SECTIONS, ENTRIES as REF_ENTRIES, entryFor } from './reference.js';
 import { layout as progressLayout, describe as describeProgress, learn as learnProgress } from './progress.js';
 import { h, icon, store, debounce, toast, packState, unpackState, download, fromBase64, isPins, fmtNum } from './util.js';
 
@@ -46,7 +47,7 @@ class App {
     this.examples = [];
     this.devices = [];
     this.view = 'pipeline';
-    // The step of the rail that is open, and Flow or Simulate.
+    // The step of the rail that is open, and Flow, Simulate or Reference.
     this.step = 'summary';
     this.mode = 'flow';
     this.docState = new Map();
@@ -70,12 +71,15 @@ class App {
       onRun: () => this.run(),
       onFormat: () => this.format(),
       onNavigate: (file, s, e) => this.revealIndex(file, s, e),
+      reference: (name) => entryFor(name),
+      onReference: (name) => this.openReference(entryFor(name)),
     });
     this.editor.allRefs = () => this.allRefs();
     this.schematic = new Schematic($('schematic'), this);
     this.chip = new ChipView($('chip'), this);
     this.bits = new BitstreamView($('bitstream'), this);
     this.sim = new SimView($('simulation'), this);
+    this.reference = new ReferenceView($('reference'), this);
     this.setupChrome();
     this.project = (await this.fromHash()) || store.get('project', null) || this.exampleProject(this.examples[0]);
     this.backendMode = mode;
@@ -850,7 +854,7 @@ class App {
   openView(name) {
     this.view = name;
     for (const p of document.querySelectorAll('[data-view-pane]')) p.hidden = p.dataset.viewPane !== name;
-    const mode = name === 'simulation' ? 'simulate' : 'flow';
+    const mode = name === 'simulation' ? 'simulate' : name === 'reference' ? 'reference' : 'flow';
     if (mode !== this.mode) {
       this.mode = mode;
       this.renderRail();
@@ -888,11 +892,18 @@ class App {
 
   setMode(mode) {
     if (mode === 'simulate') this.openView('simulation');
+    else if (mode === 'reference') this.openView('reference');
     else this.openStep(this.step || 'summary');
   }
 
-  /** The rail: Flow or Simulate, then the steps of the flow with their
-   *  headline numbers. */
+  /** Opens the reference, at a section or entry if given. */
+  openReference(id) {
+    this.openView('reference');
+    if (id) requestAnimationFrame(() => this.reference.show(id));
+  }
+
+  /** The rail: Flow, Simulate or Reference, then the steps of the flow
+   *  with their headline numbers (or the sections of the reference). */
   renderRail() {
     for (const b of $('mode').querySelectorAll('button')) {
       b.classList.toggle('on', b.dataset.mode === this.mode);
@@ -901,6 +912,16 @@ class App {
     const host = $('rail-steps');
     if (this.mode === 'simulate') {
       host.replaceChildren(h('span', { class: 'muted', style: { fontSize: '12px' } }, 'The design running on a virtual board: its clock, LEDs, buttons and serial port.'));
+      return;
+    }
+    if (this.mode === 'reference') {
+      host.replaceChildren(h('div', { class: 'rail-group' }, h('span', { class: 'h4' }, 'Weft'),
+        h('div', {}, REF_SECTIONS.flatMap((sec, i) => {
+          const btn = h('button', { class: 'step', 'data-ref': sec.id, onclick: () => this.reference.show(sec.id) },
+            h('span', { class: 'l' }, sec.title), h('span', { class: 'm' }, sec.blurb));
+          return i ? [h('span', { class: 'rail-sep', 'aria-hidden': 'true' }), btn] : [btn];
+        }))));
+      this.markReference();
       return;
     }
     const { run, stale } = this.shownRun();
@@ -925,8 +946,18 @@ class App {
     this.markRail();
   }
 
+  /** Marks the section of the reference in view. */
+  markReference() {
+    if (this.mode !== 'reference') return;
+    for (const b of $('rail-steps').querySelectorAll('.step[data-ref]')) {
+      const on = b.dataset.ref === this.reference.current;
+      b.classList.toggle('on', on);
+      if (on) b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
   markRail() {
-    for (const b of $('rail-steps').querySelectorAll('.step')) {
+    for (const b of $('rail-steps').querySelectorAll('.step[data-step]')) {
       const on = b.dataset.step === this.step && this.mode === 'flow';
       b.classList.toggle('on', on);
       if (on) {
@@ -944,6 +975,7 @@ class App {
     const actions = [
       ['Run the flow', 'play', `${MOD} ↵`, () => this.run()],
       ['Simulate the design', 'wave', null, () => this.setMode('simulate')],
+      ['Open the Weft reference', 'book', null, () => this.openReference()],
       ['Format the file', 'format', 'Shift Alt F', () => this.format()],
       [settings.get('layout') === 'hidden' ? 'Show the editor' : 'Hide the editor', 'panel', `${MOD} B`, () => this.toggleEditor()],
       ['Show problems', 'warning', null, () => this.showProblems()],
@@ -968,13 +1000,14 @@ class App {
       }));
     };
     openList({
-      placeholder: 'Jump to a step, file, cell, example or action',
+      placeholder: 'Jump to a step, file, cell, example, action or the reference',
       items: (q) => {
         const out = [
           ...steps.map((x) => ({ group: 'Steps', ico: x.view === 'schematic' ? 'graph' : x.view === 'chip' ? 'chip' : x.view === 'timing' ? 'clock' : x.view === 'bitstream' ? 'bits' : 'flow', title: x.label, detail: x.metric, keywords: stageInfo(x.id)[1], run: () => this.openStep(x.id) })),
           ...this.project.files.map((f) => ({ group: 'Files', ico: 'file', title: f.name, run: () => { if (settings.get('layout') === 'hidden') this.toggleEditor(); this.openFile(f.name); } })),
           ...actions.map(([title, ico, kbd, run]) => ({ group: 'Actions', ico, title, kbd, run })),
           ...this.examples.map((e) => ({ group: 'Examples', ico: 'chip', title: e.title, detail: e.description, run: () => this.loadExample(e) })),
+          ...REF_ENTRIES.map((x) => ({ group: 'Reference', ico: 'book', title: x.title, detail: x.title === x.section ? x.blurb : x.section, run: () => this.openReference(x.id) })),
         ].filter((it) => matches(it, q));
         if (q.length >= 2) out.push(...cells().filter((it) => it.title.toLowerCase().includes(q)).slice(0, 30));
         return out;
@@ -988,6 +1021,7 @@ class App {
       if (this.view === 'chip') this.chip.visible();
       if (this.view === 'bitstream') this.bits.visible();
       if (this.view === 'simulation') this.sim.visible();
+      if (this.view === 'reference') this.reference.visible();
     });
   }
 

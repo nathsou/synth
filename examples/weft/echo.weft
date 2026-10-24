@@ -5,7 +5,13 @@
 
 /// CLK_HZ: the clock frequency (25 MHz on the Go Board); CLKS_PER_BIT: for
 /// 115200 baud.
-module top<CLK_HZ: int = 25_000_000, CLKS_PER_BIT: int = CLK_HZ / 115200>(in clk: clock, in rx: bool, in sw1: bool, out tx: bool, out led: uint<4>) {
+module top<CLK_HZ: int = 25_000_000, CLKS_PER_BIT: int = CLK_HZ / 115200>(
+    in  clk: clock,
+    in  rx: bool,
+    in  sw1: bool,
+    out tx: bool,
+    out led: uint<4>,
+) {
     let rst = reset_sync(sw1) @clk;
     default domain sys { clock: clk, async_reset: rst }
 

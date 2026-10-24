@@ -112,3 +112,44 @@ module top(in a: uint<4>, in b: uint<4>, out y: uint<bits_for(N)>, out z: uint<8
         assert!(r.decl.is_none());
     }
 }
+
+#[test]
+fn builtins_and_std_have_hover_text_everywhere() {
+    // `uart` is never instantiated, so it is never elaborated: its calls are
+    // still indexed.
+    let src = "\
+/// Sends `x`.
+module uart<CLKS: int>(in x: uint<8>, out y: bool) {
+    assert(CLKS >= 2, \"too fast\");
+    let s = sync(x[0]);
+    let r = rising(x[3]);
+    y = s && concat(x[1], x[2]) == 0b11 && r;
+}
+
+module top<A: int = 3, B: int = min(A, 4)>(in a: bool, out y: bool) {
+    assert(B == 3, \"B\");
+    let r = rising(a);
+    y = r;
+}
+";
+    let mut sm = SourceMap::new();
+    let f = sm.add("t.weft", src);
+    let a = synth_weft::analyze(&mut sm, &[f], &[], None, &Default::default());
+    assert!(!a.diags.has_errors(), "{}", a.diags.render(&sm));
+    let at = |pos: u32| {
+        a.refs.iter().find(|r| r.span.file == f && r.span.start <= pos && pos < r.span.end)
+    };
+    for (needle, nth, want) in [
+        ("assert", 0, "Fails the compilation"),
+        ("assert", 1, "Fails the compilation"),
+        ("sync", 0, "Two-flip-flop synchronizer"),
+        ("concat", 0, "fn concat(a, b, …)"),
+        ("rising", 0, "One-cycle pulse when `x` goes from low to high."),
+        ("rising", 1, "One-cycle pulse when `x` goes from low to high."),
+        ("min", 0, "fn min(a: int, b: int) -> int"),
+        ("uart", 0, "Sends `x`."),
+    ] {
+        let r = at(find(src, needle, nth)).unwrap_or_else(|| panic!("no reference for {needle}"));
+        assert!(r.hover.contains(want), "{needle}: {}", r.hover);
+    }
+}

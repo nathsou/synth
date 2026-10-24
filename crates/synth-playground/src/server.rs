@@ -30,6 +30,7 @@ pub const ASSETS: &[(&str, &[u8])] = &[
     ("ftdi.js", include_bytes!("../web/ftdi.js")),
     ("program.js", include_bytes!("../web/program.js")),
     ("menus.js", include_bytes!("../web/menus.js")),
+    ("reference.js", include_bytes!("../web/reference.js")),
     ("favicon.svg", include_bytes!("../web/favicon.svg")),
 ];
 

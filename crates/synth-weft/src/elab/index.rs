@@ -109,6 +109,11 @@ pub(crate) fn builtin_hover(name: &str) -> Option<String> {
         ),
         "min" => ("fn min(a: int, b: int) -> int", "The smaller of two compile-time integers."),
         "max" => ("fn max(a: int, b: int) -> int", "The larger of two compile-time integers."),
+        "assert" => (
+            "assert(cond: bool, message: string);",
+            "Fails the compilation with `message` unless the compile-time condition holds. \
+             A statement, in a module or function body or at the top level.",
+        ),
         _ => return None,
     };
     Some(format!("{}\n\n{doc}\n\nbuiltin", code(sig)))
@@ -331,7 +336,7 @@ impl<'a> Design<'a> {
         let f = m.name.span.file;
         let kw = if m.body.is_none() { "extern module" } else { "module" };
         let Some(first) = m.ports.first() else {
-            return code(&format!("{kw} {}()", m.name.name));
+            return code(&format!("{kw} {}()", m.name.name)) + &self.doc(m.span);
         };
         let head = self.src(f, m.name.span.start, first.span.start);
         let ports: Vec<String> = m
@@ -339,11 +344,32 @@ impl<'a> Design<'a> {
             .iter()
             .map(|p| format!("    {},", self.src(f, p.span.start, p.span.end)))
             .collect();
-        code(&format!("{kw} {head}\n{}\n)", ports.join("\n")))
+        code(&format!("{kw} {head}\n{}\n)", ports.join("\n"))) + &self.doc(m.span)
     }
 
     pub fn fn_hover(&self, func: &ast::Function) -> String {
         code(&self.src(func.name.span.file, func.span.start, func.ret.span.end))
+            + &self.doc(func.span)
+    }
+
+    /// The `///` comment above an item, as a paragraph of hover text.
+    fn doc(&self, item: Span) -> String {
+        let text = &self.sm.file(item.file).text;
+        let line_start = text[..item.start as usize].rfind('\n').map_or(0, |i| i + 1);
+        let mut lines = Vec::new();
+        for l in text[..line_start].lines().rev() {
+            let l = l.trim();
+            if let Some(doc) = l.strip_prefix("///") {
+                lines.push(doc.strip_prefix(' ').unwrap_or(doc));
+            } else if !l.starts_with("#[") {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        lines.reverse();
+        format!("\n\n{}", lines.join("\n"))
     }
 
     pub fn port_hover(&self, m: &ast::Module, port: &ast::Port) -> String {
@@ -387,6 +413,16 @@ impl<'a> Design<'a> {
             other => {
                 code(&self.types.name(other)) + &format!("\n\n{}", bits(self.types.width(other)))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_builtin_has_hover_text() {
+        for name in crate::BUILTINS {
+            assert!(super::builtin_hover(name).is_some(), "`{name}` has no hover text");
         }
     }
 }

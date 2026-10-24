@@ -12,11 +12,14 @@ export { langOf };
 const KIND_ICON = { Module: 'M', Function: 'ƒ', Type: 'T', Variant: '·', Field: '.', Port: 'p', Wire: 'w', Register: 'r', Memory: 'm', Instance: 'i', Domain: '@', Const: 'c', Value: 'v', Variable: 'v', Generic: 'g', keyword: 'k' };
 
 export class Editor {
-  constructor(host, { onChange, onRun, onNavigate, onFormat }) {
+  constructor(host, { onChange, onRun, onNavigate, onFormat, reference, onReference }) {
     this.onChange = onChange;
     this.onFormat = onFormat;
     this.onRun = onRun;
     this.onNavigate = onNavigate;
+    // The reference entry of a builtin's name, and opening it.
+    this.reference = reference || (() => null);
+    this.onReference = onReference;
     this.lang = 'text';
     this.diags = [];
     this.refs = [];
@@ -54,6 +57,9 @@ export class Editor {
         if (r && r.decl) {
           e.preventDefault();
           this.onNavigate(r.decl.file, r.decl.start, r.decl.end);
+        } else if (r && this.refEntry(r)) {
+          e.preventDefault();
+          this.onReference(this.ta.value.slice(r.start, r.end));
         }
       }
     });
@@ -199,6 +205,11 @@ export class Editor {
     return off + col;
   }
 
+  /** The reference entry of a builtin or standard library name. */
+  refEntry(r) {
+    return !r.decl && (r.kind === 'Function' || r.kind === 'Module') && this.reference(this.ta.value.slice(r.start, r.end));
+  }
+
   refAt(off) {
     if (off < 0 || !this.fresh()) return null;
     let best = null;
@@ -212,7 +223,7 @@ export class Editor {
   mouse(e) {
     const off = this.offsetAt(e);
     const r = this.refAt(off);
-    this.el.classList.toggle('link-mode', !!((e.ctrlKey || e.metaKey) && r && r.decl));
+    this.el.classList.toggle('link-mode', !!((e.ctrlKey || e.metaKey) && r && (r.decl || this.refEntry(r))));
     const ds = this.diags.filter((d) => d.start <= off && off < Math.max(d.end, d.start + 1));
     if (!r && !ds.length) {
       hideTooltip();
@@ -226,7 +237,9 @@ export class Editor {
     if (r) {
       if (html) html += '<hr style="border:0;border-top:1px solid var(--line);margin:6px 0">';
       html += markdown(r.hover, (code, lang) => highlightHtml(code, lang === 'weft' ? 'weft' : 'text'));
-      if (r.decl) html += `<div class="t">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+click to go to the definition</div>`;
+      const mod = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+      if (r.decl) html += `<div class="t">${mod}+click to go to the definition</div>`;
+      else if (this.refEntry(r)) html += `<div class="t">${mod}+click to open the reference</div>`;
     }
     showTooltip(html, e.clientX, e.clientY);
   }

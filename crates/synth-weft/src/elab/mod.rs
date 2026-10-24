@@ -516,6 +516,43 @@ fn index_items<'a>(d: &mut Design<'a>, files: &[(FileId, &'a ast::File)]) {
             }
         }
     }
+    index_calls(d, files);
+}
+
+/// Records the calls of builtins and of top-level modules and functions
+/// that elaboration did not reach (in a module never instantiated with its
+/// generics, say), from the tokens alone.
+fn index_calls<'a>(d: &mut Design<'a>, files: &[(FileId, &'a ast::File)]) {
+    use crate::lexer::Tok;
+    for &(f, _) in files {
+        if d.quiet_files.contains(&f) {
+            continue;
+        }
+        let toks = crate::lexer::lex(f, &d.sm.file(f).text, &mut Diagnostics::default());
+        for (i, t) in toks.iter().enumerate() {
+            let Tok::Ident(name) = &t.tok else { continue };
+            let called = toks.get(i + 1).is_some_and(|n| {
+                matches!(n.tok, Tok::Punct("(" | "<")) && n.span.start == t.span.end
+            });
+            // Not a member (`x.min(...)`) or a definition (`fn f(...)`).
+            let before = i.checked_sub(1).map(|p| &toks[p].tok);
+            let member_or_def = match before {
+                Some(Tok::Punct(".")) => true,
+                Some(Tok::Ident(k)) => k == "fn" || k == "module",
+                _ => false,
+            };
+            if !called || member_or_def {
+                continue;
+            }
+            if let Some(hover) = index::builtin_hover(name) {
+                d.note(t.span, None, RefKind::Function, hover);
+            } else if let Some(m) = d.modules.get(name).copied() {
+                d.note(t.span, Some(m.name.span), RefKind::Module, d.module_hover(m));
+            } else if let Some(func) = d.fns.get(name).copied() {
+                d.note(t.span, Some(func.name.span), RefKind::Function, d.fn_hover(func));
+            }
+        }
+    }
 }
 
 /// The generic parameter an argument binds: the one it names, or the only

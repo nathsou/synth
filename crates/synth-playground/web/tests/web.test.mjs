@@ -3,7 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from '../layout.js';
-import { tokenize, highlightHtml, langOf } from '../highlight.js';
+import { tokenize, highlightHtml, langOf, WEFT_BUILTINS } from '../highlight.js';
+import { ENTRIES, entryFor, renderDoc } from '../reference.js';
 import * as progress from '../progress.js';
 import { Terminal } from '../terminal.js';
 
@@ -167,4 +168,20 @@ test('terminal: text, line endings, cursor home and clearing', () => {
   t.write(bytes('\r\n1\r\n2\r\n3'));
   assert.equal(t.text().split('\n').length, 4);
   assert.equal(t.text().split('\n')[3], '3');
+});
+
+test('reference: every builtin has an entry, and entries have distinct ids', () => {
+  for (const name of [...WEFT_BUILTINS, 'assert']) assert.ok(entryFor(name), `${name} is in the reference`);
+  assert.equal(entryFor('count'), null);
+  const ids = ENTRIES.map((e) => e.id);
+  assert.equal(new Set(ids).size, ids.length, 'distinct ids');
+});
+
+test('reference: markdown', () => {
+  const html = renderDoc('### `a | b` {#x}\n\n| P | Q |\n|---|---|\n| `p | q` | **y** |\n\n- one\n- two\n\n```weft\nreg r: bool = false;\n```\n\nSee [it](#ref-x).');
+  assert.ok(html.includes('<h3 id="ref-x"><code>a | b</code></h3>'));
+  assert.ok(html.includes('<td><code>p | q</code></td><td><strong>y</strong></td>'), html);
+  assert.ok(html.includes('<ul><li>one</li><li>two</li></ul>'));
+  assert.ok(html.includes('<span class="tok-kw">reg</span>'));
+  assert.ok(html.includes('data-ref="x"'));
 });
