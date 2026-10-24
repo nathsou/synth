@@ -190,6 +190,21 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   delay against congestion. The router also picks each LUT input pin, so a
   critical connection takes a fast one. Address cascades between block RAM
   tiles and buffer pass-throughs are not general routing.
+- **LUT input pins.** A lane's six pins differ by up to 515 ps into the
+  LUT (A1 slowest, A6 fastest), but with criticality capped the router
+  cannot tell the connections at the worst slack apart, and on Euler 14 and
+  58 the lanes at the worst slack could have kept 60-370 ps more slack with
+  their inputs on other pins, through paths the interconnect has free.
+  After routing, the lanes within 100 ps of the worst slack are routed
+  again: each input's branch into the lane is freed, the fastest free path
+  from its tree to each of the lane's pins is searched, the assignment of
+  inputs to pins that leaves the lane's least slack the most is kept, and
+  the paths are committed most critical first. Four rounds, timed between
+  them, and the routes are kept only if the worst period improves.
+  This gained 2.0% by Vivado's timer over six seeds of the eight Euler
+  designs (137.8 to 140.5 MHz geometric mean; Euler 43 +3.0%, 25 +2.9%,
+  58 +2.8%, 57 unchanged) and 1.5% by the estimate, for 4-8 s of each
+  seed's run; lanes within 300 ps and ten rounds gained no more.
 - **Timing estimate.** Static timing over the packed netlist using X-Ray's
   SDF cell delays (slow-corner maxima, per CARRY4 arc and per DSP register
   configuration) and nextpnr-xilinx's routing delay model of X-Ray wire RC,
@@ -234,9 +249,11 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   Vivado on most runs. Hold is checked at Vivado's fast corner, timed as
   the slow delays times 0.30 (its routes measured 0.31-0.35 of synth's
   estimates), against a capture clock 50 ps late within a region, 265 ps
-  across the spine and 350 ps one row of regions up, at flip-flops and at
+  across the spine and 350 ps one row of regions up, at flip-flops, at
   block RAM inputs (Vivado's hold times: 183 ps for addresses, 155 for
-  data, 89 for write enables, on a clock 40 ps later still). After
+  data, 89 for write enables, on a clock 40 ps later still), and at shift
+  register data and LUT RAM write inputs (Vivado's largest: 183 and 240
+  ps). After
   routing, the last routed connection of each path short of the
   requirement by less than 50 ps is rerouted through unused wires near
   its sink: a detour pairs a search forward from where its branch leaves
@@ -249,7 +266,9 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   48 runs (by up to 60 ps, all across the region boundary at row 150);
   the first repair, of flip-flop inputs only, left 4 of 24 failing, and
   with block RAM inputs 1 of 48 (a write enable timed on one of its two
-  site pins), at no cost in Fmax. There is no I/O timing.
+  site pins), at no cost in Fmax. With the LUT input pass above, 1 of 48
+  failed at a shift register's data input across the row 150 boundary,
+  unchecked until then; it passes with those inputs checked. There is no I/O timing.
 - **Constraints.** An explicit XDC subset: `set_property` (including
   `-dict`), `get_ports` and `create_clock`; every port needs PACKAGE_PIN and
   LVCMOS33. Unknown commands or properties are errors.

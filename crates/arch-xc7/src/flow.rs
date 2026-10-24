@@ -351,6 +351,27 @@ fn implement_seed(
                 format!("{e} ({}; {pins})", names[*net])
             }
         })?;
+    let pins_start = Instant::now();
+    let reassigned = repair_pins(
+        db,
+        &nl,
+        &p,
+        &placement,
+        graph,
+        &timer,
+        &clocks,
+        &requests,
+        &request_nets,
+        &owners,
+        &blocked_edges,
+        &mut routes,
+    );
+    if reassigned > 0 {
+        log.push(format!(
+            "LUT inputs: {reassigned} critical lanes reassigned ({:.1}s)",
+            pins_start.elapsed().as_secs_f64()
+        ));
+    }
     let (rerouted, failing) = repair_hold(
         db,
         &nl,
@@ -590,6 +611,102 @@ fn repair_hold(
         }
     }
     (rerouted, failing)
+}
+
+/// Reassigns the LUT inputs of the lanes nearest the worst slack by how
+/// late each arrives (`pins::reassign`), in rounds timed again between
+/// them; keeps the routes only if the clock period they reach shortens.
+/// The lanes reassigned.
+#[allow(clippy::too_many_arguments)]
+fn repair_pins(
+    db: &Device,
+    nl: &Netlist,
+    p: &Packed,
+    pl: &Placement,
+    graph: &RoutingGraph,
+    timer: &crate::sta::Timer,
+    clocks: &dyn Fn(CellId) -> crate::sta::ClockSite,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    owners: &Owners,
+    blocked_edges: &[u32],
+    routes: &mut [synth_route::NetRoute],
+) -> usize {
+    // Lanes within this much (ps) of the worst slack, in this many rounds
+    // (300 ps and ten rounds gained no more).
+    const NEAR: f64 = 100.0;
+    const ROUNDS: usize = 4;
+    let mut used = vec![0u16; graph.x.len()];
+    for (req, route) in requests.iter().zip(routes.iter()) {
+        used[req.source as usize] += 1;
+        for &e in &route.edges {
+            used[graph.dst[e as usize] as usize] += 1;
+        }
+    }
+    let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
+    let by_net: FxHashMap<NetId, usize> =
+        request_nets.iter().enumerate().filter_map(|(i, n)| n.map(|n| (n, i))).collect();
+    let worst = |routes: &[synth_route::NetRoute]| {
+        let wires = crate::sta::routed_wires(db, nl, graph, requests, request_nets, routes, owners);
+        timer.analyze_clocked(&|c, i, _| wires.get(&(c, i)).copied().unwrap_or(0.0), clocks)
+    };
+    let saved = routes.to_vec();
+    let mut analysis = worst(routes);
+    // Slacks are against the period reached: the score is that period.
+    let wns = |a: &crate::sta::Analysis| a.slack.values().copied().fold(f64::INFINITY, f64::min);
+    let period = |a: &crate::sta::Analysis| a.clocks.iter().map(|c| c.period).fold(0.0, f64::max);
+    let first = period(&analysis);
+    let mut moved = 0;
+    for _ in 0..ROUNDS {
+        let least = wns(&analysis);
+        let mut lanes = Vec::new();
+        for (&(s, l), nets) in &lut_pins(graph, nl, p, pl, routes) {
+            let slice = &p.slices[s];
+            let cells: Vec<CellId> = slice.luts[l].iter().chain(&slice.lut5[l]).copied().collect();
+            let site = &pl.slices[s];
+            let Some(&sink) = graph.lane_sinks.get(&(site.tile as u32, site.index as u32, l as u8))
+            else {
+                continue;
+            };
+            let mut inputs = Vec::new();
+            for (i, n) in slice.lane_inputs(nl, l).into_iter().enumerate() {
+                if !nets.contains(&Some(n)) {
+                    continue;
+                }
+                let Some(&r) = by_net.get(&n) else { continue };
+                let slack = cells
+                    .iter()
+                    .filter_map(|&c| analysis.slack.get(&(c, n)))
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                inputs.push((r, sink + i as u32, slack));
+            }
+            let lane_least = inputs.iter().map(|i| i.2).fold(f64::INFINITY, f64::min);
+            if inputs.is_empty() || lane_least > least + NEAR {
+                continue;
+            }
+            let letter = char::from(b'A' + l as u8);
+            let pins = std::array::from_fn(|j| site.node(db, &format!("{letter}{}", j + 1)).ok());
+            lanes.push((lane_least, crate::pins::Lane { inputs, pins }));
+        }
+        lanes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut any = false;
+        for (_, lane) in &lanes {
+            if crate::pins::reassign(graph, requests, routes, &mut used, &blocked, lane).is_some() {
+                moved += 1;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+        analysis = worst(routes);
+    }
+    if period(&analysis) >= first {
+        routes.clone_from_slice(&saved);
+        return 0;
+    }
+    moved
 }
 
 /// Each sequential cell's clock site in a placement.

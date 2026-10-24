@@ -180,6 +180,10 @@ const FF_HOLD: f64 = 63.0;
 /// Block RAM hold times by input class (Vivado), and for the others.
 const BRAM_HOLD: [(&str, f64); 3] = [("ADDR", 183.0), ("DI", 155.0), ("WE", 89.0)];
 const BRAM_HOLD_OTHER: f64 = 183.0;
+/// Shift register data and LUT RAM write input hold times (Vivado: 109-183
+/// ps at an SRL's D, 200-240 at a LUT RAM's write address).
+const SRL_HOLD: f64 = 183.0;
+const LUTRAM_HOLD: f64 = 240.0;
 const HOLD_SKEW: f64 = 50.0;
 const HOLD_REGION: f64 = 300.0;
 /// Across the spine within one row of regions (Vivado: 262-264 ps).
@@ -974,7 +978,8 @@ impl<'a> Timer<'a> {
         Analysis { clocks: clocks.into_values().collect(), slack }
     }
 
-    /// Hold checks of flip-flop and block RAM inputs at the fast corner: the shortest
+    /// Hold checks of flip-flop, block RAM, shift register and LUT RAM
+    /// write inputs at the fast corner: the shortest
     /// path to each, against the capture clock's lateness over the
     /// launch's. For each input with less than `margin` slack (ps), the
     /// last routed connection on its shortest path (the cell input it
@@ -1034,25 +1039,47 @@ impl<'a> Timer<'a> {
         };
         let mut fails = Vec::new();
         for (s, site) in self.seq.iter().zip(&sites) {
-            let bram = nl.cell_kind(s.cell) == "RAMB18E1";
-            let Some(capture) =
-                s.capture.as_ref().filter(|_| bram || pack::is_ff(nl.cell_kind(s.cell)))
-            else {
-                continue;
-            };
-            for &(i, _, _) in capture {
-                // A block RAM's clock comes later, and its inputs hold
-                // longer.
-                let (hold, late) = if bram {
-                    let name = nl.str(nl.cells[s.cell].pins[i as usize].name);
-                    let hold = BRAM_HOLD
-                        .iter()
-                        .find(|(class, _)| name.starts_with(class))
-                        .map_or(BRAM_HOLD_OTHER, |&(_, d)| d);
-                    (hold, BRAM_LATENCY)
+            let kind = nl.cell_kind(s.cell);
+            let pins = &nl.cells[s.cell].pins;
+            let name = |i: u32| nl.str(pins[i as usize].name);
+            // Each checked input's hold time and its clock's lateness: a
+            // block RAM's clock comes later, and its inputs hold longer.
+            let checked: Vec<(u32, f64, f64)> = if kind == "RAMB18E1" {
+                let capture = s.capture.as_deref().unwrap_or_default();
+                capture
+                    .iter()
+                    .map(|&(i, _, _)| {
+                        let hold = BRAM_HOLD
+                            .iter()
+                            .find(|(class, _)| name(i).starts_with(class))
+                            .map_or(BRAM_HOLD_OTHER, |&(_, d)| d);
+                        (i, hold, BRAM_LATENCY)
+                    })
+                    .collect()
+            } else if pack::is_ff(kind) {
+                let capture = s.capture.as_deref().unwrap_or_default();
+                capture.iter().map(|&(i, _, _)| (i, FF_HOLD, 0.0)).collect()
+            } else {
+                let hold = if pack::is_srl(kind) {
+                    SRL_HOLD
+                } else if pack::is_ram(kind) {
+                    LUTRAM_HOLD
                 } else {
-                    (FF_HOLD, 0.0)
+                    continue;
                 };
+                // Reads are combinational: only the inputs a write takes.
+                (0..pins.len() as u32)
+                    .filter(|&i| pins[i as usize].dir == Dir::Input)
+                    .filter(|&i| {
+                        let n = name(i);
+                        matches!(n, "D" | "CE" | "WE")
+                            || n.starts_with("DI")
+                            || n.starts_with("ADDRD")
+                    })
+                    .map(|i| (i, hold, 0.0))
+                    .collect()
+            };
+            for (i, hold, late) in checked {
                 for (launch, t) in at_input(&early, s.cell, i).unwrap_or_default() {
                     let ((edge, region), h) = (launch, hops.get(&launch.1));
                     if edge != s.edge {

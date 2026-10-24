@@ -10,6 +10,7 @@ mod hold;
 mod json;
 mod lutram;
 mod physical_dsp;
+mod pins;
 mod srl;
 pub mod sta;
 pub mod synth;

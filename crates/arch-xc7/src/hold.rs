@@ -65,7 +65,7 @@ pub fn detour(
 
 /// The edges from `sink` back to where net `req`'s tree forks, reaches
 /// another sink or starts, and that node.
-fn branch(
+pub(crate) fn branch(
     graph: &RoutingGraph,
     req: &NetRequest,
     route: &NetRoute,
@@ -246,8 +246,13 @@ fn detour_to(
         used[graph.dst[e as usize] as usize] += 1;
     }
     route.edges.extend(path);
-    // Edges below a rerouted fork came before the path now reaching it:
-    // order the tree from its source again.
+    reorder(graph, route, source);
+    true
+}
+
+/// Orders a route's edges from its source again: edges below a rerouted
+/// fork came before the path now reaching it.
+pub(crate) fn reorder(graph: &RoutingGraph, route: &mut NetRoute, source: u32) {
     let mut by_src: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
     for &e in &route.edges {
         by_src.entry(edge_src(graph, e)).or_default().push(e);
@@ -261,5 +266,4 @@ fn detour_to(
         }
     }
     route.edges = order;
-    true
 }
