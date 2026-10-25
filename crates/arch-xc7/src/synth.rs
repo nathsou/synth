@@ -21,8 +21,19 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     }
     opt::shift_by_multiple(&mut m);
     opt::merge_identical(&mut m);
+    // After merging, so that a sum several expressions share stays shared.
+    if opt::fold_constant_sums(&mut m) > 0 {
+        opt::clean(&mut m)?;
+    }
     opt::share_arith(&mut m);
     opt::chains_to_trees(&mut m);
+    // On resolved connections, so that the reads of one value compare equal.
+    opt::clean(&mut m)?;
+    let balanced = opt::balance_select_chains(&mut m);
+    if balanced > 0 {
+        log.push(format!("balanced {balanced} chains of compare-and-select stages"));
+        opt::clean(&mut m)?;
+    }
     synth_rtl::fsm::simplify_state_compares(&mut m);
     opt::clean(&mut m)?;
     dff::extract_controls(&mut m);

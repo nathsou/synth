@@ -34,14 +34,14 @@ const TRIES: usize = 4;
 
 /// The cells of a lane: LUT6, O5 LUT and the two flip-flops.
 #[derive(Clone, Copy, Default)]
-struct Lane {
+pub(crate) struct Lane {
     lut: Option<CellId>,
     lut5: Option<CellId>,
     ff: Option<CellId>,
     ff5: Option<CellId>,
 }
 impl Lane {
-    fn get(p: &Packed, s: usize, l: usize) -> Lane {
+    pub(crate) fn get(p: &Packed, s: usize, l: usize) -> Lane {
         let x = &p.slices[s];
         Lane { lut: x.luts[l], lut5: x.lut5[l], ff: x.ffs[l], ff5: x.ffs[l + 4] }
     }
@@ -54,7 +54,7 @@ impl Lane {
 }
 
 /// The lanes whose contents may move, per slice.
-fn movable(nl: &Netlist, p: &Packed) -> Vec<[bool; 4]> {
+pub(crate) fn movable(nl: &Netlist, p: &Packed) -> Vec<[bool; 4]> {
     p.slices
         .iter()
         .map(|s| {
@@ -97,7 +97,7 @@ fn movable(nl: &Netlist, p: &Packed) -> Vec<[bool; 4]> {
 
 /// Whether `lane`, whose flip-flops have controls `ctrl`, may replace lane
 /// `l` of slice `s`.
-fn fits(
+pub(crate) fn fits(
     nl: &Netlist,
     p: &Packed,
     s: usize,
@@ -123,6 +123,7 @@ fn fits(
 
 pub fn refine(
     db: &Device,
+    model: &crate::sta::DelayModel,
     nl: &Netlist,
     p: &mut Packed,
     pl: &Placement,
@@ -209,11 +210,8 @@ pub fn refine(
             .filter(|(_, w)| **w > 0.0)
             .filter_map(|(&u, &w)| {
                 let (s, (x, y)) = place(p, u)?;
-                let d = if s == ds && s != usize::MAX {
-                    0.0
-                } else {
-                    crate::sta::predicted_delay(x - dx, y - dy)
-                };
+                let d =
+                    if s == ds && s != usize::MAX { 0.0 } else { model.predict(x - dx, y - dy) };
                 Some(w * d)
             })
             .sum()
@@ -341,7 +339,7 @@ pub fn refine(
 
 /// Puts `into_s` at lane `l` of slice `s` and `into_t` at lane `j` of
 /// slice `t`, each with the controls of the slice it came from.
-fn swap(
+pub(crate) fn swap(
     p: &mut Packed,
     (s, l, into_s): (usize, usize, &(Lane, Option<Controls>)),
     (t, j, into_t): (usize, usize, &(Lane, Option<Controls>)),

@@ -276,9 +276,9 @@ mapped Verilog, and `pnr` accepts mapped RTLIL. External tools are used only
 for independent tests; the runtime reads the pinned CC0 device database.
 
 **Artix-7 has not reached iCE40 maturity.** Against Vivado 2025.2 on the Euler
-solvers, with Vivado's timer judging both, synth uses fewer slices on nine of
-ten and its synthesis is on par, but its placement and routing are 5–28%
-slower under a tight clock. Physical tests compare native frames/packets
+solvers, with Vivado's timer judging both, synth uses fewer slices on six of
+ten and its synthesis is on par, but its placement and routing are 1–12%
+slower under a tight clock (3% on average), in less time on average. Physical tests compare native frames/packets
 against Project X-Ray on 35T and 100T, and netlists rebuilt from the
 bitstreams simulate correctly, but hardware behavior remains unvalidated.
 Builds require the explicit timing override. Advanced clocks/I/O, RAMB36, DSP

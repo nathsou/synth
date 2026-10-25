@@ -92,6 +92,70 @@ pub struct RoutingGraph {
 /// The tile of a virtual edge's pip.
 pub const VIRTUAL: u32 = u32::MAX;
 impl RoutingGraph {
+    /// The fastest routing delays (ps) from a slice's flip-flop output to
+    /// the LUT inputs of the slices at each tile offset: Dijkstra from the
+    /// slice nearest the device's centre, the mean over a slice's 24 LUT
+    /// inputs, the least over the slices at an offset.
+    pub fn slice_delays(&self, db: &Device) -> Result<crate::sta::DelayModel, String> {
+        use std::cmp::Reverse;
+        let slices = crate::place::sites(db, |k| k == "SLICEL" || k == "SLICEM")?;
+        let xy =
+            |s: &crate::place::Site| (i32::from(db.tiles[s.tile].x), i32::from(db.tiles[s.tile].y));
+        let (w, h) =
+            slices.iter().map(xy).fold((0, 0), |(w, h), (x, y)| (w.max(x + 1), h.max(y + 1)));
+        let source = slices
+            .iter()
+            .min_by_key(|s| {
+                let (x, y) = xy(s);
+                (2 * x - w).abs() + (2 * y - h).abs()
+            })
+            .ok_or("no slices")?;
+        let (sx, sy) = xy(source);
+        let mut dist = vec![u32::MAX; self.offsets.len() - 1];
+        let mut heap = std::collections::BinaryHeap::new();
+        let start = source.node(db, "AQ")?;
+        dist[start as usize] = 0;
+        heap.push(Reverse((0u32, start)));
+        while let Some(Reverse((d, n))) = heap.pop() {
+            if d > dist[n as usize] {
+                continue;
+            }
+            for e in self.offsets[n as usize]..self.offsets[n as usize + 1] {
+                let (t, _) = self.pip[e as usize];
+                if t == VIRTUAL {
+                    continue;
+                }
+                let m = self.dst[e as usize];
+                let nd = d + self.delay[e as usize].round() as u32;
+                if nd < dist[m as usize] {
+                    dist[m as usize] = nd;
+                    heap.push(Reverse((nd, m)));
+                }
+            }
+        }
+        let (tw, th) = ((sx.max(w - sx)) as usize + 1, (sy.max(h - sy)) as usize + 1);
+        let mut table = vec![f64::INFINITY; tw * th];
+        for s in &slices {
+            let mut sum = 0.0;
+            let mut count = 0;
+            for lane in ['A', 'B', 'C', 'D'] {
+                for i in 1..=6 {
+                    let d = dist[s.node(db, &format!("{lane}{i}"))? as usize];
+                    if d != u32::MAX {
+                        sum += f64::from(d);
+                        count += 1;
+                    }
+                }
+            }
+            if count == 24 {
+                let (x, y) = xy(s);
+                let k = (x - sx).unsigned_abs() as usize * th + (y - sy).unsigned_abs() as usize;
+                table[k] = table[k].min(sum / 24.0);
+            }
+        }
+        Ok(crate::sta::DelayModel::new(tw, th, table))
+    }
+
     /// Whether each node is reachable from the global clock buffers' outputs:
     /// under Project X-Ray's U-turn clock rows, two columns of fifty slices
     /// per part have no clock.

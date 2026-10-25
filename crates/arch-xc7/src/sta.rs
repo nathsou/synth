@@ -6,8 +6,8 @@
 //! arcs are the slow-corner SDF characterization, but for flip-flops, timed
 //! as Vivado times them. Vivado's arcs have equal rise and fall delays, so
 //! one delay per arc loses nothing. Only register-to-register paths within
-//! one clock are analyzed, without clock skew; block RAM arcs are the worst
-//! over its modes and pins.
+//! one clock are analyzed, with clock skew between clock regions as Vivado
+//! times it; block RAM arcs are the worst over its modes and pins.
 use crate::device::Device;
 use crate::flow::Owners;
 use crate::pack::{self, Packed};
@@ -18,6 +18,56 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use synth_core::FxHashMap;
 use synth_netlist::{CellId, Dir, NetId, Netlist};
+
+/// The global clock tree's geometry: the rows of its horizontal clock
+/// lines (one per row of clock regions, in its middle), the column of its
+/// spine and the row of the global buffers between the regions.
+#[derive(Debug)]
+pub struct ClockTree {
+    rows: Vec<i16>,
+    spine: i16,
+    buffers: f64,
+}
+impl ClockTree {
+    pub fn new(db: &Device) -> Self {
+        let mut rows: Vec<i16> = db
+            .tiles
+            .iter()
+            .filter(|t| t.kind.starts_with("HCLK_L") || t.kind.starts_with("HCLK_R"))
+            .map(|t| t.y)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let spine = db.tiles.iter().find(|t| t.kind.starts_with("CLK_HROW")).map_or(0, |t| t.x);
+        let buffers: Vec<f64> = db
+            .tiles
+            .iter()
+            .filter(|t| t.kind.starts_with("CLK_BUFG_TOP") || t.kind.starts_with("CLK_BUFG_BOT"))
+            .map(|t| f64::from(t.y))
+            .collect();
+        let buffers = buffers.iter().sum::<f64>() / buffers.len().max(1) as f64;
+        ClockTree { rows, spine, buffers }
+    }
+
+    /// The clock site of tile (x, y), for a block RAM or not.
+    pub fn site(&self, x: i16, y: i16, bram: bool) -> ClockSite {
+        if self.rows.is_empty() {
+            return ClockSite::NONE;
+        }
+        let row = (0..self.rows.len()).min_by_key(|&r| (self.rows[r] - y).abs()).unwrap_or(0);
+        let h = f64::from(self.rows[row]);
+        let (lo, hi) = (h.min(self.buffers), h.max(self.buffers));
+        let hops =
+            self.rows.iter().map(|&r| f64::from(r)).filter(|&r| r > lo && r < hi).count() as f64;
+        let extra = if bram { BRAM_LATENCY } else { 0.0 };
+        ClockSite {
+            region: row as u16 * 2 + u16::from(x > self.spine),
+            hops,
+            late: hops * REGION_LATE + extra + CLOCK_DERATE,
+            early: hops * REGION_EARLY + extra,
+        }
+    }
+}
 
 /// The worst register-to-register path of one clock.
 #[derive(Clone, Debug)]
@@ -99,6 +149,72 @@ const BRAM_INPUTS: [&str; 7] = ["ADDR", "DI", "EN", "WE", "RSTREG", "RSTRAM", "R
 
 /// A clock edge: the clock net and whether it is the falling edge.
 type Edge = (NetId, bool);
+/// Paths are timed by launch edge and launch clock region (`NO_REGION`
+/// before placement), since skew depends on both ends' regions.
+type Launch = (Edge, u16);
+pub const NO_REGION: u16 = u16::MAX;
+
+/// Clock latency (ps) a region farther from the global buffer adds, at the
+/// slow corner's maximum and minimum delays, and its block RAM excess:
+/// fitted to Vivado's clock delays on the Euler designs (2-3 ps per tile
+/// within a region is left out).
+pub const REGION_LATE: f64 = 165.0;
+pub const REGION_EARLY: f64 = 150.0;
+pub const BRAM_LATENCY: f64 = 40.0;
+/// Within a site, a launch clock's maximum delay past an early capture's.
+pub const CLOCK_DERATE: f64 = 120.0;
+/// Pessimism Vivado removes on the clock path that launch and capture
+/// share past the global buffer: within one region, and across the spine
+/// in one row of regions.
+const SHARED_REGION: f64 = 80.0;
+const SHARED_ROW: f64 = 36.0;
+
+/// Hold checks use Vivado's fast corner, timed as the slow delays scaled
+/// by the low end of its ratio to them (routes 0.31-0.35 on the Euler
+/// designs, flip-flop clock-to-out 0.34). A flip-flop's hold time, and the capture clock's
+/// lateness over the launch's: within a region, and per row of regions
+/// the capture is farther from the global buffers (Vivado: 352 ps for one
+/// row up, 30-60 ps within one region).
+pub const FAST: f64 = 0.30;
+const FF_HOLD: f64 = 63.0;
+/// Block RAM hold times by input class (Vivado), and for the others.
+const BRAM_HOLD: [(&str, f64); 3] = [("ADDR", 183.0), ("DI", 155.0), ("WE", 89.0)];
+const BRAM_HOLD_OTHER: f64 = 183.0;
+/// Shift register data and LUT RAM write input hold times (Vivado: 109-183
+/// ps at an SRL's D, 200-240 at a LUT RAM's write address).
+const SRL_HOLD: f64 = 183.0;
+const LUTRAM_HOLD: f64 = 240.0;
+const HOLD_SKEW: f64 = 50.0;
+const HOLD_REGION: f64 = 300.0;
+/// Across the spine within one row of regions (Vivado: 262-264 ps).
+const HOLD_SIDE: f64 = 265.0;
+
+/// Where a sequential cell is clocked: its clock region (row times two
+/// plus side of the spine) and latency from the global buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct ClockSite {
+    pub region: u16,
+    /// Rows of regions from the global buffers.
+    pub hops: f64,
+    pub late: f64,
+    pub early: f64,
+}
+impl ClockSite {
+    pub const NONE: ClockSite = ClockSite { region: NO_REGION, hops: 0.0, late: 0.0, early: 0.0 };
+    /// The capture clock's lead over the period for a launch in `from`.
+    fn capture(&self, from: u16) -> f64 {
+        let shared = if from == NO_REGION || self.region == NO_REGION {
+            0.0
+        } else if from == self.region {
+            SHARED_REGION
+        } else if from / 2 == self.region / 2 {
+            SHARED_ROW
+        } else {
+            0.0
+        };
+        self.early + shared
+    }
+}
 
 /// The delay model of every cell kind the physical flow implements.
 struct Model {
@@ -355,6 +471,7 @@ fn net_delays(
         for &e in &route.edges {
             parent.insert(graph.dst[e as usize], e);
         }
+        let load = branch_load(db, graph, &route.edges);
         let mut delay: FxHashMap<u32, f64> = FxHashMap::default();
         delay.insert(req.source, 0.0);
         for &sink in &req.sinks {
@@ -371,7 +488,7 @@ fn net_delays(
                 if graph.pip[e as usize].0 == crate::routing::VIRTUAL {
                     continue;
                 }
-                t += pip_delay(db, graph, &parent, e);
+                t += pip_delay(db, graph, &parent, &load, e);
                 delay.insert(graph.dst[e as usize], t);
             }
             out.insert((i, sink), t);
@@ -380,9 +497,36 @@ fn net_delays(
     out
 }
 
+/// The share of the other branches' load a pip's delay takes: fitted to
+/// Vivado 2025.2's net delays by fanout (Euler 10's routed connections,
+/// from 34 ps optimistic at fanout 1 and 87 ps pessimistic above 30 with
+/// none of it, to under 40 ps either way).
+const BRANCH_LOAD: f64 = 0.35;
+
+/// The input capacitance (fF) of the route tree's pips leaving each node:
+/// a wire that branches drives all of them.
+fn branch_load(db: &Device, graph: &RoutingGraph, edges: &[u32]) -> FxHashMap<u32, f64> {
+    let mut load: FxHashMap<u32, f64> = FxHashMap::default();
+    for &e in edges {
+        let (ti, pi) = graph.pip[e as usize];
+        if ti == crate::routing::VIRTUAL {
+            continue;
+        }
+        let tmpl = &db.templates[db.tiles[ti as usize].template];
+        *load.entry(edge_src(graph, e)).or_insert(0.0) += f64::from(tmpl.pips[pi as usize].cap);
+    }
+    load
+}
+
 /// The delay of routing edge `e` (a real pip) within a route tree whose
-/// edge into each node is `parent`.
-fn pip_delay(db: &Device, graph: &RoutingGraph, parent: &FxHashMap<u32, u32>, e: u32) -> f64 {
+/// edge into each node is `parent` and whose pips load each node `load`.
+fn pip_delay(
+    db: &Device,
+    graph: &RoutingGraph,
+    parent: &FxHashMap<u32, u32>,
+    load: &FxHashMap<u32, f64>,
+    e: u32,
+) -> f64 {
     let (ti, pi) = graph.pip[e as usize];
     let tile = &db.tiles[ti as usize];
     let tmpl = &db.templates[tile.template];
@@ -401,14 +545,17 @@ fn pip_delay(db: &Device, graph: &RoutingGraph, parent: &FxHashMap<u32, u32>, e:
     let (_, dst_c) = tmpl.wire_rc[pip.dst as usize];
     // Resistance in ohms and capacitance in fF: ohm x fF / 1000 = ps.
     let r = src_len * f64::from(src_r) + f64::from(pip.res);
-    let mut d = f64::from(pip.delay.unwrap_or(0.0)) + r * f64::from(pip.cap) / 1000.0;
+    let own = f64::from(pip.cap);
+    let all = load.get(&edge_src(graph, e)).copied().unwrap_or(own).max(own);
+    let mut d =
+        f64::from(pip.delay.unwrap_or(0.0)) + r * (own + BRANCH_LOAD * (all - own)) / 1000.0;
     if !pip.buffered {
         d += (f64::from(src_r) + f64::from(pip.res)) * f64::from(dst_c) / 1000.0;
     }
     d * f64::from(crate::device::VENDOR_SCALE)
 }
 
-fn edge_src(graph: &RoutingGraph, e: u32) -> u32 {
+pub(crate) fn edge_src(graph: &RoutingGraph, e: u32) -> u32 {
     // Edges are stored by source node: find the node whose range holds `e`.
     graph.offsets.partition_point(|&o| o <= e) as u32 - 1
 }
@@ -646,12 +793,16 @@ impl<'a> Timer<'a> {
     }
 
     /// The LUTs and flip-flops driving connections of criticality at least
-    /// `PACKING_CRITICAL` in packing `p`, timed with `predicted_delay(2, 2)`
-    /// and `output_delay` between slices.
-    pub fn packing_critical(&self, p: &Packed) -> std::collections::BTreeSet<CellId> {
+    /// `PACKING_CRITICAL` in packing `p`, timed with the model's delay two
+    /// tiles away and `output_delay` between slices.
+    pub fn packing_critical(
+        &self,
+        p: &Packed,
+        model: &DelayModel,
+    ) -> std::collections::BTreeSet<CellId> {
         let nl = self.nl;
         let slice = |c: CellId| p.slots.get(&c).map(|&(s, _)| s);
-        let between = predicted_delay(2, 2);
+        let between = model.predict(2, 2);
         let wire = |c: CellId, i: u32, n: NetId| match nl.nets[n].driver {
             Some(d) if slice(d.cell).is_some() && slice(d.cell) == slice(c) => 0.0,
             Some(_) if !dedicated(nl, c, i) => between + output_delay(nl, p, n),
@@ -687,19 +838,30 @@ impl<'a> Timer<'a> {
     /// Analyzes the design with wire delays `wire(cell, pin, net)` (ps) from
     /// each net's driver to each cell input pin reading it.
     pub fn analyze(&self, wire: &dyn Fn(CellId, u32, NetId) -> f64) -> Analysis {
+        self.analyze_clocked(wire, &|_| ClockSite::NONE)
+    }
+
+    /// Analyzes the design with wire delays and each sequential cell's
+    /// clock site.
+    pub fn analyze_clocked(
+        &self,
+        wire: &dyn Fn(CellId, u32, NetId) -> f64,
+        clock: &dyn Fn(CellId) -> ClockSite,
+    ) -> Analysis {
         let nl = self.nl;
-        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>> = FxHashMap::default();
-        for s in &self.seq {
+        let mut arrival: FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>> = FxHashMap::default();
+        let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
+        for (s, site) in self.seq.iter().zip(&sites) {
             for (i, pin) in nl.cells[s.cell].pins.iter().enumerate() {
                 if pin.dir == Dir::Output && pin.net.is_some() {
-                    let a = Arrival { time: s.clk_to_out, from: None };
-                    arrival.entry((s.cell, i as u32)).or_default().insert(s.edge, a);
+                    let a = Arrival { time: s.clk_to_out + site.late, from: None };
+                    arrival.entry((s.cell, i as u32)).or_default().insert((s.edge, site.region), a);
                 }
             }
         }
         // The arrivals at an input pin: its driver's, plus the wire.
         let at_input =
-            |arrival: &FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>>, c: CellId, i: u32| {
+            |arrival: &FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>>, c: CellId, i: u32| {
                 let n = nl.cells[c].pins[i as usize].net?;
                 let d = nl.nets[n].driver?;
                 let w = wire(c, i, n);
@@ -745,17 +907,17 @@ impl<'a> Timer<'a> {
                 .collect()
         };
         let mut clocks: BTreeMap<NetId, Clock> = BTreeMap::new();
-        for s in &self.seq {
+        for (s, site) in self.seq.iter().zip(&sites) {
             let (clk, falling) = s.edge;
             for (i, setup) in checks(s) {
-                for ((launch, launch_falling), t) in
+                for (((launch, launch_falling), region), t) in
                     at_input(&arrival, s.cell, i).unwrap_or_default()
                 {
                     if launch != clk {
                         continue;
                     }
                     let factor = if launch_falling == falling { 1.0 } else { 0.5 };
-                    let period = (t + setup) / factor;
+                    let period = (t + setup - site.capture(region)) / factor;
                     let worst = clocks.entry(clk).or_insert(Clock {
                         net: clk,
                         period: 0.0,
@@ -763,7 +925,8 @@ impl<'a> Timer<'a> {
                     });
                     if period > worst.period {
                         worst.period = period;
-                        worst.path = self.trace(&arrival, (launch, launch_falling), (s.cell, i));
+                        worst.path =
+                            self.trace(&arrival, ((launch, launch_falling), region), (s.cell, i));
                     }
                 }
             }
@@ -787,10 +950,17 @@ impl<'a> Timer<'a> {
                 let r = required.entry((d.cell, d.pin)).or_insert(f64::MAX);
                 *r = r.min(req - w);
             };
-        for s in &self.seq {
+        for (s, site) in self.seq.iter().zip(&sites) {
             let Some(t) = clocks.get(&s.edge.0).map(|c| c.period) else { continue };
             for (i, setup) in checks(s) {
-                sink(&mut required, s.cell, i, t - setup);
+                // The capture clock's lead for the worst launch region.
+                let lead = at_input(&arrival, s.cell, i)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&((_, region), _)| site.capture(region))
+                    .fold(f64::MAX, f64::min);
+                let lead = if lead == f64::MAX { site.early } else { lead };
+                sink(&mut required, s.cell, i, t - setup + lead);
             }
         }
         for &c in self.order.iter().rev() {
@@ -808,11 +978,140 @@ impl<'a> Timer<'a> {
         Analysis { clocks: clocks.into_values().collect(), slack }
     }
 
+    /// Hold checks of flip-flop, block RAM, shift register and LUT RAM
+    /// write inputs at the fast corner: the shortest
+    /// path to each, against the capture clock's lateness over the
+    /// launch's. For each input with less than `margin` slack (ps), the
+    /// last routed connection on its shortest path (the cell input it
+    /// reaches) and the slack.
+    pub fn hold(
+        &self,
+        wire: &dyn Fn(CellId, u32, NetId) -> f64,
+        clock: &dyn Fn(CellId) -> ClockSite,
+        margin: f64,
+    ) -> Vec<((CellId, u32), f64)> {
+        let nl = self.nl;
+        let sites: Vec<ClockSite> = self.seq.iter().map(|s| clock(s.cell)).collect();
+        let hops: FxHashMap<u16, f64> = sites.iter().map(|s| (s.region, s.hops)).collect();
+        // The earliest arrival at each output by launch, with the input it
+        // came through.
+        type Early = FxHashMap<(CellId, u32), BTreeMap<Launch, (f64, Option<u32>)>>;
+        let mut early: Early = FxHashMap::default();
+        for (s, site) in self.seq.iter().zip(&sites) {
+            for (i, pin) in nl.cells[s.cell].pins.iter().enumerate() {
+                if pin.dir == Dir::Output && pin.net.is_some() {
+                    early
+                        .entry((s.cell, i as u32))
+                        .or_default()
+                        .insert((s.edge, site.region), (s.clk_to_out, None));
+                }
+            }
+        }
+        let at_input = |early: &Early, c: CellId, i: u32| {
+            let n = nl.cells[c].pins[i as usize].net?;
+            let d = nl.nets[n].driver?;
+            let w = wire(c, i, n);
+            early
+                .get(&(d.cell, d.pin))
+                .map(|m| m.iter().map(|(&l, &(t, _))| (l, t + w)).collect::<Vec<_>>())
+        };
+        for &c in &self.order {
+            for &(i, o, d) in &self.arcs[&c] {
+                for (l, t) in at_input(&early, c, i).unwrap_or_default() {
+                    let slot =
+                        early.entry((c, o)).or_default().entry(l).or_insert((f64::MAX, None));
+                    if t + d < slot.0 {
+                        *slot = (t + d, Some(i));
+                    }
+                }
+            }
+        }
+        // The last routed connection on the earliest path from `launch` to
+        // input `i` of `c`.
+        let routed = |launch: Launch, (mut c, mut i): (CellId, u32)| loop {
+            let n = nl.cells[c].pins[i as usize].net?;
+            if wire(c, i, n) > 0.0 {
+                return Some((c, i));
+            }
+            let d = nl.nets[n].driver?;
+            let (_, from) = early.get(&(d.cell, d.pin))?.get(&launch)?;
+            (c, i) = (d.cell, (*from)?);
+        };
+        let mut fails = Vec::new();
+        for (s, site) in self.seq.iter().zip(&sites) {
+            let kind = nl.cell_kind(s.cell);
+            let pins = &nl.cells[s.cell].pins;
+            let name = |i: u32| nl.str(pins[i as usize].name);
+            // Each checked input's hold time and its clock's lateness: a
+            // block RAM's clock comes later, and its inputs hold longer.
+            let checked: Vec<(u32, f64, f64)> = if kind == "RAMB18E1" {
+                let capture = s.capture.as_deref().unwrap_or_default();
+                capture
+                    .iter()
+                    .map(|&(i, _, _)| {
+                        let hold = BRAM_HOLD
+                            .iter()
+                            .find(|(class, _)| name(i).starts_with(class))
+                            .map_or(BRAM_HOLD_OTHER, |&(_, d)| d);
+                        (i, hold, BRAM_LATENCY)
+                    })
+                    .collect()
+            } else if pack::is_ff(kind) {
+                let capture = s.capture.as_deref().unwrap_or_default();
+                capture.iter().map(|&(i, _, _)| (i, FF_HOLD, 0.0)).collect()
+            } else {
+                let hold = if pack::is_srl(kind) {
+                    SRL_HOLD
+                } else if pack::is_ram(kind) {
+                    LUTRAM_HOLD
+                } else {
+                    continue;
+                };
+                // Reads are combinational: only the inputs a write takes.
+                (0..pins.len() as u32)
+                    .filter(|&i| pins[i as usize].dir == Dir::Input)
+                    .filter(|&i| {
+                        let n = name(i);
+                        matches!(n, "D" | "CE" | "WE")
+                            || n.starts_with("DI")
+                            || n.starts_with("ADDRD")
+                    })
+                    .map(|i| (i, hold, 0.0))
+                    .collect()
+            };
+            for (i, hold, late) in checked {
+                for (launch, t) in at_input(&early, s.cell, i).unwrap_or_default() {
+                    let ((edge, region), h) = (launch, hops.get(&launch.1));
+                    if edge != s.edge {
+                        continue;
+                    }
+                    let skew = match h {
+                        Some(h) if region != site.region && region != NO_REGION => {
+                            if region / 2 == site.region / 2 {
+                                HOLD_SIDE
+                            } else {
+                                HOLD_SKEW + HOLD_REGION * (site.hops - h)
+                            }
+                        }
+                        _ => HOLD_SKEW,
+                    };
+                    let slack = FAST * t - skew - late - hold;
+                    if slack < margin
+                        && let Some(at) = routed(launch, (s.cell, i))
+                    {
+                        fails.push((at, slack));
+                    }
+                }
+            }
+        }
+        fails
+    }
+
     /// The cell pins of the path ending at input `end`, launch first.
     fn trace(
         &self,
-        arrival: &FxHashMap<(CellId, u32), BTreeMap<Edge, Arrival>>,
-        edge: Edge,
+        arrival: &FxHashMap<(CellId, u32), BTreeMap<Launch, Arrival>>,
+        edge: Launch,
         end: (CellId, u32),
     ) -> Vec<String> {
         let nl = self.nl;
@@ -847,7 +1146,8 @@ impl<'a> Timer<'a> {
     }
 }
 
-/// Routing delay to each cell input pin (none for in-site paths).
+/// Routing delay to each cell input pin (none for in-site paths): the
+/// worst over the routed connections reaching it.
 pub fn routed_wires(
     db: &Device,
     nl: &Netlist,
@@ -857,11 +1157,34 @@ pub fn routed_wires(
     routes: &[synth_route::NetRoute],
     owners: &Owners,
 ) -> FxHashMap<(CellId, u32), f64> {
-    let routed = net_delays(db, graph, requests, routes);
     if let Ok(path) = std::env::var("SYNTH_XC7_DELAYS") {
+        let routed = net_delays(db, graph, requests, routes);
         dump_delays(db, graph, requests, routes, &routed, &path);
     }
-    let mut wire: FxHashMap<(CellId, u32), f64> = FxHashMap::default();
+    routed_sinks(db, nl, graph, requests, request_nets, routes, owners)
+        .into_iter()
+        .map(|(pin, sinks)| (pin, sinks.iter().fold(0.0, |w: f64, s| w.max(s.2))))
+        .collect()
+}
+
+/// Request, sink node and delay of routed connections, by cell input pin.
+pub type RoutedSinks = FxHashMap<(CellId, u32), Vec<(usize, u32, f64)>>;
+
+/// The routed connections reaching each cell input pin: request, sink node
+/// and delay. Slice sinks are owned by netlist pin; block RAM and DSP sinks
+/// by site pin, which reaches every one of the cell's pins on the net (a
+/// block RAM write enable bit drives two site pins).
+pub fn routed_sinks(
+    db: &Device,
+    nl: &Netlist,
+    graph: &RoutingGraph,
+    requests: &[synth_route::NetRequest],
+    request_nets: &[Option<NetId>],
+    routes: &[synth_route::NetRoute],
+    owners: &Owners,
+) -> RoutedSinks {
+    let routed = net_delays(db, graph, requests, routes);
+    let mut sinks = RoutedSinks::default();
     for (i, req) in requests.iter().enumerate() {
         let Some(net) = request_nets[i] else { continue };
         for &sink in &req.sinks {
@@ -870,21 +1193,17 @@ pub fn routed_wires(
                     continue;
                 }
                 let d = routed.get(&(i, sink)).copied().unwrap_or(0.0);
-                // Slice sinks are owned by netlist pin; block RAM and DSP
-                // sinks by site pin, so those take the worst over the cell's
-                // pins on the net.
                 let pins = &nl.cells[*c].pins;
                 let on_net = |k: &usize| pins[*k].dir == Dir::Input && pins[*k].net == Some(net);
                 let named = (0..pins.len()).find(|k| on_net(k) && nl.str(pins[*k].name) == name);
                 for k in named.map_or_else(|| (0..pins.len()).filter(on_net).collect(), |k| vec![k])
                 {
-                    let w = wire.entry((*c, k as u32)).or_insert(0.0);
-                    *w = w.max(d);
+                    sinks.entry((*c, k as u32)).or_default().push((i, sink, d));
                 }
             }
         }
     }
-    wire
+    sinks
 }
 
 /// Writes each routed connection's sink site pin (`SITE/PIN`; the LUT input
@@ -906,6 +1225,7 @@ fn dump_delays(
         for &e in &route.edges {
             parent.insert(graph.dst[e as usize], e);
         }
+        let load = branch_load(db, graph, &route.edges);
         for &sink in &req.sinks {
             let Some(&d) = routed.get(&(i, sink)) else { continue };
             let mut pips = Vec::new();
@@ -924,7 +1244,7 @@ fn dump_delays(
                         tmpl.kind,
                         tmpl.wires[pip.src as usize],
                         tmpl.wires[pip.dst as usize],
-                        pip_delay(db, graph, &parent, e)
+                        pip_delay(db, graph, &parent, &load, e)
                     ));
                 }
                 at = edge_src(graph, e);
@@ -972,16 +1292,69 @@ pub fn dedicated(nl: &Netlist, c: CellId, i: u32) -> bool {
     nl.cell_kind(c) == "CARRY4" && nl.str(nl.cells[c].pins[i as usize].name) == "CI"
 }
 
-/// The routing delay between two tiles before routing (ps): a piecewise
-/// linear fit of the routed connections between slices (calibrated delays,
-/// Euler 14, 43, 57 and 92), even within one tile, which routes through the
-/// interconnect. Nearby columns are about as close as one column; rows cost
-/// more until long wires take over.
-pub fn predicted_delay(dx: i32, dy: i32) -> f64 {
-    let (dx, dy) = (f64::from(dx.abs()), f64::from(dy.abs()));
-    428.0
-        + 15.7 * dx.min(8.0)
-        + 70.0 * (dx - 8.0).max(0.0)
-        + 60.0 * dy.min(5.0)
-        + 52.0 * (dy - 5.0).max(0.0)
+/// Routing delay between two tiles before routing (ps): the fastest delays
+/// through the routing graph by tile offset (`RoutingGraph::slice_delays`).
+/// On Euler 58's routed connections it is within 2% of their mean delay
+/// within a tile and 10-25% under it a few tiles away, where the piecewise
+/// linear fit it replaced was 30% under; tens of rows away, where long wires
+/// take over, the fit was two to three times over.
+#[derive(Clone, Debug)]
+pub struct DelayModel {
+    width: usize,
+    height: usize,
+    /// By `|dx| * height + |dy|`.
+    table: Vec<f64>,
+}
+
+impl DelayModel {
+    /// A model from the fastest delays by offset, unreached offsets filled
+    /// from their neighbours nearer the origin.
+    pub fn new(width: usize, height: usize, mut table: Vec<f64>) -> Self {
+        for x in 0..width {
+            for y in 0..height {
+                if table[x * height + y].is_infinite() {
+                    let near = [
+                        (x > 0).then(|| table[(x - 1) * height + y]),
+                        (y > 0).then(|| table[x * height + y - 1]),
+                    ];
+                    table[x * height + y] = near.into_iter().flatten().fold(0.0, f64::max);
+                }
+            }
+        }
+        DelayModel { width, height, table }
+    }
+
+    pub fn predict(&self, dx: i32, dy: i32) -> f64 {
+        let (x, y) = (dx.unsigned_abs() as usize, dy.unsigned_abs() as usize);
+        let at = |x: usize, y: usize| {
+            self.table[x.min(self.width - 1) * self.height + y.min(self.height - 1)]
+        };
+        // Beyond the table, the slope of its last eight tiles.
+        let mut d = at(x, y);
+        if x >= self.width && self.width > 8 {
+            d +=
+                (x - self.width + 1) as f64 * (at(self.width - 1, y) - at(self.width - 9, y)) / 8.0;
+        }
+        if y >= self.height && self.height > 8 {
+            d += (y - self.height + 1) as f64 * (at(x, self.height - 1) - at(x, self.height - 9))
+                / 8.0;
+        }
+        d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_clocks_share_more_pessimism_the_closer_the_launch_region() {
+        // Region 2 is row 1, left of the spine; region 3 is row 1, right.
+        let site = ClockSite { region: 2, hops: 1.0, late: 300.0, early: 200.0 };
+        assert_eq!(site.capture(2), 200.0 + SHARED_REGION);
+        assert_eq!(site.capture(3), 200.0 + SHARED_ROW);
+        assert_eq!(site.capture(0), 200.0);
+        assert_eq!(site.capture(NO_REGION), 200.0);
+        assert_eq!(ClockSite::NONE.capture(NO_REGION), 0.0);
+    }
 }

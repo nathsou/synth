@@ -75,7 +75,8 @@ ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
     synth build <files.v...> --family artix7 --top <module>
               --device <xc7a35tftg256-1|xc7a100tcsg324-1|...>
               --db <prjxray-db/artix7> --xdc <file> [-o <out.bit>]
-              [--fasm <out.fasm>] [--seed <n>] [--effort <n>] --timing-allow-fail
+              [--fasm <out.fasm>] [--seed <n>] [--effort <n>] [--tries <n>]
+              --timing-allow-fail
               pnr accepts the same physical options with a mapped RTLIL input;
               pnr --pack-stats reports its native packing (alone without --db).
               Native Rust packing, placement, routing and frame generation.
@@ -334,6 +335,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--asc",
             "--seed",
             "--effort",
+            "--tries",
             "--carry-min-width",
             "--timing-weight",
             "--freq",
@@ -404,6 +406,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             "--asc",
             "--seed",
             "--effort",
+            "--tries",
             "--timing-weight",
             "--freq",
             "--route-timing-rounds",

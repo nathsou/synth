@@ -147,11 +147,16 @@ def fmax(prefix):
 
 
 def implement(top, prefix, sources, xdc, part, threads):
+    report = REPORT.replace("{prefix}", str(prefix))
+    # VIVADO_SKIP=opt_design,phys_opt_design leaves those steps out, to
+    # measure what they gain.
+    for step in filter(None, os.environ.get("VIVADO_SKIP", "").split(",")):
+        report = report.replace(f"\n{step}\n", "\n")
     reads = "".join(f"read_verilog {{{s}}}\n" for s in sources)
     tcl = (f"set_param general.maxThreads {threads}\n{reads}read_xdc {{{xdc}}}\n"
            f"set t [clock milliseconds]\nsynth_design -top {top} -part {part}\n"
            f"puts \"QOR seconds_synth [expr {{([clock milliseconds] - $t) / 1000.0}}]\"\n"
-           f"report_utilization -file {{{prefix}.synth_util.rpt}}\n" + REPORT.replace("{prefix}", str(prefix)))
+           f"report_utilization -file {{{prefix}.synth_util.rpt}}\n" + report)
     path = Path(f"{prefix}.tcl")
     path.write_text(tcl)
     seconds, error = vivado(path, Path(f"{prefix}.log"), prefix.parent)
@@ -254,9 +259,13 @@ def timed_attempt(a, prefix, xdc, skip):
     if error:
         return {"vivado_error": error}
     log = Path(f"{prefix}.timing.log").read_text()
+    hold = re.search(r"^Hold\s*:\s*(\d+)\s+Failing Endpoints?\s*,\s*Worst Slack\s+(-?[0-9.]+)ns",
+                     Path(f"{prefix}.timing.rpt").read_text(), re.M)
     return {"vivado_mhz": fmax(prefix),
             "vivado_unrouted": int(re.findall(r"^QOR unrouted (\d+)", log, re.M)[-1]),
-            "vivado_unfixed": int(re.findall(r"^QOR unfixed (\d+)", log, re.M)[-1])}
+            "vivado_unfixed": int(re.findall(r"^QOR unfixed (\d+)", log, re.M)[-1]),
+            "vivado_hold_failing": int(hold[1]) if hold else None,
+            "vivado_hold_wns": float(hold[2]) if hold else None}
 
 
 def native(files, top, prefix, xdc, a):
