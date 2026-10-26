@@ -363,12 +363,15 @@ fn place_and_route(
     log: &mut Vec<String>,
 ) -> Result<(crate::place::Placement, crate::route::Routing), String> {
     // Each retry also leaves tiles room on their local tracks (contested
-    // local tracks in full tiles are what fails to route), anneals longer
+    // local tracks in full tiles are what fails to route), anneals twice as
+    // long (on a nearly full device, a short anneal leaves more wire than
+    // the routing has: Euler 58 at effort 0.3 does not route with its seed
+    // again, nor does it at effort 0.6 with Euler 58 in the playground)
     // and starts from another seed, not to meet the same conflict again.
     let attempts = [
         (opts.timing_weight, 32, opts.place_effort),
-        (opts.timing_weight / 2.0, 30, opts.place_effort),
-        (0.0, 28, 2.0 * opts.place_effort),
+        (opts.timing_weight / 2.0, 30, 2.0 * opts.place_effort),
+        (0.0, 28, 4.0 * opts.place_effort),
     ];
     for (attempt, &(w, max_locals, effort)) in attempts.iter().enumerate() {
         let t = Instant::now();

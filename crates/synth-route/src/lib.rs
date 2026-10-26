@@ -84,6 +84,10 @@ pub struct RouteOptions {
     pub arc_bounding_boxes: bool,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
+    /// Give up once congestion falls too slowly to be resolved within this
+    /// many times `max_iterations` (VPR's routing failure predictor; 0:
+    /// never): see [`hopeless`].
+    pub failure_prediction: f32,
     /// Iterations between criticality updates while congested (0: never).
     pub retime_every: usize,
     /// Nets with a sink at least this critical are routed again after an
@@ -112,6 +116,7 @@ impl Default for RouteOptions {
             bbox_margin: 3,
             arc_bounding_boxes: false,
             stall_iterations: 120,
+            failure_prediction: 2.0,
             retime_every: 0,
             reroute_criticality: 0.95,
             timing_rounds: 0,
@@ -667,6 +672,13 @@ pub fn route_with_initial(
         if iter >= best_iter + opts.stall_iterations {
             break;
         }
+        // Congestion that will not be resolved in time: give up now rather
+        // than at the last iteration.
+        if timing_rounds == 0
+            && hopeless(&stats.overused_history, opts.max_iterations, opts.failure_prediction)
+        {
+            break;
+        }
         // A timing round that does not become legal soon is abandoned.
         if timing_rounds > 0 && iter >= best_iter + opts.timing_round_iterations {
             break;
@@ -718,6 +730,33 @@ pub fn route_with_initial(
     let (nodes, nets) = best.unwrap_or_default();
     let overused_nodes = nodes.len();
     Err(RouteError::Congested { overused_nodes, nodes, nets })
+}
+
+/// Whether congestion falls too slowly to be resolved within `factor`
+/// times `max_iterations`, by the overused node counts of each iteration
+/// so far (VPR's routing failure predictor): a line fitted to the latter
+/// half of them (by least squares) must reach zero by then. Judged once a
+/// quarter of the iterations allowed are done, when the first rounds'
+/// steep fall is past; on a placement that leaves more wire than the
+/// device has, the count falls ever more slowly and routing would run to
+/// the last iteration before failing.
+fn hopeless(history: &[usize], max_iterations: usize, factor: f32) -> bool {
+    let n = history.len();
+    if factor <= 0.0 || n < (max_iterations / 4).max(4) {
+        return false;
+    }
+    let recent = &history[n / 2..];
+    let m = recent.len() as f64;
+    let (mx, my) = ((m - 1.0) / 2.0, recent.iter().sum::<usize>() as f64 / m);
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (x, &y) in recent.iter().enumerate() {
+        let dx = x as f64 - mx;
+        sxy += dx * (y as f64 - my);
+        sxx += dx * dx;
+    }
+    let slope = sxy / sxx;
+    let now = my + slope * (m - 1.0 - mx);
+    slope >= 0.0 || n as f64 + now / -slope > factor as f64 * max_iterations as f64
 }
 
 /// Routes the nets of `to_route` concurrently where they lie in disjoint
@@ -1485,6 +1524,19 @@ mod tests {
         assert_eq!(stats.reused_nets, 2);
         assert!(repaired[3].edges.iter().any(|&e| d[e as usize] == r1));
         assert!(repaired[2].edges.iter().any(|&e| d[e as usize] == s3));
+    }
+
+    #[test]
+    fn failure_predicted_from_slowing_congestion() {
+        // Halving every few iterations: resolved in time.
+        let fast: Vec<usize> = (0..60).map(|i| 4000 >> (i / 6)).collect();
+        assert!(!hopeless(&fast, 200, 2.0));
+        // Falling by a few nodes an iteration from thousands: not in time.
+        let slow: Vec<usize> = (0..60).map(|i| 2400 - 5 * i).collect();
+        assert!(hopeless(&slow, 200, 2.0));
+        assert!(!hopeless(&slow, 200, 0.0));
+        // Too early to tell.
+        assert!(!hopeless(&slow[..40], 200, 2.0));
     }
 
     #[test]
