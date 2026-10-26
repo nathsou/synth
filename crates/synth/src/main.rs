@@ -48,9 +48,11 @@ BUILD OPTIONS:
     synth build <files.v|.weft...> --device <hx1k|hx8k|...> --package <pkg>
               [--top <module>] [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--timing-weight <0..1>] [--freq <MHz>] [--timing-allow-fail]
-              [--carry-min-width <bits>]
+              [--tries <n>] [--timing-weight <0..1>] [--freq <MHz>]
+              [--timing-allow-fail] [--carry-min-width <bits>]
               [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
+              --tries: placement seeds placed and routed, on threads of their
+              own, the best timed kept (default 4; 1 is fastest).
               --carry-min-width: minimum adder width for hard carry chains
               (default 3); variable comparators use two more bits.
               Clock targets: `set_frequency <net> <MHz>` in the PCF, --freq
@@ -128,8 +130,8 @@ SIM OPTIONS:
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
               [--pcf <file>] [-o <out.bin>] [--asc <out.asc>] [--seed <n>]
-              [--freq <MHz>] [--timing-allow-fail] [--route-timing-rounds <n>]
-              [--incremental [<checkpoint>]]
+              [--tries <n>] [--freq <MHz>] [--timing-allow-fail]
+              [--route-timing-rounds <n>] [--incremental [<checkpoint>]]
 ";
 
 /// Whether the command line selects the Artix-7 flow.
@@ -237,7 +239,7 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     Ok(nl)
 }
 
-/// `--timing-weight` (default 0.5).
+/// `--timing-weight` (default [`arch_ice40::flow::TIMING_WEIGHT`]).
 /// Clock targets: the PCF's `set_frequency` lines, and `--freq` for the
 /// other clocks.
 pub(crate) fn clocks(
@@ -249,6 +251,14 @@ pub(crate) fn clocks(
     Ok(c)
 }
 
+/// `--tries` for iCE40 (default [`arch_ice40::flow::TRIES`]).
+fn tries(a: &mut Args) -> Result<usize, String> {
+    match a.value("--tries") {
+        Some(v) => v.parse().ok().filter(|&n| n >= 1).ok_or("bad --tries".into()),
+        None => Ok(arch_ice40::flow::TRIES),
+    }
+}
+
 pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
     match a.value("--timing-weight") {
         Some(v) => v
@@ -256,7 +266,7 @@ pub(crate) fn timing_weight(a: &mut Args) -> Result<f64, String> {
             .ok()
             .filter(|w: &f64| (0.0..=1.0).contains(w))
             .ok_or("bad --timing-weight".into()),
-        None => Ok(0.5),
+        None => Ok(arch_ice40::flow::TIMING_WEIGHT),
     }
 }
 
@@ -386,6 +396,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
             .transpose()?
             .unwrap_or(arch_ice40::flow::ROUTE_TIMING_ROUNDS),
+        tries: tries(&mut a)?,
     };
     let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)
@@ -466,6 +477,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
             .transpose()?
             .unwrap_or(arch_ice40::flow::ROUTE_TIMING_ROUNDS),
+        tries: tries(&mut a)?,
     };
     let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)

@@ -17,7 +17,7 @@ const DEFAULTS = {
   // Run options.
   seed: 1,
   freq: 0,
-  timingWeight: 0.5,
+  timingWeight: 0.8,
   effort: 1,
   // Schematic.
   schDepth: 0,

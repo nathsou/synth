@@ -31,7 +31,7 @@ pub struct PlaceOptions {
 impl Default for PlaceOptions {
     fn default() -> Self {
         PlaceOptions {
-            timing_weight: 0.5,
+            timing_weight: crate::flow::TIMING_WEIGHT,
             seed: 1,
             effort: 1.0,
             max_locals: 32,

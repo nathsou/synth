@@ -906,9 +906,14 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         package,
         seed: req.at(&["seed"]).as_i64().unwrap_or(1).max(0) as u64,
         place_effort: req.at(&["effort"]).as_f64().unwrap_or(1.0),
-        timing_weight: req.at(&["timing_weight"]).as_f64().unwrap_or(0.5).clamp(0.0, 1.0),
+        timing_weight: req
+            .at(&["timing_weight"])
+            .as_f64()
+            .unwrap_or(arch_ice40::flow::TIMING_WEIGHT)
+            .clamp(0.0, 1.0),
         clocks,
         route_timing_rounds: arch_ice40::flow::ROUTE_TIMING_ROUNDS,
+        tries: req.at(&["tries"]).as_i64().map_or(1, |n| n.max(1) as usize),
     };
     let (res, imp) = arch_ice40::flow::implement_detailed(nl, &pcf.pins, &opts).map_err(|e| {
         // The log of a failed run comes first, as `info:` lines.

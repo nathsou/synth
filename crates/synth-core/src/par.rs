@@ -12,25 +12,28 @@ pub fn threads(limit: usize) -> usize {
 }
 
 /// `f` applied to every item, on up to `threads` threads taking items in
-/// turn; the results come back in the order of `items`.
+/// turn; the results come back in the order of `items`. The calling thread
+/// is one of them and maps the first item, so that its progress reports
+/// (see [`crate::progress`]) are those of the first item.
 pub fn map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = threads.min(items.len());
     if threads <= 1 {
         return items.iter().map(f).collect();
     }
-    let next = AtomicUsize::new(0);
+    let next = AtomicUsize::new(1);
     let results: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = items.get(i) else { break };
-                    let r = f(item);
-                    *results[i].lock().expect("result slot") = Some(r);
-                }
-            });
+    let work = |mut i: usize| {
+        while let Some(item) = items.get(i) {
+            let r = f(item);
+            *results[i].lock().expect("result slot") = Some(r);
+            i = next.fetch_add(1, Ordering::Relaxed);
         }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..threads {
+            s.spawn(|| work(next.fetch_add(1, Ordering::Relaxed)));
+        }
+        work(0);
     });
     results
         .into_iter()
