@@ -576,9 +576,12 @@ How to read the timing columns:
   and 97 have only synth's estimate.
 - Extend timing to I/O, and characterize the BRAM pips
   missing from the upstream data.
-- Reduce routing time on designs with wide high-fanout critical nets
-  (Euler 48: three times nextpnr's). Their sinks' A* searches are loosely
-  bounded by a lookahead that classes wires without their index.
+- Reduce routing time further. With a lookahead sample for each kind of
+  sink, Euler 48 routes in 69 s rather than 113 s and Euler 10 in 99 s
+  rather than 234 s (four seeds at once; the whole suite's flow takes a
+  third less time at the same Fmax), but the lookahead's thirty-odd
+  backward searches cost seconds on any design: Euler 31, of 54 LUTs,
+  takes 6 s longer than before.
 - Close the remaining synthesis gaps: Euler 43's wide multiplexing, and
   carry-lane LUT replication that costs 2–5% slices on Euler 43, 48 and 97.
 - Validate on hardware with a SoC and realistic clock and I/O constraints;
