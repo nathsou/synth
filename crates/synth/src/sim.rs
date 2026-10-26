@@ -544,7 +544,7 @@ fn bitstream(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, St
                 place_effort: 1.0,
                 timing_weight: crate::timing_weight(a)?,
                 clocks: crate::clocks(a, &pcf)?,
-                route_timing_rounds: 0,
+                route_timing_rounds: arch_ice40::flow::ROUTE_TIMING_ROUNDS,
             };
             arch_ice40::flow::implement(nl, &pcf.pins, &opts)?.config
         }

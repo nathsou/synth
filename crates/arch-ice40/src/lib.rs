@@ -14,6 +14,7 @@ pub mod checkpoint;
 pub mod chipdb;
 pub mod decode;
 pub mod device;
+pub mod estimate;
 pub mod flow;
 pub mod pack;
 pub mod pcf;

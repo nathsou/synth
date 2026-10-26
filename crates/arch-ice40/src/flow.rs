@@ -26,6 +26,10 @@ pub struct FlowOptions {
     pub route_timing_rounds: usize,
 }
 
+/// Default rounds of rerouting critical connections once routing is legal:
+/// the best timed routing of these is kept (1% Fmax over the iCE40 suite).
+pub const ROUTE_TIMING_ROUNDS: usize = 3;
+
 /// Result of a successful run.
 #[derive(Debug)]
 pub struct FlowResult {

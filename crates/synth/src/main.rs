@@ -58,7 +58,7 @@ BUILD OPTIONS:
               bitstream is still written) unless --timing-allow-fail.
               --route-timing-rounds: reroute critical connections that many
               times once routing is legal, keeping the best timed routing
-              (slower; helps congested designs slightly).
+              (default 3; 0 keeps the first legal routing).
               --incremental: reuse compatible placement/routes and update
               the checkpoint after a run that meets timing. Missing, corrupt
               or incompatible checkpoints start fresh. Synthesis still runs.
@@ -385,7 +385,7 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             .value("--route-timing-rounds")
             .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
             .transpose()?
-            .unwrap_or(0),
+            .unwrap_or(arch_ice40::flow::ROUTE_TIMING_ROUNDS),
     };
     let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)
@@ -465,7 +465,7 @@ fn cmd_pnr(argv: &[String]) -> Result<(), String> {
             .value("--route-timing-rounds")
             .map(|s| s.parse().map_err(|_| "bad --route-timing-rounds"))
             .transpose()?
-            .unwrap_or(0),
+            .unwrap_or(arch_ice40::flow::ROUTE_TIMING_ROUNDS),
     };
     let res = implement(nl, &pcf.pins, &opts, &mut a)?;
     finish_flow(&res, &mut a)
