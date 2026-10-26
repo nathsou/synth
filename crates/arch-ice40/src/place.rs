@@ -49,23 +49,29 @@ pub struct Placement {
     pub cell_global: FxHashMap<CellId, u8>,
 }
 
-/// Clock, clock enable, set/reset and clock polarity shared by a tile's flops.
-type ControlSet = (Option<NetId>, Option<NetId>, Option<NetId>, bool);
+/// No net, in [`LcInfo`].
+const NO_NET: u32 = u32::MAX;
 
-#[derive(Clone, Copy, Debug, Default)]
+/// What tile legality needs of a logic cell, nets as raw ids.
+#[derive(Clone, Copy, Debug)]
 struct LcInfo {
-    dff: bool,
-    neg_clk: bool,
-    clk: Option<NetId>,
-    cen: Option<NetId>,
-    sr: Option<NetId>,
+    /// The control set of the cell's flip-flop (clock, clock enable,
+    /// set/reset and clock polarity, which a tile's flip-flops share),
+    /// numbered from 1 in the order of those nets; 0 without a flip-flop.
+    ctrl: u32,
     /// Nets on inputs `I0`/`I2` and on `I1`/`I3` (unless it is the carry
     /// input). In even logic cells the former use class A local tracks and
     /// the latter class B; odd cells are the other way round.
-    even_pins: [Option<NetId>; 2],
-    odd_pins: [Option<NetId>; 2],
+    even_pins: [u32; 2],
+    odd_pins: [u32; 2],
     /// Control nets that need a class A local track (not on a global).
-    fabric_ctrl: [Option<NetId>; 3],
+    fabric_ctrl: [u32; 3],
+}
+
+impl Default for LcInfo {
+    fn default() -> Self {
+        LcInfo { ctrl: 0, even_pins: [NO_NET; 2], odd_pins: [NO_NET; 2], fabric_ctrl: [NO_NET; 3] }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -638,24 +644,33 @@ impl<'a> Annealer<'a> {
         };
 
         let is_global = |n: NetId| on_global(nl, n);
+        let raw = |n: Option<NetId>| n.map_or(NO_NET, |n| n.raw());
+        let mut sets = Vec::new();
         for c in nl.live_cells() {
             if nl.cell_kind(c) != LC {
                 continue;
             }
             let p = |name: &str| nl.param(c, name).and_then(Param::as_u64).unwrap_or(0) != 0;
-            let mut info =
-                LcInfo { dff: p("DFF_ENABLE"), neg_clk: p("NEG_CLK"), ..Default::default() };
-            if info.dff {
-                info.clk = nl.pin_net(c, "CLK");
-                info.cen = nl.pin_net(c, "CEN");
-                info.sr = nl.pin_net(c, "SR");
-                let fab = |n: Option<NetId>| n.filter(|&n| !is_global(n));
-                info.fabric_ctrl = [fab(info.clk), fab(info.cen), fab(info.sr)];
+            let mut info = LcInfo::default();
+            if p("DFF_ENABLE") {
+                let ctrl = [nl.pin_net(c, "CLK"), nl.pin_net(c, "CEN"), nl.pin_net(c, "SR")];
+                let n = |n: Option<NetId>| n.map_or(0, |n| n.index() + 1);
+                sets.push(((n(ctrl[0]), n(ctrl[1]), n(ctrl[2]), p("NEG_CLK")), c));
+                info.fabric_ctrl = ctrl.map(|n| raw(n.filter(|&n| !is_global(n))));
             }
             let cin = nl.pin_net(c, "CIN");
-            info.even_pins = [nl.pin_net(c, "I0"), nl.pin_net(c, "I2")];
-            info.odd_pins = [nl.pin_net(c, "I1"), nl.pin_net(c, "I3").filter(|&n| Some(n) != cin)];
+            info.even_pins = [raw(nl.pin_net(c, "I0")), raw(nl.pin_net(c, "I2"))];
+            info.odd_pins =
+                [raw(nl.pin_net(c, "I1")), raw(nl.pin_net(c, "I3").filter(|&n| Some(n) != cin))];
             sa.lc_info[c.index()] = info;
+        }
+        sets.sort_unstable();
+        let mut set = 0;
+        for (i, &(key, c)) in sets.iter().enumerate() {
+            if i == 0 || key != sets[i - 1].0 {
+                set += 1;
+            }
+            sa.lc_info[c.index()].ctrl = set;
         }
         // Units: chains first, then single logic cells and RAMs.
         let mut in_chain = vec![false; ncells];
@@ -838,41 +853,38 @@ impl<'a> Annealer<'a> {
     /// even cells (`I1`/`I3` of odd cells) take class A, the other inputs
     /// class B (a net reaching several pins of a class needs one track).
     fn tile_ok(&self, x: usize, y: usize) -> bool {
-        let mut ctrl: Option<ControlSet> = None;
-        let mut a: [Option<NetId>; 19] = [None; 19];
-        let mut b: [Option<NetId>; 16] = [None; 16];
+        let mut ctrl = 0;
+        let mut a = [NO_NET; 19];
+        let mut b = [NO_NET; 16];
         let (mut na, mut nb) = (0, 0);
         let base = self.slot(x, y, 0);
         for z in 0..8 {
             let Some(c) = self.lc_occ[base + z] else { continue };
             let i = &self.lc_info[c.index()];
-            if i.dff {
-                let key = (i.clk, i.cen, i.sr, i.neg_clk);
-                match ctrl {
-                    None => {
-                        ctrl = Some(key);
-                        for n in i.fabric_ctrl.iter().flatten() {
-                            if !a[..na].contains(&Some(*n)) {
-                                a[na] = Some(*n);
-                                na += 1;
-                            }
+            if i.ctrl != 0 {
+                if ctrl == 0 {
+                    ctrl = i.ctrl;
+                    for &n in &i.fabric_ctrl {
+                        if n != NO_NET && !a[..na].contains(&n) {
+                            a[na] = n;
+                            na += 1;
                         }
                     }
-                    Some(k) if k != key => return false,
-                    _ => {}
+                } else if ctrl != i.ctrl {
+                    return false;
                 }
             }
             let (ca, cb) =
                 if z % 2 == 0 { (&i.even_pins, &i.odd_pins) } else { (&i.odd_pins, &i.even_pins) };
-            for n in ca.iter().flatten() {
-                if !a[..na].contains(&Some(*n)) {
-                    a[na] = Some(*n);
+            for &n in ca {
+                if n != NO_NET && !a[..na].contains(&n) {
+                    a[na] = n;
                     na += 1;
                 }
             }
-            for n in cb.iter().flatten() {
-                if !b[..nb].contains(&Some(*n)) {
-                    b[nb] = Some(*n);
+            for &n in cb {
+                if n != NO_NET && !b[..nb].contains(&n) {
+                    b[nb] = n;
                     nb += 1;
                 }
             }
@@ -963,9 +975,8 @@ impl<'a> Annealer<'a> {
             self.logic_cols.iter().flat_map(|&x| (1..=self.height).map(move |y| (x, y))).collect();
         self.rng.shuffle(&mut tiles);
         let key = |c: CellId, sa: &Self| {
-            let i = &sa.lc_info[c.index()];
-            let n = |n: Option<NetId>| n.map_or(0, |n| n.index() + 1);
-            (!i.dff, n(i.clk), n(i.cen), n(i.sr), i.neg_clk)
+            let ctrl = sa.lc_info[c.index()].ctrl;
+            (ctrl == 0, ctrl)
         };
         let mut singles: Vec<CellId> = units
             .iter()
