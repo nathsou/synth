@@ -494,6 +494,22 @@ fn shift(lo: &mut i16, on_lo: &mut u32, hi: &mut i16, on_hi: &mut u32, from: i16
     true
 }
 
+/// What the annealing rule makes of a move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    Accepted,
+    Rejected,
+    /// A move that changes no cost: always taken.
+    Free,
+}
+
+impl Decision {
+    /// Whether the move was accepted, for the moves the schedule counts.
+    fn counted(self) -> Option<bool> {
+        (self != Decision::Free).then_some(self == Decision::Accepted)
+    }
+}
+
 /// Nets with at most this many cells get their bounding boxes by a scan
 /// rather than updates.
 const SCANNED_NET: usize = 8;
@@ -1268,7 +1284,24 @@ impl<'a> Annealer<'a> {
         target
     }
 
-    /// Tries one move; returns whether it was accepted.
+    /// The annealing rule's decision on the move being tried.
+    fn decide(&mut self, temp: f64) -> Decision {
+        let d = self.delta();
+        if d == 0.0 {
+            Decision::Free
+        } else if d < 0.0 || self.rng.unit() < (-d / temp).exp() {
+            Decision::Accepted
+        } else {
+            Decision::Rejected
+        }
+    }
+
+    /// Tries one move; returns whether it was accepted, or `None` for a
+    /// move the schedule does not count: illegal, or changing no cost. The
+    /// acceptance rate tells how hot the annealing is; illegal moves (most
+    /// at first, to tiles of another control set) would hold it near half
+    /// from the first temperature on, and moves within a tile, which cost
+    /// nothing, would keep it there to the end.
     fn try_move(&mut self, temp: f64, rlim: f64) -> Option<bool> {
         let u = if self.movable.is_empty() {
             self.rng.below(self.units.len())
@@ -1320,10 +1353,8 @@ impl<'a> Annealer<'a> {
                 self.moved.clear();
                 self.moved.push((c, (x, y)));
                 self.moved.extend(other.map(|o| (o, (nx as i16, ny as i16))));
-                let accept = legal && {
-                    let d = self.delta();
-                    d <= 0.0 || self.rng.unit() < (-d / temp).exp()
-                };
+                let decision = legal.then(|| self.decide(temp));
+                let accept = decision.is_some_and(|d| d != Decision::Rejected);
                 if accept {
                     self.commit();
                 } else {
@@ -1334,7 +1365,7 @@ impl<'a> Annealer<'a> {
                         self.set_pos(o, (nx as i16, ny as i16, nz as u8));
                     }
                 }
-                Some(accept)
+                decision.and_then(Decision::counted)
             }
             Unit::Chain(_) => {
                 let Unit::Chain(cells) = std::mem::replace(&mut self.units[u], Unit::Chain(vec![]))
@@ -1373,8 +1404,8 @@ impl<'a> Annealer<'a> {
                 if let Some(o) = other {
                     place(self, o, s_old);
                 }
-                let d = self.delta();
-                let accept = d <= 0.0 || self.rng.unit() < (-d / temp).exp();
+                let decision = self.decide(temp);
+                let accept = decision != Decision::Rejected;
                 if accept {
                     self.commit();
                 } else {
@@ -1384,7 +1415,7 @@ impl<'a> Annealer<'a> {
                         place(self, o, s_new);
                     }
                 }
-                Some(accept)
+                decision.counted()
             }
         }
     }
@@ -1510,10 +1541,8 @@ impl<'a> Annealer<'a> {
         self.moved.clear();
         self.moved.extend(moving.iter().zip(&old).map(|(&c, p)| (c, (p.0, p.1))));
         self.moved.extend(displaced.iter().map(|&(o, p)| (o, (p.0, p.1))));
-        let accept = legal && {
-            let d = self.delta();
-            d <= 0.0 || self.rng.unit() < (-d / temp).exp()
-        };
+        let decision = legal.then(|| self.decide(temp));
+        let accept = decision.is_some_and(|d| d != Decision::Rejected);
         if accept {
             self.commit();
         } else {
@@ -1535,7 +1564,7 @@ impl<'a> Annealer<'a> {
                 self.set_pos(o, p);
             }
         }
-        Some(accept)
+        decision.and_then(Decision::counted)
     }
 
     fn anneal(&mut self, log: &mut Vec<String>) {
