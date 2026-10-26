@@ -9,14 +9,27 @@
 //! seen at an offset falls back to the minimum over all classes there, and
 //! past the searched radius it grows at the mean rate per tile of the outer
 //! half of the table, so it is an estimate rather than a bound there.
+//!
+//! The minimum bounds sinks like those sampled only. Sinks are told apart
+//! by the classes of the nodes entering them (a clock pin is entered from
+//! the clock tree, a LUT input from the interconnect), and each kind the
+//! spread samples miss gets one of its own: from clock wires, a table of
+//! data sinks alone knew only long routes into the fabric, never the two
+//! hops into a clock pin, and searches toward clock pins expanded almost
+//! everything else first. Toward the sinks of kinds too rare to sample,
+//! searches go uninformed.
 
 use std::collections::BinaryHeap;
+
+use synth_core::{FxHashMap, FxHashSet};
 
 use crate::{Graph, NetRequest, QueueEntry};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Lookahead {
     radius: i16,
+    /// The sinks of the kinds sampled, which the table bounds.
+    informed: FxHashSet<u32>,
     /// Per class, then `|dy|`, then `|dx|`.
     cost: Vec<f32>,
     delay: Vec<f32>,
@@ -25,8 +38,10 @@ pub(crate) struct Lookahead {
     delay_slope: f32,
 }
 
-/// Sinks searched from: spread over the sinks of `nets` in node order.
+/// Sinks searched from: spread over the sinks of `nets` in node order, and
+/// one more for each kind of at least [`KIND`] sinks none of them is.
 const SAMPLES: usize = 16;
+const KIND: usize = 8;
 
 /// The graph searched backwards.
 pub(crate) struct Searched<'g> {
@@ -50,8 +65,46 @@ impl Lookahead {
         let mut sinks: Vec<u32> = nets.iter().flat_map(|n| n.sinks.iter().copied()).collect();
         sinks.sort_unstable();
         sinks.dedup();
+        // Sinks by kind: the classes entering them, in order of first sink.
+        let mut kinds: Vec<Vec<u32>> = Vec::new();
+        let mut kind_of: FxHashMap<Vec<u16>, usize> = FxHashMap::default();
+        let mut sink_kind = Vec::with_capacity(sinks.len());
+        for &k in &sinks {
+            let k = k as usize;
+            let mut entering: Vec<u16> = g.pred_edges[g.preds[k] as usize..g.preds[k + 1] as usize]
+                .iter()
+                .map(|&e| class_of(class, g.edge_src[e as usize] as usize) as u16)
+                .collect();
+            entering.sort_unstable();
+            entering.dedup();
+            let next = kinds.len();
+            let i = *kind_of.entry(entering).or_insert(next);
+            if i == next {
+                kinds.push(Vec::new());
+            }
+            kinds[i].push(k as u32);
+            sink_kind.push(i);
+        }
+        // Samples spread over all sinks, then the middle sink of each kind
+        // of at least `KIND` they miss.
         let step = sinks.len().div_ceil(SAMPLES).max(1);
-        let samples: Vec<u32> = sinks.iter().copied().step_by(step).collect();
+        let mut samples: Vec<u32> = sinks.iter().copied().step_by(step).collect();
+        let mut sampled = vec![false; kinds.len()];
+        for i in (0..sinks.len()).step_by(step) {
+            sampled[sink_kind[i]] = true;
+        }
+        for (kind, sampled) in kinds.iter().zip(&mut sampled) {
+            if !*sampled && kind.len() >= KIND {
+                samples.push(kind[kind.len() / 2]);
+                *sampled = true;
+            }
+        }
+        let informed: FxHashSet<u32> = kinds
+            .iter()
+            .zip(&sampled)
+            .filter(|&(_, &s)| s)
+            .flat_map(|(kind, _)| kind.iter().copied())
+            .collect();
         let side = radius as usize + 1;
         let cells = side * side;
         let classes = class.iter().map(|&c| c as usize + 1).max().unwrap_or(1);
@@ -124,7 +177,13 @@ impl Lookahead {
         };
         let cost_slope = fill(&mut cost);
         let delay_slope = fill(&mut delay);
-        Lookahead { radius, cost, delay, cost_slope, delay_slope }
+        Lookahead { radius, informed, cost, delay, cost_slope, delay_slope }
+    }
+
+    /// Whether the table bounds the remaining cost to `sink` (one of the
+    /// sinks it was built for, of a kind it sampled).
+    pub(crate) fn informs(&self, sink: u32) -> bool {
+        self.informed.contains(&sink)
     }
 
     /// Lower bounds on the cost and delay of reaching a sink `(dx, dy)`
