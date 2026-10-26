@@ -548,16 +548,15 @@ fn pack_carries(nl: &mut Netlist, report: &mut PackReport) -> Result<Vec<Vec<Cel
                     })
                     .collect();
                 // At the end of a chain, a single plain cell reading the carry
-                // on I3 (the top sum LUT of an adder without carry out) goes
-                // in the next position instead of behind a feed-out cell.
+                // (the top sum LUT of an adder without carry out, or what
+                // reads a comparison) goes in the next position, reading it
+                // on I3, instead of behind a feed-out cell.
                 if next.is_none()
                     && let [p] = external[..]
-                    && nl.str(nl.cells[p.cell].pins[p.pin as usize].name) == "I3"
-                    && get_int(nl, p.cell, "CARRY_ENABLE") != 1
-                    && net_of(nl, p.cell, "CIN").is_none()
-                    && net_of(nl, p.cell, "COUT").is_none()
-                    && tails.insert(p.cell)
+                    && !tails.contains(&p.cell)
+                    && tail_on_i3(nl, &chain, p, cout)
                 {
+                    tails.insert(p.cell);
                     chain.push(p.cell);
                     break;
                 }
@@ -609,6 +608,74 @@ fn pack_carries(nl: &mut Netlist, report: &mut PackReport) -> Result<Vec<Vec<Cel
             .push(format!("{feed_ins} carry feed-in and {feed_outs} feed-out cells inserted"));
     }
     Ok(chains)
+}
+
+/// Whether the cell of `p`, the only reader of carry `cout` out of the end
+/// of `chain`, can follow the chain, reading the carry on its `I3` (the
+/// dedicated `cout -> in_3` path): a plain logic cell, whose flip-flop (if
+/// any) shares the control set of the chain's cells in its tile. It then
+/// reads the carry there, its inputs and truth table permuted if it read it
+/// on another pin.
+fn tail_on_i3(nl: &mut Netlist, chain: &[CellId], p: PinRef, cout: NetId) -> bool {
+    let c = p.cell;
+    let pin = nl.str(nl.cells[c].pins[p.pin as usize].name).to_string();
+    let Some(k) = LC_INPUTS.iter().position(|&i| i == pin) else { return false };
+    if nl.cell_kind(c) != LC
+        || get_int(nl, c, "CARRY_ENABLE") == 1
+        || net_of(nl, c, "CIN").is_some()
+        || net_of(nl, c, "COUT").is_some()
+    {
+        return false;
+    }
+    let controls = |c: CellId| {
+        (get_int(nl, c, "DFF_ENABLE") == 1).then(|| {
+            (
+                net_of(nl, c, "CLK"),
+                net_of(nl, c, "CEN"),
+                net_of(nl, c, "SR"),
+                get_int(nl, c, "NEG_CLK"),
+            )
+        })
+    };
+    // Chains fill tiles from slot 0: the tail shares a tile with the cells
+    // after the last multiple of eight.
+    let tile = &chain[chain.len() / 8 * 8..];
+    if let Some(ctrl) = controls(c)
+        && tile.iter().any(|&o| controls(o).is_some_and(|o| o != ctrl))
+    {
+        return false;
+    }
+    if k == 3 {
+        return true;
+    }
+    // Swap inputs I<k> and I3, unless I3 carries another chain's carry
+    // (which reaches it on I3 alone) or the carry again.
+    let i3 = net_of(nl, c, "I3");
+    if i3 == Some(cout)
+        || i3
+            .and_then(|n| nl.nets[n].driver)
+            .is_some_and(|d| nl.str(nl.cells[d.cell].pins[d.pin as usize].name) == "COUT")
+    {
+        return false;
+    }
+    // The new I<k> (the old I3) left unconnected, the table must not
+    // depend on it.
+    let init = get_int(nl, c, "LUT_INIT") & 0xFFFF;
+    let swapped = (0..16usize).fold(0, |v, i| {
+        let at = if i3.is_none() { i & !(1 << k) } else { i };
+        let (a, b) = ((at >> k) & 1, (at >> 3) & 1);
+        let j = (at & !(1 << k) & !(1 << 3)) | (b << k) | (a << 3);
+        v | (((init >> j) & 1) << i)
+    });
+    let (pk, p3) = (pin_ref(nl, c, LC_INPUTS[k]).unwrap(), pin_ref(nl, c, "I3").unwrap());
+    nl.disconnect(pk);
+    if let Some(n) = i3 {
+        nl.disconnect(p3);
+        nl.connect(pk, n).expect("connect swapped input");
+    }
+    nl.connect(p3, cout).expect("connect carry on I3");
+    set_int(nl, c, "LUT_INIT", swapped);
+    true
 }
 
 /// Renames block RAMs and records clock polarities.
@@ -818,4 +885,61 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
         report.messages.push(format!("promoted {name} to a global network ({class:?})"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plain logic cell reading `nets` on `I0..I3` with truth table `init`.
+    fn lut(nl: &mut Netlist, nets: [Option<NetId>; 4], init: u64) -> CellId {
+        let c = new_lc(nl, "lut");
+        for (p, n) in LC_INPUTS.iter().zip(nets) {
+            if let Some(n) = n {
+                let pin = pin_ref(nl, c, p).unwrap();
+                nl.connect(pin, n).unwrap();
+            }
+        }
+        set_int(nl, c, "LUT_INIT", init);
+        c
+    }
+
+    /// The cell's output for each value of `nets` (bit `j` of the index is
+    /// the value of `nets[j]`), unconnected inputs reading 0.
+    fn table(nl: &Netlist, c: CellId, nets: &[NetId]) -> Vec<u64> {
+        let init = get_int(nl, c, "LUT_INIT");
+        (0..1usize << nets.len())
+            .map(|v| {
+                let at = LC_INPUTS.iter().enumerate().fold(0, |at, (k, p)| {
+                    let bit = net_of(nl, c, p)
+                        .and_then(|n| nets.iter().position(|&m| m == n))
+                        .map_or(0, |j| (v >> j) & 1);
+                    at | (bit << k)
+                });
+                (init >> at) & 1
+            })
+            .collect()
+    }
+
+    #[test]
+    fn carry_readers_move_it_to_i3_keeping_their_function() {
+        let mut nl = Netlist::new();
+        let (cout, a, b, d) =
+            (nl.add_net("cout"), nl.add_net("a"), nl.add_net("b"), nl.add_net("d"));
+        // The carry on I1, another input on I3; then with I3 unconnected.
+        for (nets, all) in [
+            ([Some(a), Some(cout), Some(b), Some(d)], vec![cout, a, b, d]),
+            ([Some(cout), Some(a), None, None], vec![cout, a]),
+        ] {
+            for init in [0x8ce1u64, 0x00ff, 0x6996, 0xf0f0] {
+                let c = lut(&mut nl, nets, init);
+                let before = table(&nl, c, &all);
+                let k = nets.iter().position(|&n| n == Some(cout)).unwrap();
+                let p = pin_ref(&nl, c, LC_INPUTS[k]).unwrap();
+                assert!(tail_on_i3(&mut nl, &[], p, cout));
+                assert_eq!(net_of(&nl, c, "I3"), Some(cout));
+                assert_eq!(table(&nl, c, &all), before, "init {init:#x}");
+            }
+        }
+    }
 }
