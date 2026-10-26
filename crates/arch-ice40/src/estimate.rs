@@ -73,35 +73,14 @@ impl DelayTable {
         // Each output's fastest delay to each tile, searched on threads of
         // their own and summed in a fixed order (results do not depend on
         // the number of threads).
-        let fastest = |chunk: &[((usize, usize), u32)]| -> Vec<Vec<f32>> {
+        let found = synth_core::par::map(&outputs, synth_core::par::threads(8), |&(_, out)| {
             let mut search = Search::new(arch.graph.num_nodes());
-            chunk
+            search.run(arch, out);
+            inputs
                 .iter()
-                .map(|&(_, out)| {
-                    search.run(arch, out);
-                    inputs
-                        .iter()
-                        .map(|(_, pins)| {
-                            pins.iter().map(|&n| search.dist[n]).fold(f32::INFINITY, f32::min)
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
-        let chunk = outputs.len().div_ceil(threads).max(1);
-        let found: Vec<Vec<f32>> = if threads == 1 {
-            fastest(&outputs)
-        } else {
-            std::thread::scope(|s| {
-                let workers: Vec<_> =
-                    outputs.chunks(chunk).map(|c| s.spawn(move || fastest(c))).collect();
-                workers
-                    .into_iter()
-                    .flat_map(|w| w.join().expect("delay table search panicked"))
-                    .collect()
-            })
-        };
+                .map(|(_, pins)| pins.iter().map(|&n| search.dist[n]).fold(f32::INFINITY, f32::min))
+                .collect::<Vec<f32>>()
+        });
         let mut sum = vec![0.0; side * side];
         let mut count = vec![0u32; side * side];
         for (&((sx, sy), _), delays) in outputs.iter().zip(&found) {
