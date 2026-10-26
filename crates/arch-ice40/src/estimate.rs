@@ -10,9 +10,7 @@
 //! reached through neighbour outputs alone, and straight runs along span
 //! wires are much faster than routes that turn.
 
-use std::collections::BinaryHeap;
-
-use crate::arch::{Arch, BelKind, SPAN4_H, SPAN12_H};
+use crate::arch::{Arch, BelKind, SPAN4_H, SPAN4_V, SPAN12_H, SPAN12_V};
 use crate::device::TileKind;
 
 /// Mean fastest delays (ps) from a logic cell to the logic cells of a tile
@@ -70,17 +68,32 @@ impl DelayTable {
                 ((x, y), pins)
             })
             .collect();
+        let delays = Delays::new(arch);
         // Each output's fastest delay to each tile, searched on threads of
         // their own and summed in a fixed order (results do not depend on
         // the number of threads).
-        let found = synth_core::par::map(&outputs, synth_core::par::threads(8), |&(_, out)| {
-            let mut search = Search::new(arch.graph.num_nodes());
-            search.run(arch, out);
-            inputs
+        let threads = synth_core::par::threads(8);
+        let chunks: Vec<&[((usize, usize), u32)]> =
+            outputs.chunks(outputs.len().div_ceil(threads).max(1)).collect();
+        let found: Vec<Vec<f32>> = synth_core::par::map(&chunks, threads, |chunk| {
+            let mut search = Search::new(arch, &delays);
+            chunk
                 .iter()
-                .map(|(_, pins)| pins.iter().map(|&n| search.dist[n]).fold(f32::INFINITY, f32::min))
-                .collect::<Vec<f32>>()
-        });
+                .map(|&(_, out)| {
+                    search.run(arch, &delays, out);
+                    inputs
+                        .iter()
+                        .map(|(_, pins)| {
+                            let d = pins.iter().map(|&n| search.dist[n]).min().unwrap_or(u32::MAX);
+                            if d == u32::MAX { f32::INFINITY } else { d as f32 }
+                        })
+                        .collect::<Vec<f32>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
         let mut sum = vec![0.0; side * side];
         let mut count = vec![0u32; side * side];
         for (&((sx, sy), _), delays) in outputs.iter().zip(&found) {
@@ -123,66 +136,94 @@ impl DelayTable {
 }
 
 /// Dijkstra's search of the fastest routes from one node, timed as
-/// `timing::routed_node_delays` times routes.
+/// `timing::routed_node_delays` times routes, in whole picoseconds: with
+/// delays bounded, a queue of buckets by delay (Dial's) serves the nodes in
+/// order without a heap.
 struct Search {
-    dist: Vec<f32>,
+    /// Delay of each node reached (ps; `u32::MAX` if not).
+    dist: Vec<u32>,
     /// For span wires reached: their kind and the position of the pip the
     /// route enters them by.
     entry: Vec<(u8, (usize, usize))>,
+    /// Nodes by their delay modulo the bucket count, which exceeds any
+    /// edge's delay.
+    buckets: Vec<Vec<u32>>,
+}
+
+/// Delays in whole picoseconds: of each edge (0 into span wires, whose
+/// delay comes on leaving them), and of span drivers by kind and distance.
+struct Delays {
+    edge: Vec<u32>,
+    span: [[u32; 13]; 5],
+}
+
+impl Delays {
+    fn new(arch: &Arch) -> Delays {
+        let g = &arch.graph;
+        let edge = (0..g.edge_dst.len())
+            .map(|e| if g.edge_span[e] == 0 { g.edge_delay[e].round() as u32 } else { 0 })
+            .collect();
+        let mut span = [[0; 13]; 5];
+        for k in [SPAN4_H, SPAN4_V, SPAN12_H, SPAN12_V] {
+            for (t, d) in span[k as usize].iter_mut().enumerate() {
+                *d = arch.span_delay(k, t).round() as u32;
+            }
+        }
+        Delays { edge, span }
+    }
 }
 
 impl Search {
-    fn new(n: usize) -> Search {
-        Search { dist: vec![f32::INFINITY; n], entry: vec![(0, (0, 0)); n] }
-    }
-
-    fn run(&mut self, arch: &Arch, source: u32) {
-        let g = &arch.graph;
-        self.dist.fill(f32::INFINITY);
-        self.dist[source as usize] = 0.0;
-        self.entry[source as usize] = (0, (0, 0));
-        let mut heap = BinaryHeap::new();
-        heap.push(Entry(0.0, source));
-        while let Some(Entry(d, u)) = heap.pop() {
-            if d > self.dist[u as usize] {
-                continue;
-            }
-            let (kind, (ex, ey)) = self.entry[u as usize];
-            for e in g.edges(u) {
-                let v = g.edge_dst[e] as usize;
-                let span = g.edge_span[e];
-                let mut nd = d + if span == 0 { g.edge_delay[e] } else { 0.0 };
-                let at = arch.pip_xy(g.edge_pip[e]);
-                if kind != 0 {
-                    let horizontal = kind == SPAN4_H || kind == SPAN12_H;
-                    let far = if horizontal { at.0.abs_diff(ex) } else { at.1.abs_diff(ey) };
-                    nd += arch.span_delay(kind, far);
-                }
-                if nd < self.dist[v] {
-                    self.dist[v] = nd;
-                    self.entry[v] = (span, at);
-                    heap.push(Entry(nd, v as u32));
-                }
-            }
+    fn new(arch: &Arch, delays: &Delays) -> Search {
+        let edge = delays.edge.iter().max().copied().unwrap_or(0);
+        let span = delays.span.iter().flatten().max().copied().unwrap_or(0);
+        let n = arch.graph.num_nodes();
+        Search {
+            dist: vec![u32::MAX; n],
+            entry: vec![(0, (0, 0)); n],
+            buckets: vec![Vec::new(); (edge + span) as usize + 1],
         }
     }
-}
 
-/// A search queue entry: least delay first, then node order.
-#[derive(PartialEq)]
-struct Entry(f32, u32);
-
-impl Eq for Entry {}
-
-impl Ord for Entry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.0.total_cmp(&self.0).then(other.1.cmp(&self.1))
-    }
-}
-
-impl PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+    fn run(&mut self, arch: &Arch, delays: &Delays, source: u32) {
+        let g = &arch.graph;
+        let len = self.buckets.len();
+        self.dist.fill(u32::MAX);
+        self.dist[source as usize] = 0;
+        self.entry[source as usize] = (0, (0, 0));
+        self.buckets[0].push(source);
+        let (mut at_delay, mut queued) = (0u32, 1usize);
+        while queued > 0 {
+            let b = at_delay as usize % len;
+            while let Some(u) = self.buckets[b].pop() {
+                queued -= 1;
+                if self.dist[u as usize] != at_delay {
+                    continue;
+                }
+                let (kind, (ex, ey)) = self.entry[u as usize];
+                for e in g.edges(u) {
+                    let v = g.edge_dst[e] as usize;
+                    let span = g.edge_span[e];
+                    let mut nd = at_delay + delays.edge[e];
+                    // Where the pip is matters only on span wires.
+                    let at =
+                        if kind != 0 || span != 0 { arch.pip_xy(g.edge_pip[e]) } else { (0, 0) };
+                    if kind != 0 {
+                        let horizontal = kind == SPAN4_H || kind == SPAN12_H;
+                        let far = if horizontal { at.0.abs_diff(ex) } else { at.1.abs_diff(ey) };
+                        let max = if kind == SPAN4_H || kind == SPAN4_V { 4 } else { 12 };
+                        nd += delays.span[kind as usize][far.min(max)];
+                    }
+                    if nd < self.dist[v] {
+                        self.dist[v] = nd;
+                        self.entry[v] = (span, at);
+                        self.buckets[nd as usize % len].push(v as u32);
+                        queued += 1;
+                    }
+                }
+            }
+            at_delay += 1;
+        }
     }
 }
 
