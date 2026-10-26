@@ -202,9 +202,11 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   sinks like those sampled only: sinks are told apart by the classes of
   the wires entering them, and each kind of at least eight sinks that the
   samples spread over all sinks miss gets one of its own; toward rarer
-  kinds the searches go uninformed. Before, built from data inputs alone,
-  the table knew from the clock tree only long routes into the fabric,
-  never the two hops into a clock pin, and each of a clock net's sinks
+  kinds the searches take a cost per tile of distance (searched with no
+  estimate at all, Euler 31's few such sinks took most of its routing).
+  Before, built from data inputs alone, the table knew from the clock tree
+  only long routes into the fabric, never the two hops into a clock pin,
+  and each of a clock net's sinks
   expanded almost everything else first (on Euler 10, 12 s every time its
   clock net of 1,019 sinks was routed). This made routing 39% faster on
   the Euler designs at the same Fmax. Nets in

@@ -1119,10 +1119,9 @@ fn route_net(
             let lookahead = st.lookahead.as_ref();
             let est = |h: &Hot| {
                 let (dx, dy) = (h.x - tx, h.y - ty);
-                if let Some(table) = lookahead {
-                    if !informed {
-                        return 0.0;
-                    }
+                // Toward sinks of a kind the table does not bound, the
+                // distance estimate.
+                if let Some(table) = lookahead.filter(|_| informed) {
                     let (cost, delay) = table.at(h.class as usize, dx, dy);
                     return opts.lookahead_weight
                         * ((1.0 - crit) * cost + crit * delay * opts.delay_scale);
