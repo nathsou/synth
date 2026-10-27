@@ -13,7 +13,7 @@
 use synth_core::FxHashMap;
 use synth_netlist::{CellId, Const, NetId, Netlist, Param};
 
-use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
 
 /// A logic cell's contents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,8 +49,8 @@ pub struct Packed {
     pub tile_ctrls: Vec<TileCtrl>,
     /// Each flip-flop's clock enable (`None`: always enabled).
     pub ff_ce: FxHashMap<CellId, Option<NetId>>,
-    /// Block RAMs, placed on their own sites.
-    pub brams: Vec<CellId>,
+    /// Block RAMs and multipliers, placed on their own sites.
+    pub blocks: Vec<CellId>,
 }
 
 /// Whether a flip-flop takes its data from its own cell's LUT.
@@ -83,12 +83,13 @@ pub fn lut_init(nl: &Netlist, c: CellId, param: &str) -> u16 {
 }
 
 /// The logic has no constant drivers: a constant on a LUT input folds into
-/// the LUT's table (the input then reads as unconnected); a block RAM
-/// input takes its constant from its routing tile's tie (an address or
-/// data input, high where its `<pin>MUX` parameter is `1`) or reads its
-/// default when unconnected (high for clock enables, low for clocks, write
-/// enables, resets and chip selects); and any other constant reader gets a
-/// LUT driving the constant. Returns the LUTs added.
+/// the LUT's table (the input then reads as unconnected); a block RAM or
+/// multiplier input takes its constant from its routing tile's tie (a
+/// block RAM's address or data input, a multiplier's operand, high where
+/// its `<pin>MUX` parameter is `1`) or reads its default when unconnected
+/// (a block RAM's clock enables high, its clocks, write enables, resets and
+/// chip selects low); and any other constant reader gets a LUT driving the
+/// constant. Returns the LUTs added.
 pub fn legalize_constants(nl: &mut Netlist) -> Result<usize, String> {
     let constant = |nl: &Netlist, n: NetId| nl.nets[n].constant.map(|k| k == Const::One);
     let luts: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == LUT4).collect();
@@ -126,15 +127,27 @@ pub fn legalize_constants(nl: &mut Netlist) -> Result<usize, String> {
             );
         }
     }
-    let brams: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == DP16KD).collect();
-    for c in brams {
+    let blocks: Vec<CellId> =
+        nl.live_cells().filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D)).collect();
+    for c in blocks {
+        let ram = nl.cell_kind(c) == DP16KD;
         for i in 0..nl.cells[c].pins.len() as u32 {
             let Some(v) = nl.cells[c].pins[i as usize].net.and_then(|n| constant(nl, n)) else {
                 continue;
             };
             let name = pin(nl, c, i).to_string();
-            let tie = name.starts_with("AD") || name.starts_with("DI");
-            let default_high = name.starts_with("CE") || name.starts_with("OCE");
+            let tie = if ram {
+                name.starts_with("AD") || name.starts_with("DI")
+            } else {
+                // A multiplier's operands; its signedness takes a LUT.
+                matches!(name.as_bytes()[0], b'A' | b'B' | b'C')
+                    && name.len() > 1
+                    && name[1..].bytes().all(|b| b.is_ascii_digit())
+            };
+            let default_high = ram && (name.starts_with("CE") || name.starts_with("OCE"));
+            if !ram && !tie {
+                continue;
+            }
             if !tie && v != default_high {
                 continue;
             }
@@ -254,7 +267,8 @@ pub fn pack(nl: &Netlist) -> Result<Packed, String> {
             p.lcs.push(Lc { lut: None, ff: Some(c) });
         }
     }
-    p.brams = nl.live_cells().filter(|&c| nl.cell_kind(c) == DP16KD).collect();
+    p.blocks =
+        nl.live_cells().filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D)).collect();
     Ok(p)
 }
 

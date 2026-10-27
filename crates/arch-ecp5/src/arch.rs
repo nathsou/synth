@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use crate::cells::{DP16KD, MULT18X18D};
 use crate::clocks::Geometry;
 use crate::db::{Database, Device, Pin};
 use crate::graph::Graph;
@@ -40,12 +41,17 @@ impl Arch {
         let graph = Graph::build(&dev, &db, &speed)?;
         let logic: Vec<(usize, usize)> =
             dev.tiles.iter().filter(|t| t.ttype == "PLC2").map(|t| (t.col, t.row)).collect();
-        let ebr: Vec<(usize, usize, usize)> = dev
+        let blocks: Vec<(usize, usize, usize, &str)> = dev
             .tiles
             .iter()
-            .filter_map(|t| crate::bitgen::ebr_z(&t.ttype).map(|z| (t.col, t.row, z)))
+            .filter_map(|t| {
+                let ebr = crate::bitgen::ebr_z(&t.ttype).map(|z| (t.col, t.row, z, DP16KD));
+                ebr.or_else(|| {
+                    crate::bitgen::dsp_z(&t.ttype).map(|z| (t.col, t.row, z, MULT18X18D))
+                })
+            })
             .collect();
-        let grid = Grid::new(logic, ebr);
+        let grid = Grid::new(logic, blocks);
         let clocks = Geometry::from_json(&dev.globals);
         Ok(Arch { db, dev, graph, speed, grid, clocks, package })
     }

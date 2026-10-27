@@ -12,6 +12,7 @@ pub mod clocks;
 pub mod config;
 pub mod db;
 pub mod decode;
+pub mod dsp;
 pub mod flow;
 pub mod graph;
 pub mod lpf;

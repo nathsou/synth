@@ -8,7 +8,7 @@ use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, INOUT_PORT, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
 use crate::config::{ChipConfig, TileConfig, TileGroup};
 use crate::graph::NO_TILE;
 use crate::lpf::Constraints;
@@ -340,6 +340,58 @@ pub(crate) fn dsp_tiles(arch: &Arch, x: usize, y: usize, z: usize) -> Result<Vec
     Ok(tiles)
 }
 
+/// The settings of multiplier `c` at `s`, without registers (as
+/// nextpnr's `write_mult18`). Operand inputs nothing drives are tied (added
+/// to `ties`) to their `<pin>MUX` parameter's value.
+fn mult18_config(
+    arch: &Arch,
+    nl: &Netlist,
+    c: CellId,
+    s: &crate::place::Site,
+    ties: &mut Vec<(u32, bool)>,
+) -> Result<TileGroup, String> {
+    let dsp = format!("MULT18_{}", s.z);
+    let mut cfg = TileConfig::default();
+    for reg in ["INPUTA", "INPUTB", "PIPELINE"] {
+        cfg.add_enum(&format!("{dsp}.REG_{reg}_CLK"), "NONE");
+        cfg.add_enum(&format!("{dsp}.REG_{reg}_CE"), "CE0");
+        cfg.add_enum(&format!("{dsp}.REG_{reg}_RST"), "RST0");
+    }
+    cfg.add_enum(&format!("{dsp}.REG_INPUTC_CLK"), "NONE");
+    cfg.add_enum(&format!("{dsp}.REG_OUTPUT_CLK"), "NONE");
+    if s.z == 0 || s.z == 4 {
+        cfg.add_enum(&format!("{dsp}.REG_OUTPUT_RST"), "RST0");
+    }
+    for k in 0..4 {
+        cfg.add_enum(&format!("{dsp}.CLK{k}_DIV"), "ENABLED");
+    }
+    cfg.add_enum(&format!("{dsp}.GSR"), "ENABLED");
+    cfg.add_enum(&format!("{dsp}.SOURCEB_MODE"), "B_SHIFT");
+    cfg.add_enum(&format!("{dsp}.RESETMODE"), "SYNC");
+    cfg.add_enum(&format!("{dsp}.MODE"), "MULT18X18D");
+    // The product leaves straight for the routing.
+    cfg.add_enum(&format!("{dsp}.CIBOUT_BYP"), "ON");
+    cfg.add_enum(if s.z < 4 { "DSP_LEFT.CIBOUT" } else { "DSP_RIGHT.CIBOUT" }, "ON");
+    // Some multiplexers default to inverting: all pass through.
+    for port in ["CLK", "CE", "RST"] {
+        for k in 0..4 {
+            cfg.add_enum(&format!("{dsp}.{port}{k}MUX"), &format!("{port}{k}"));
+        }
+    }
+    for port in ["A", "B", "C"] {
+        for i in 0..18 {
+            let pin = format!("{port}{i}");
+            if nl.pin_net(c, &pin).is_some() {
+                continue;
+            }
+            let high = matches!(nl.param(c, &format!("{pin}MUX")), Some(Param::Str(v)) if v == "1");
+            ties.push((arch.node(s.x, s.y, &format!("J{pin}_MULT18"))?, high));
+        }
+    }
+    let tiles = dsp_tiles(arch, s.x, s.y, s.z)?;
+    Ok(TileGroup { tiles, config: cfg })
+}
+
 /// The bank voltage of an I/O standard.
 fn vccio(iotype: &str) -> Option<&'static str> {
     let t = iotype.trim_end_matches('D');
@@ -430,8 +482,11 @@ pub fn config(
             _ => {}
         }
     }
-    let mut cells: Vec<(&CellId, &crate::place::Site)> =
-        placement.sites.iter().filter(|(c, _)| nl.cell_kind(**c) != DP16KD).collect();
+    let mut cells: Vec<(&CellId, &crate::place::Site)> = placement
+        .sites
+        .iter()
+        .filter(|(c, _)| !matches!(nl.cell_kind(**c), DP16KD | MULT18X18D))
+        .collect();
     cells.sort_by_key(|(c, _)| **c);
     for (&c, s) in cells {
         let tname = plc(s.x, s.y)?;
@@ -557,8 +612,16 @@ pub fn config(
         cc.bram_init.insert(wid as u16, units);
         cc.groups.push(group);
     }
+    // Multipliers.
+    let mut mults: Vec<(&CellId, &crate::place::Site)> =
+        placement.sites.iter().filter(|(c, _)| nl.cell_kind(**c) == MULT18X18D).collect();
+    mults.sort_by_key(|(c, _)| **c);
+    for (&c, s) in mults {
+        cc.groups.push(mult18_config(arch, nl, c, s, &mut ties)?);
+    }
     // Output enables tied low (driving) where no route drives them, and
-    // block RAM inputs nothing drives: the CIB input feeding each, tied.
+    // block RAM and multiplier inputs nothing drives: the CIB input feeding
+    // each, tied.
     for (cib, value) in cib_ties(arch, &ties)? {
         let (x, y) = (g.node_x[cib as usize] as usize, g.node_y[cib as usize] as usize);
         let tile = arch

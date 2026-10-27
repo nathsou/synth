@@ -18,7 +18,7 @@ use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, NetId, Netlist, OUTPUT_PORT};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
 use crate::graph::NO_TILE;
 use crate::pack::{ff_from_lut, pin};
 use crate::place::{Placement, Site};
@@ -104,6 +104,7 @@ fn pin_node(
             format!("M{z}_SLICE")
         }
         (DP16KD, _) => format!("J{pin}_EBR"),
+        (MULT18X18D, _) => format!("J{pin}_MULT18"),
         (FF, "CE") => format!("CE{}_SLICE", z / 2),
         (FF, "LSR") => format!("LSR{}_SLICE", z / 2),
         (FF, "CLK") => format!("CLK{}_SLICE", z / 2),

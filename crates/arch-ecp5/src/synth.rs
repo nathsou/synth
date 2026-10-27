@@ -40,6 +40,8 @@ pub struct SynthOptions {
     pub remap_rounds: usize,
     /// Memories with fewer bits are built from flip-flops.
     pub bram_min_bits: u64,
+    /// The most multipliers (`MULT18X18D`) to use (`None`: no limit).
+    pub multipliers: Option<usize>,
 }
 
 impl Default for SynthOptions {
@@ -49,6 +51,7 @@ impl Default for SynthOptions {
             map: MapOptions { lut_delay: LEVEL, ..MapOptions::default() },
             remap_rounds: 6,
             bram_min_bits: 256,
+            multipliers: None,
         }
     }
 }
@@ -110,6 +113,11 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
     opt::clean(&mut m)?;
     dff::extract_controls(&mut m);
     opt::clean(&mut m)?;
+    let mults = crate::dsp::map(&mut m, opts.multipliers);
+    if mults > 0 {
+        log.push(format!("{mults} MULT18X18D"));
+        opt::clean(&mut m)?;
+    }
 
     let mut net = synth_logic::lower::lower(&m, &opts.lower)?;
     synth_logic::ff::legalize(
