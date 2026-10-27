@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "arch-ecp5"
+version = "0.1.0"
+dependencies = [
+ "synth-core",
+ "synth-logic",
+ "synth-netlist",
+ "synth-route",
+ "synth-rtl",
+]
+
+[[package]]
 name = "arch-ice40"
 version = "0.1.0"
 dependencies = [
@@ -30,6 +41,7 @@ dependencies = [
 name = "synth"
 version = "0.1.0"
 dependencies = [
+ "arch-ecp5",
  "arch-ice40",
  "arch-xc7",
  "synth-core",

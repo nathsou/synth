@@ -8,6 +8,7 @@ macro_rules! info {
 }
 
 mod args;
+mod ecp5;
 mod progress;
 mod sim;
 mod xc7;
@@ -31,6 +32,8 @@ COMMANDS:
     pnr        Place and route a mapped netlist (RTLIL)
     pack-fasm  Assemble Artix-7 FASM into a bitstream
     unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
+    pack-ecp5  Assemble an ECP5 textual configuration into a bitstream
+    unpack-ecp5 Decode an ECP5 bitstream to its textual configuration
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     fmt        Format Weft sources in place (--check: only report)
@@ -85,6 +88,13 @@ ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
               Timing closure is not certified; --timing-allow-fail is required.
     synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
     synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
+
+ECP5 OPTIONS:
+    synth pack-ecp5 <in.config> -o <out.bit> [--compress] [--db <dir>]
+    synth unpack-ecp5 <in.bit> -o <out.config> [--db <dir>]
+              Byte for byte as Project Trellis' ecppack and ecpunpack. The
+              database (prjtrellis-db) is --db, else SYNTH_TRELLIS_DB, else
+              /usr/share/trellis/database (Debian: fpga-trellis-database).
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -160,6 +170,8 @@ fn main() -> ExitCode {
         Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
         Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
         Some("unpack-xc7") => xc7::unpack(&argv[1..]),
+        Some("pack-ecp5") => ecp5::pack(&argv[1..]),
+        Some("unpack-ecp5") => ecp5::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),

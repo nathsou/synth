@@ -21,6 +21,7 @@ synth-lsp.workspace = true
 synth-playground.workspace = true
 arch-ice40.workspace = true
 arch-xc7.workspace = true
+arch-ecp5.workspace = true
 
 [lints]
 workspace = true
