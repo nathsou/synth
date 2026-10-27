@@ -21,6 +21,7 @@ pub mod route;
 pub mod sim;
 pub mod speed;
 pub mod synth;
+pub mod timing;
 
 use crate::config::ChipConfig;
 use crate::db::Database;

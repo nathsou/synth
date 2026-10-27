@@ -25,6 +25,8 @@ pub struct FlowOptions {
     pub db: Option<PathBuf>,
     pub seed: u64,
     pub effort: f64,
+    /// Target frequency (MHz) of clocks the constraints leave out.
+    pub freq: Option<f64>,
 }
 
 impl Default for FlowOptions {
@@ -36,6 +38,7 @@ impl Default for FlowOptions {
             db: None,
             seed: 1,
             effort: 1.0,
+            freq: None,
         }
     }
 }
@@ -49,6 +52,7 @@ pub struct Implementation {
     pub pads: PadSites,
     pub routing: Routing,
     pub config: ChipConfig,
+    pub timing: crate::timing::TimingReport,
 }
 
 /// Loads the device of `opts`.
@@ -107,6 +111,18 @@ fn assign_pads(
     Ok(pads)
 }
 
+/// The clock targets: the constraints' frequencies, and `opts.freq` for
+/// the others.
+pub fn clock_constraints(
+    cons: &Constraints,
+    opts: &FlowOptions,
+) -> crate::timing::ClockConstraints {
+    crate::timing::ClockConstraints {
+        default_mhz: opts.freq,
+        nets: cons.frequencies.iter().map(|(n, &f)| (n.clone(), f)).collect(),
+    }
+}
+
 /// Places, routes and configures a synthesised netlist.
 pub fn implement(
     arch: Arch,
@@ -132,8 +148,21 @@ pub fn implement(
     let t = Instant::now();
     let routing = crate::route::route(&arch, &nl, &placement, &pads, log)?;
     log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
+    let t = Instant::now();
+    let clocks = clock_constraints(cons, opts);
+    let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &clocks);
+    for c in &timing.clocks {
+        let target = c.target_mhz.map(|t| format!(" (target {t:.2} MHz)")).unwrap_or_default();
+        log.push(format!("clock {}: {:.2} MHz{target}", c.clock, c.fmax_mhz));
+        if std::env::var_os("SYNTH_DEBUG").is_some() {
+            for p in &c.path {
+                log.push(format!("  {p}"));
+            }
+        }
+    }
+    log.push(format!("timing analysed in {:.2}s", t.elapsed().as_secs_f64()));
     let config = crate::bitgen::config(&arch, &nl, &placement, &pads, &routing, cons)?;
-    Ok(Implementation { arch, netlist: nl, placement, pads, routing, config })
+    Ok(Implementation { arch, netlist: nl, placement, pads, routing, config, timing })
 }
 
 /// The bitstream of a configuration.

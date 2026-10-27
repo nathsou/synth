@@ -47,6 +47,9 @@ pub struct Routing {
     /// The physical input (0-3: `A`-`D`) each logical input of a LUT
     /// arrives on.
     pub lut_pins: FxHashMap<CellId, [u8; 4]>,
+    /// Each net's source node, and the node of each routed sink pin.
+    pub sources: FxHashMap<NetId, u32>,
+    pub sink_nodes: FxHashMap<(CellId, u32), u32>,
 }
 
 const LUT_PINS: [&str; 4] = ["A", "B", "C", "D"];
@@ -137,6 +140,7 @@ pub fn route(
     // Each net's source and sinks.
     let mut source: FxHashMap<NetId, u32> = FxHashMap::default();
     let mut sinks: FxHashMap<NetId, Vec<(u32, CellId, String)>> = FxHashMap::default();
+    let mut sink_nodes: FxHashMap<(CellId, u32), u32> = FxHashMap::default();
     for n in nl.live_nets() {
         let net = &nl.nets[n];
         for p in net.driver.iter().chain(&net.users) {
@@ -152,6 +156,7 @@ pub fn route(
             if Some(*p) == net.driver {
                 source.insert(n, node);
             } else {
+                sink_nodes.insert((p.cell, p.pin), node);
                 sinks.entry(n).or_default().push((node, p.cell, name));
             }
         }
@@ -221,6 +226,8 @@ pub fn route(
         routing.nets.insert(*n, r.edges);
     }
     routing.lut_pins = lut_pins(arch, nl, placement, &routing);
+    routing.sources = source;
+    routing.sink_nodes = sink_nodes;
     Ok(routing)
 }
 
