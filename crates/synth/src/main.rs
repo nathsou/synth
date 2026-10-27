@@ -26,7 +26,7 @@ USAGE:
 COMMANDS:
     check      Check Verilog or Weft sources and report errors
     build      Synthesise, place and route a design into a bitstream
-    synth      Synthesise a design to iCE40 or Artix-7 primitives (--verilog <out.v>)
+    synth      Synthesise a design to iCE40, Artix-7 or ECP5 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
     sim        Simulate a design (or write it as a C model with --emit-c)
     pnr        Place and route a mapped netlist (RTLIL)
@@ -71,7 +71,7 @@ BUILD OPTIONS:
               Put bare --incremental after input files or before another option.
 
 SYNTH OPTIONS:
-    synth synth <files.v|.weft...> [--family <ice40|artix7|xc7>] [--top <module>]
+    synth synth <files.v|.weft...> [--family <ice40|artix7|xc7|ecp5>] [--top <module>]
               [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--verilog <out.v>] [--rename <module>] [--pack-stats]
               --pack-stats reports native Artix-7 packing resource counts.
@@ -89,10 +89,22 @@ ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
     synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
     synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
 
-ECP5 OPTIONS:
+ECP5 OPTIONS (EXPERIMENTAL):
+    synth build <files.v|.weft...> --family ecp5 --device <LFE5U-25F|...>
+              [--package <CABGA381|...>] [--speed <6|7|8>] [--lpf <file>]
+              [--top <module>] [-o <out.bit>] [--seed <n>] [--effort <n>]
+              [--tries <n>] [--timing-weight <0..1>] [--freq <MHz>] [--db <dir>]
+              [--textcfg <out.config>] [--compress]
+              Clock targets: `FREQUENCY PORT|NET` in the LPF, --freq for the
+              other clocks; a PLL's output is timed at its frequency (timing
+              is reported, not enforced). Ports without a LOCATE go on free
+              pins (with a warning). --textcfg also writes Trellis' textual
+              configuration; --compress compresses the bitstream.
     synth pack-ecp5 <in.config> -o <out.bit> [--compress] [--db <dir>]
-    synth unpack-ecp5 <in.bit> -o <out.config> [--db <dir>]
-              Byte for byte as Project Trellis' ecppack and ecpunpack. The
+    synth unpack-ecp5 <in.bit> [-o <out.config>] [--timing [--speed <n>]
+              [--freq <MHz>]] [--db <dir>]
+              Byte for byte as Project Trellis' ecppack and ecpunpack;
+              --timing reports the Fmax of what the bitstream implements. The
               database (prjtrellis-db) is --db, else SYNTH_TRELLIS_DB, else
               /usr/share/trellis/database (Debian: fpga-trellis-database).
 
@@ -115,7 +127,8 @@ SIM OPTIONS:
               [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
               [--seed <n>]
               (bitstream: --device <dev> --package <pkg> --pcf <file>
-              [--bitstream <file.bin>] [--freq <MHz>])
+              [--bitstream <file.bin>] [--freq <MHz>]; with --family ecp5,
+              --lpf <file> and --bitstream <file.bit>)
               Runs cycles of the clock (default `clk`): inputs set by --set
               and --at, then a rising and a falling edge. Stops after --cycles
               (default 1000) or once --until holds, then prints --print
@@ -128,10 +141,11 @@ SIM OPTIONS:
               optimizations first and merges bit-level multiplexers and
               flip-flops into words: faster, but internal signals may be
               gone or renamed. --stats prints what the program runs.
-              --level synth simulates the iCE40 netlist synthesis makes of
-              the design, --level bitstream what its bitstream implements
-              (built, or read from --bitstream), decoded back to cells; ports
-              are named after the PCF.
+              --level synth simulates the iCE40 (--family ecp5: ECP5)
+              netlist synthesis makes of the design, --level bitstream what
+              its bitstream implements (built, or read from --bitstream),
+              decoded back to cells; ports are named after the PCF (LPF).
+              synth_pll is a wire: its output is its input, locked.
               --compare runs the RTL and the netlist or bitstream under the
               same random inputs (held about --hold cycles; resets active for
               the first 4 cycles) and compares every output bit the RTL

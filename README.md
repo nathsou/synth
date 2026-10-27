@@ -11,7 +11,7 @@ Initial targets, in order:
 |---|---|---|
 | Lattice iCE40 | LP / HX / UltraPlus | Alchitry Cu (HX8K), Nandland Go Board (HX1K) |
 | Xilinx Artix-7 | XC7A35T – XC7A200T | Nexys A7 (XC7A100T), Alchitry Au (XC7A35T) |
-| Lattice ECP5 | LFE5U / LFE5UM / LFE5UM5G | deferred |
+| Lattice ECP5 | LFE5U / LFE5UM / LFE5UM5G | none yet (experimental, [docs/ECP5.md](docs/ECP5.md)) |
 
 The goal is to match or beat vendor tools (iCEcube2/Radiant, Diamond, Vivado) on
 resource use and Fmax, with deterministic, reproducible results.
@@ -190,7 +190,7 @@ placement and routing (with LUT input permutation), static timing analysis
 against clock constraints (`set_frequency` in the PCF or `--freq`) and
 bitstream generation are implemented for the iCE40 HX1K and HX8K, PLLs
 included: `synth_pll<IN_HZ, OUT_HZ>` (Weft or Verilog) makes a clock with the
-device's PLL on iCE40 and Artix-7 alike ([docs/WEFT.md](docs/WEFT.md) §8.7).
+device's PLL on iCE40, Artix-7 and ECP5 alike ([docs/WEFT.md](docs/WEFT.md) §8.7).
 [examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
 (Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
 
@@ -288,6 +288,28 @@ Builds require the explicit timing override. Advanced clocks/I/O, RAMB36, DSP
 cascades and incremental checkpoints remain unsupported. See [the detailed
 status and validation report](docs/ARTIX7.md) for the supported XDC subset and
 remaining criteria.
+
+### Experimental native ECP5 flow
+
+The ECP5 flow (LFE5U, LFE5UM, LFE5UM5G) reads Project Trellis' database at
+run time (`--db`, `SYNTH_TRELLIS_DB`, or Debian/Ubuntu's
+`fpga-trellis-database`):
+
+```sh
+target/release/synth build design.v --top top --family ecp5 \
+  --device LFE5U-25F --package CABGA381 --lpf pins.lpf -o design.bit
+```
+
+It maps to LUT4s, CCU2C carry chains, flip-flops, DP16KD block RAMs,
+MULT18X18D multipliers and EHXPLLL PLLs; places (timing-driven annealing,
+four seeds), routes (clocks on the global network, then negotiated
+congestion) and times the design with Trellis' delays; and writes bitstreams
+byte for byte as `ecppack` does. Decoded bitstreams of four RISC-V SoCs and
+the Euler solvers simulate correctly against their RTL, but no ECP5 board has
+run one yet. Against Yosys + nextpnr-ecp5 on the LFE5U-25F, it uses fewer
+LUTs on all eleven designs measured and reaches a higher Fmax on ten (by 2–33%),
+faster on the large designs, slower on the small ones. See
+[docs/ECP5.md](docs/ECP5.md).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,
   device database, verification strategy.

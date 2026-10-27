@@ -12,7 +12,8 @@ New records copy [`0000-template.md`](0000-template.md) and take the next number
 | [0002](0002-dependencies.md) | Dependency policy: `std` only in shipped code | Accepted |
 | [0003](0003-inputs.md) | Inputs: Verilog-2005, RTLIL and SRTL | Accepted (extended by 0006) |
 | [0004](0004-licence.md) | Licence: EUPL-1.2 (code), CERN-OHL-W-2.0 (HDL) | Accepted |
-| [0005](0005-targets.md) | Targets and order: iCE40, then Artix-7; ECP5 deferred | Accepted |
+| [0005](0005-targets.md) | Targets and order: iCE40, then Artix-7; ECP5 deferred | Accepted (ECP5 superseded by 0009) |
 | [0006](0006-native-hdl.md) | A native HDL (Weft) that targets the RTL IR | Accepted |
 | [0007](0007-editor-and-playground.md) | A language server and a web playground | Accepted |
 | [0008](0008-simulator.md) | A compiled cycle simulator, `synth-sim` | Accepted |
+| [0009](0009-ecp5.md) | ECP5 as a third family, verified without hardware | Accepted |

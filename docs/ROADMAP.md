@@ -29,7 +29,7 @@ stated), not when its features merely exist.
 | Alchitry Cu (v1) | iCE40HX8K-CB132 | 7,680 LCs, 32 × 4 Kbit BRAM (16 KB), PLL, no DSP | 100 MHz | Phase 1 primary (Milestone 1) |
 | Nexys A7 | XC7A100T-1CSG324C | 63,400 LUT6, 135 × 36 Kbit BRAM, 240 DSP48E1, 128 MB DDR2, Ethernet | 100 MHz | Phase 2 primary |
 | Alchitry Au (v1) | XC7A35T-1FTG256C | 20,800 LUT6, 50 × 36 Kbit BRAM, 90 DSP48E1, 256 MB DDR3 | 100 MHz | Phase 2 secondary |
-| None | ECP5 | | | Deferred (out of scope for now) |
+| None | ECP5 | | | Phase 3, verified without hardware (ADR 0009) |
 
 All four boards use an FT2232H for programming and a USB UART.
 
@@ -162,18 +162,22 @@ Primary board: **Nexys A7** (XC7A100T). Secondary: **Alchitry Au** (XC7A35T).
 
 ---
 
-## Phase 3: ECP5 (deferred)
+## Phase 3: ECP5 (in progress, without hardware)
 
-ECP5 is **out of scope for now**. The architecture keeps room for it, and this
-phase is kept as the plan for when it comes back. There is no board yet, so it
-would have two modes:
+ECP5 came back without a board (ADR 0009), so the phase has two modes:
 
-- **Without hardware**:
-  - Trellis importer; slice and PFU legality (`PFUMX`/`L6MUX21`, `CCU2C`,
-    LSR/CE/CLK sharing, LUTRAM mode); `DP16KD`/`PDPW16KD`, `DPR16X4`,
-    `MULT18X18D`/`ALU54B`, `EHXPLLL`, `DCCA`, IO; LPF import.
-  - Assembler and disassembler bit-exact versus `ecppack`/`ecpunpack`.
-  - The full integration ladder verified by bitstream round-trip simulation.
+- **Without hardware** (done, see [ECP5.md](ECP5.md)):
+  - [x] Trellis database read at run time; routing graph with Trellis' arcs;
+    LPF import.
+  - [x] Assembler and disassembler bit-exact versus `ecppack`/`ecpunpack`.
+  - [x] `CCU2C`, LSR/CE/CLK sharing, `DP16KD`/`PDPW16KD`, `MULT18X18D`,
+    `EHXPLLL`, `DCCA`, I/O.
+  - [x] The full integration ladder verified by bitstream round-trip
+    simulation; timing checked against nextpnr-ecp5's.
+  - [x] QoR baseline against Yosys+nextpnr (ahead on LUTs on every design,
+    on Fmax on all but one).
+  - [ ] `PFUMX`/`L6MUX21`, LUTRAM (`DPR16X4`), `ALU54B` and registered DSPs,
+    I/O registers, bidirectional pads.
 - **With hardware** (needs a board, for example a ULX3S, OrangeCrab or Colorlight
   i5/i9): the same hardware exit criteria as the other families.
 
@@ -296,7 +300,7 @@ The two tracks parallelize well across two people.
 3. **Inputs**: Verilog-2005, RTLIL and SRTL. SystemVerilog, FIRRTL and VHDL are
    deferred (Architecture §6.1).
 4. **Hardware**: Go Board, Alchitry Cu, Alchitry Au and Nexys A7. Family order:
-   **iCE40 → Artix-7**. ECP5 is out of scope for now.
+   **iCE40 → Artix-7 → ECP5** (ECP5 without a board yet, ADR 0009).
 5. **Programming**: openFPGALoader for now (Homebrew on macOS, packages on
    Linux). A native programmer for the FT2232H boards comes later, with macOS
    (IOKit) and Linux (usbfs) backends.
