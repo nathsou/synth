@@ -27,6 +27,8 @@ pub struct FlowOptions {
     pub effort: f64,
     /// Target frequency (MHz) of clocks the constraints leave out.
     pub freq: Option<f64>,
+    /// Weight of timing against wirelength in placement (0..1).
+    pub timing_weight: f64,
 }
 
 impl Default for FlowOptions {
@@ -39,6 +41,7 @@ impl Default for FlowOptions {
             seed: 1,
             effort: 1.0,
             freq: None,
+            timing_weight: crate::place::TIMING_WEIGHT,
         }
     }
 }
@@ -142,14 +145,26 @@ pub fn implement(
     let t = Instant::now();
     let fixed: FxHashMap<CellId, (usize, usize)> =
         pads.iter().map(|(&c, &(x, y, _))| (c, (x, y))).collect();
-    let popts = PlaceOptions { seed: opts.seed, effort: opts.effort };
-    let placement = crate::place::place(&nl, &packed, &arch.grid, &fixed, &popts, log)?;
+    let clocks = clock_constraints(cons, opts);
+    let graph = crate::timing::TimingGraph::new(&arch, &nl, &clocks);
+    let timing = crate::place::PlaceTiming { graph: &graph, grade: &arch.speed.grade };
+    let popts =
+        PlaceOptions { seed: opts.seed, effort: opts.effort, timing_weight: opts.timing_weight };
+    let placement =
+        crate::place::place(&nl, &packed, &arch.grid, &fixed, Some(timing), &popts, log)?;
     log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
     let t = Instant::now();
-    let routing = crate::route::route(&arch, &nl, &placement, &pads, log)?;
+    let routing = crate::route::route(
+        &arch,
+        &nl,
+        &placement,
+        &pads,
+        &clocks,
+        crate::route::TIMING_ROUNDS,
+        log,
+    )?;
     log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
     let t = Instant::now();
-    let clocks = clock_constraints(cons, opts);
     let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &clocks);
     for c in &timing.clocks {
         let target = c.target_mhz.map(|t| format!(" (target {t:.2} MHz)")).unwrap_or_default();

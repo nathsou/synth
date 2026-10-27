@@ -48,7 +48,8 @@ fn constraints(a: &mut Args) -> Result<arch_ecp5::lpf::Constraints, String> {
     Ok(cons)
 }
 
-/// `--device`, `--package`, `--speed`, `--db`, `--seed`, `--effort` and `--freq`.
+/// `--device`, `--package`, `--speed`, `--db`, `--seed`, `--effort`, `--freq` and
+/// `--timing-weight`.
 fn flow_options(a: &mut Args) -> Result<arch_ecp5::flow::FlowOptions, String> {
     Ok(arch_ecp5::flow::FlowOptions {
         device: a.required("--device")?,
@@ -66,6 +67,11 @@ fn flow_options(a: &mut Args) -> Result<arch_ecp5::flow::FlowOptions, String> {
             .transpose()?
             .unwrap_or(1.0),
         freq: a.value("--freq").map(|s| s.parse().map_err(|_| "bad --freq")).transpose()?,
+        timing_weight: a
+            .value("--timing-weight")
+            .map(|s| s.parse().map_err(|_| "bad --timing-weight"))
+            .transpose()?
+            .unwrap_or(arch_ecp5::place::TIMING_WEIGHT),
     })
 }
 

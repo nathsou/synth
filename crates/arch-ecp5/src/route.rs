@@ -22,6 +22,7 @@ use crate::cells::{CCU2C, DP16KD, FF, LUT4};
 use crate::graph::NO_TILE;
 use crate::pack::{ff_from_lut, pin};
 use crate::place::{Placement, Site};
+use crate::timing::{ClockConstraints, TimingGraph};
 
 /// Where a port's pad is: `(x, y, pad letter)`.
 pub type PadSites = FxHashMap<CellId, (usize, usize, char)>;
@@ -127,12 +128,19 @@ fn pad_node(
     arch.node(x, y, &wire)
 }
 
-/// Routes the placed design.
+/// Rounds of rerouting critical connections once routing is legal.
+pub const TIMING_ROUNDS: usize = 3;
+
+/// Routes the placed design, critical connections first on fast routes
+/// (criticalities from estimated delays, then from the routes, with
+/// `timing_rounds` rounds of rerouting the critical ones once legal).
 pub fn route(
     arch: &Arch,
     nl: &Netlist,
     placement: &Placement,
     pads: &PadSites,
+    targets: &ClockConstraints,
+    timing_rounds: usize,
     log: &mut Vec<String>,
 ) -> Result<Routing, String> {
     let g = &arch.graph;
@@ -195,23 +203,92 @@ pub fn route(
     // Everything else.
     let mut ids: Vec<NetId> = sinks.keys().copied().filter(|n| source.contains_key(n)).collect();
     ids.sort_unstable();
-    let requests: Vec<synth_route::NetRequest> = ids
+    let mut requests: Vec<synth_route::NetRequest> = ids
         .iter()
         .map(|n| {
             let mut s: Vec<u32> = sinks[n].iter().map(|t| t.0).collect();
             s.sort_unstable();
             s.dedup();
-            synth_route::NetRequest { source: source[n], sinks: s, criticality: Vec::new() }
+            let criticality = vec![0.0; s.len()];
+            synth_route::NetRequest { source: source[n], sinks: s, criticality }
         })
         .collect();
+    // Criticalities from estimated delays, and the request and sink node
+    // of each timing connection.
+    let timing = TimingGraph::new(arch, nl, targets);
+    let at = |c: CellId| {
+        pads.get(&c)
+            .map(|&(x, y, _)| (x, y))
+            .or_else(|| placement.sites.get(&c).map(|s| (s.x, s.y)))
+    };
+    let est: Vec<f64> = timing
+        .conns
+        .iter()
+        .map(|c| match (at(c.driver), at(c.sink)) {
+            _ if crate::timing::dedicated(nl, placement, c) => 0.0,
+            (Some(a), Some(b)) => {
+                crate::timing::estimate(&arch.speed.grade, a.0.abs_diff(b.0), a.1.abs_diff(b.1))
+            }
+            _ => 0.0,
+        })
+        .collect();
+    let request_of: FxHashMap<NetId, usize> =
+        ids.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+    let target: Vec<Option<(usize, usize)>> = timing
+        .conns
+        .iter()
+        .map(|c| {
+            let i = *request_of.get(&nl.cells[c.sink].pins[c.pin].net?)?;
+            let node = sink_nodes.get(&(c.sink, c.pin as u32))?;
+            Some((i, requests[i].sinks.binary_search(node).ok()?))
+        })
+        .collect();
+    let sink_counts: Vec<usize> = requests.iter().map(|r| r.sinks.len()).collect();
+    let criticalities = |crit: &[f64]| -> Vec<Vec<f32>> {
+        let mut out: Vec<Vec<f32>> = sink_counts.iter().map(|&n| vec![0.0; n]).collect();
+        for (k, t) in target.iter().enumerate() {
+            if let Some((i, j)) = *t {
+                out[i][j] = out[i][j].max(crit[k] as f32);
+            }
+        }
+        out
+    };
+    for (r, c) in requests.iter_mut().zip(criticalities(&timing.analyse(&est).criticality)) {
+        r.criticality = c;
+    }
+    // Criticalities from the routes (estimates where not routed yet),
+    // scored by the worst excess over the clock targets.
+    let mut retime = |routes: &[synth_route::NetRoute]| -> synth_route::Retimed {
+        let delays_at: Vec<FxHashMap<u32, f64>> = routes
+            .iter()
+            .zip(&requests)
+            .map(|(r, q)| crate::timing::routed_node_delays(arch, q.source, &r.edges))
+            .collect();
+        let delays: Vec<f64> = (0..timing.conns.len())
+            .map(|k| match target[k] {
+                Some((i, j)) => delays_at[i].get(&requests[i].sinks[j]).copied().unwrap_or(est[k]),
+                None => est[k],
+            })
+            .collect();
+        let a = timing.analyse(&delays);
+        let score = a
+            .period
+            .iter()
+            .zip(&timing.clocks)
+            .map(|(p, c)| p - c.target_ps.unwrap_or(0.0))
+            .fold(f64::NEG_INFINITY, f64::max);
+        synth_route::Retimed { criticality: criticalities(&a.criticality), score }
+    };
     let blocked: Vec<u32> = used.iter().copied().collect();
     let opts = synth_route::RouteOptions {
         lookahead_radius: arch.dev.info.max_col.max(arch.dev.info.max_row) as i16 + 1,
+        timing_rounds,
         ..synth_route::RouteOptions::default()
     };
     let hooks = synth_route::RouteHooks {
         blocked: &blocked,
         node_class: &g.node_class,
+        retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
         ..Default::default()
     };
     let (routes, stats) = synth_route::route_with(g.route_graph(), &requests, &opts, hooks)
