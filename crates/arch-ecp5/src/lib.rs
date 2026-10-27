@@ -1,12 +1,18 @@
 //! Lattice ECP5 support: the Project Trellis database of the family, its
 //! routing graph, bitstream assembly and disassembly, and the native flow.
 
+pub mod base;
 pub mod bits;
 pub mod bitstream;
+pub mod bram;
+pub mod cells;
+pub mod clocks;
 pub mod config;
 pub mod db;
 pub mod graph;
+pub mod lpf;
 pub mod speed;
+pub mod synth;
 
 use crate::config::ChipConfig;
 use crate::db::Database;

@@ -15,6 +15,7 @@
 
 use synth_core::{FxHashMap, Interner, Sym};
 
+use crate::clocks::{Geometry, Side};
 use crate::db::{Database, Device};
 use crate::speed::{PipDelay, Speed};
 
@@ -140,6 +141,8 @@ pub struct Graph {
     /// The tile whose bits set each edge's switch ([`NO_TILE`] if fixed).
     pub edge_tile: Vec<u32>,
     pub classes: Vec<PipDelay>,
+    /// Edges of the clock network's wire links ([`Graph::clock_links`]).
+    pub clock_links: usize,
     index: FxHashMap<u64, u32>,
 }
 
@@ -274,16 +277,20 @@ impl Graph {
             templates.insert(t.ttype.clone(), arcs);
         }
         let (max_x, max_y) = (dev.info.max_col as i64, dev.info.max_row as i64);
-        let place = |r: WireRef, x: usize, y: usize| -> Option<(usize, usize, Sym)> {
+        // A wire: where it is keyed, where it is (a global at the origin
+        // is where it is first used), and its name.
+        type Placed = ((usize, usize), (usize, usize), Sym);
+        let place = |r: WireRef, x: usize, y: usize| -> Option<Placed> {
             match r {
                 WireRef::Skip => None,
-                WireRef::Origin(name) => Some((0, 0, name)),
+                WireRef::Origin(name) => Some(((0, 0), (x, y), name)),
                 WireRef::At { dx, dy, name, alt } => {
                     let (wx, wy) = (x as i64 + dx as i64, y as i64 + dy as i64);
                     if wx < 0 || wy < 0 || wx > max_x || wy > max_y {
                         return None;
                     }
-                    Some((wx as usize, wy as usize, if x >= 69 { alt } else { name }))
+                    let at = (wx as usize, wy as usize);
+                    Some((at, at, if x >= 69 { alt } else { name }))
                 }
             }
         };
@@ -300,6 +307,7 @@ impl Graph {
             edge_class: Vec::new(),
             edge_tile: Vec::new(),
             classes,
+            clock_links: 0,
             index: FxHashMap::default(),
         };
         // Pass 1: nodes, and the edges leaving each.
@@ -318,6 +326,11 @@ impl Graph {
             }
         }
         degree.resize(g.node_x.len(), 0);
+        let implicit = g.clock_links(dev);
+        g.clock_links = implicit.len();
+        for &(s, _) in &implicit {
+            degree[s as usize] += 1;
+        }
         // Pass 2: the edges.
         let mut offsets = Vec::with_capacity(degree.len() + 1);
         let mut total = 0u32;
@@ -328,6 +341,11 @@ impl Graph {
         }
         let n = total as usize;
         let (mut dst, mut class, mut tile) = (vec![0u32; n], vec![0u16; n], vec![NO_TILE; n]);
+        // The clock network's links take no time (skew is not modelled).
+        let free = g.classes.iter().position(|c| *c == PipDelay::default()).unwrap_or_else(|| {
+            g.classes.push(PipDelay::default());
+            g.classes.len() - 1
+        }) as u16;
         let mut cursor: Vec<u32> = offsets[..degree.len()].to_vec();
         for (ti, t) in dev.tiles.iter().enumerate() {
             for a in &templates[&t.ttype] {
@@ -336,13 +354,19 @@ impl Graph {
                 else {
                     continue;
                 };
-                let (s, d) = (g.index[&key(s.0, s.1, s.2)], g.index[&key(d.0, d.1, d.2)]);
+                let (s, d) = (g.index[&key(s.0.0, s.0.1, s.2)], g.index[&key(d.0.0, d.0.1, d.2)]);
                 let e = cursor[s as usize] as usize;
                 cursor[s as usize] += 1;
                 dst[e] = d;
                 class[e] = a.class;
                 tile[e] = if a.configurable { ti as u32 } else { NO_TILE };
             }
+        }
+        for &(s, d) in &implicit {
+            let e = cursor[s as usize] as usize;
+            cursor[s as usize] += 1;
+            dst[e] = d;
+            class[e] = free;
         }
         // One edge per pair of wires, a fixed one where there is one.
         let mut keep = 0usize;
@@ -374,8 +398,11 @@ impl Graph {
         Ok(g)
     }
 
-    fn node_or_insert(&mut self, (x, y, name): (usize, usize, Sym)) -> u32 {
-        let k = key(x, y, name);
+    fn node_or_insert(
+        &mut self,
+        ((kx, ky), (x, y), name): ((usize, usize), (usize, usize), Sym),
+    ) -> u32 {
+        let k = key(kx, ky, name);
         if let Some(&n) = self.index.get(&k) {
             return n;
         }
@@ -388,6 +415,51 @@ impl Graph {
         self.node_name.push(name);
         self.index.insert(k, n);
         n
+    }
+
+    /// The links of the clock network that are wires rather than
+    /// switches (see [`crate::clocks`]): quadrant globals to their spines'
+    /// rows, spines to their taps, taps to their tiles' branches.
+    fn clock_links(&self, dev: &Device) -> Vec<(u32, u32)> {
+        let geo = Geometry::from_json(&dev.globals);
+        let mut links = Vec::new();
+        for q in ["UL", "UR", "LL", "LR"] {
+            for n in 0..16 {
+                let Some(src) = self.node(0, 0, &format!("G_{q}PCLK{n}")) else { continue };
+                for (row, col) in geo.spines_of(q) {
+                    if let Some(d) = self.lookup(col, row, &format!("G_HPRX{n:02}00")) {
+                        links.push((src, d));
+                    }
+                }
+            }
+        }
+        for v in 0..self.num_nodes() as u32 {
+            let name = self.name(v);
+            let (x, y) = (self.node_x[v as usize] as usize, self.node_y[v as usize] as usize);
+            if name.starts_with("G_VPTX") {
+                let spine = geo.quadrant(y, x).and_then(|q| geo.spine(q, x));
+                if let Some((row, col)) = spine
+                    && (col, row) != (x, y)
+                    && let Some(s) = self.lookup(col, row, name)
+                {
+                    links.push((s, v));
+                }
+            } else if let Some(branch) = name.strip_prefix("G_HPBX")
+                && let Some((side, tap)) = geo.tap(x)
+            {
+                let side = if side == Side::Left { "L" } else { "R" };
+                if let Some(s) = self.lookup(tap, y, &format!("{side}_HPBX{branch}")) {
+                    links.push((s, v));
+                }
+            }
+        }
+        links
+    }
+
+    /// The wire keyed `name` at exactly `(x, y)`.
+    fn lookup(&self, x: usize, y: usize, name: &str) -> Option<u32> {
+        let sym = self.names.get(name)?;
+        self.index.get(&key(x, y, sym)).copied()
     }
 
     pub fn num_nodes(&self) -> usize {
