@@ -48,7 +48,7 @@ impl Default for SynthOptions {
             lower: LowerOptions::default(),
             map: MapOptions { lut_delay: LEVEL, ..MapOptions::default() },
             remap_rounds: 6,
-            bram_min_bits: 2048,
+            bram_min_bits: 256,
         }
     }
 }

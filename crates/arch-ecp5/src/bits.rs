@@ -113,6 +113,11 @@ impl BitGroup {
         self.0.iter().all(|&b| w.get(cram, b) != b.inv)
     }
 
+    /// How many bits do not have their active value.
+    pub fn mismatches(&self, cram: &Cram, w: &Window) -> usize {
+        self.0.iter().filter(|&&b| w.get(cram, b) == b.inv).count()
+    }
+
     fn set(&self, cram: &mut Cram, w: &Window) {
         for &b in &self.0 {
             w.set(cram, b, !b.inv);

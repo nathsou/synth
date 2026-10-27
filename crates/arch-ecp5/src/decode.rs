@@ -263,30 +263,26 @@ impl Decoder<'_> {
     }
 
     /// Enum `name` of a group of tiles, which each hold some of its bits:
-    /// the value matching in the most tiles, then with the most bits.
-    /// (Read tile by tile, a tile's bits can match another value, or none:
-    /// the database lists some bits of other settings among them.)
+    /// the value whose bits differ least from the configuration's, then
+    /// with the most bits. (Values do not always match exactly: the
+    /// database lists some bits of other settings among a value's, such as
+    /// a write enable's inversion among those of the block RAM's mode.)
     fn group_enum(&self, tiles: &[&TileInfo], name: &str) -> Result<Option<String>, String> {
         let mut score: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-        let (mut holders, mut default) = (0, None::<String>);
+        let mut default = None;
         for t in tiles {
             let bits = self.arch.db.tile_bits(&t.ttype)?;
             let Some(e) = bits.enums.get(name) else { continue };
-            holders += 1;
-            default = e.default.clone();
+            default = Some(e.default.clone().unwrap_or_default());
             for (value, group) in &e.options {
-                if group.matches(self.cram, &t.window) {
-                    let s = score.entry(value.clone()).or_default();
-                    s.0 += 1;
-                    s.1 += group.0.len();
-                }
+                let s = score.entry(value.clone()).or_default();
+                s.0 += group.mismatches(self.cram, &t.window);
+                s.1 += group.0.len();
             }
         }
-        if holders == 0 {
-            return Ok(None);
-        }
-        let best = score.into_iter().max_by_key(|s| s.1);
-        Ok(Some(best.map(|s| s.0).or(default).unwrap_or_default()))
+        let Some(default) = default else { return Ok(None) };
+        let best = score.into_iter().min_by_key(|s| (s.1.0, std::cmp::Reverse(s.1.1)));
+        Ok(Some(best.map_or(default, |s| s.0)))
     }
 
     /// Word `name` of a group of tiles, least significant bit first: each

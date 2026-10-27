@@ -8,8 +8,8 @@ use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, INOUT_PORT, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, FF, LUT4};
-use crate::config::{ChipConfig, TileConfig};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::config::{ChipConfig, TileConfig, TileGroup};
 use crate::graph::NO_TILE;
 use crate::lpf::Constraints;
 use crate::pack::{ff_from_lut, lut_init};
@@ -140,6 +140,167 @@ pub(crate) fn ebr_tiles(arch: &Arch, x: usize, y: usize, z: usize) -> Result<Vec
     Ok(tiles)
 }
 
+/// Whether a wire is a routing tile's input to the cells, which the tile
+/// can tie to a constant (`J[A-D]n`, `JCEn`, `JLSRn`, `JCLKn`).
+fn is_cib_input(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('J') else { return false };
+    let base = rest.trim_end_matches(|c: char| c.is_ascii_digit());
+    rest.len() == base.len() + 1
+        && rest.ends_with(|c: char| ('0'..='7').contains(&c))
+        && matches!(base, "A" | "B" | "C" | "D" | "CE" | "LSR" | "CLK")
+}
+
+/// The routing tile inputs feeding wires `ties` (each searched uphill, as
+/// nextpnr's `tie_cib_signal`), with the values to tie them to.
+fn cib_ties(arch: &Arch, ties: &[(u32, bool)]) -> Result<Vec<(u32, bool)>, String> {
+    let g = &arch.graph;
+    let mut out = Vec::new();
+    // Each search's frontier, by node.
+    let mut frontier: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+    let mut done = vec![false; ties.len()];
+    for (i, &(w, value)) in ties.iter().enumerate() {
+        if is_cib_input(g.name(w)) {
+            out.push((w, value));
+            done[i] = true;
+        } else {
+            frontier.entry(w).or_default().push(i);
+        }
+    }
+    for _ in 0..4 {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+        for v in 0..g.num_nodes() as u32 {
+            for e in g.edges(v) {
+                let Some(searches) = frontier.get(&g.edge_dst[e]) else { continue };
+                for &i in searches {
+                    if done[i] {
+                        continue;
+                    }
+                    if is_cib_input(g.name(v)) {
+                        out.push((v, ties[i].1));
+                        done[i] = true;
+                    } else {
+                        next.entry(v).or_default().push(i);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    if let Some(i) = done.iter().position(|d| !d) {
+        return Err(format!("no routing tile input feeds {}", g.full_name(ties[i].0)));
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The settings of block RAM `c` at `s` with write identifier `wid` (as
+/// nextpnr's `write_bram`), and its initial contents as 2048 9-bit units.
+/// Inputs nothing drives are tied (added to `ties`): clocks, write
+/// enables and resets high and inverted, clock enables high, chip selects
+/// high with the inversion folded into their decode, and address and data
+/// inputs to their `<pin>MUX` parameter's value.
+fn bram_config(
+    arch: &Arch,
+    nl: &Netlist,
+    c: CellId,
+    s: &crate::place::Site,
+    wid: usize,
+    ties: &mut Vec<(u32, bool)>,
+) -> Result<(TileGroup, Vec<u16>), String> {
+    let param = |name: &str, default: &str| -> String {
+        match nl.param(c, name) {
+            Some(Param::Str(v)) => v.clone(),
+            Some(p @ Param::Int(_)) | Some(p @ Param::Bits(_)) => {
+                p.to_bits(32).iter().rev().fold(0u64, |a, b| a << 1 | b.is_one() as u64).to_string()
+            }
+            _ => default.to_string(),
+        }
+    };
+    let ebr = format!("EBR{}", s.z);
+    let mut cfg = TileConfig::default();
+    cfg.add_enum(&format!("{ebr}.MODE"), "DP16KD");
+    for p in ["A", "B"] {
+        cfg.add_enum(
+            &format!("{ebr}.DP16KD.DATA_WIDTH_{p}"),
+            &param(&format!("DATA_WIDTH_{p}"), "18"),
+        );
+        cfg.add_enum(
+            &format!("{ebr}.DP16KD.WRITEMODE_{p}"),
+            &param(&format!("WRITEMODE_{p}"), "NORMAL"),
+        );
+        cfg.add_enum(&format!("{ebr}.REGMODE_{p}"), &param(&format!("REGMODE_{p}"), "NOREG"));
+    }
+    cfg.add_enum(&format!("{ebr}.RESETMODE"), &param("RESETMODE", "SYNC"));
+    cfg.add_enum(&format!("{ebr}.ASYNC_RESET_RELEASE"), &param("ASYNC_RESET_RELEASE", "SYNC"));
+    cfg.add_enum(&format!("{ebr}.GSR"), &param("GSR", "DISABLED"));
+    let wid_rev: usize = (0..9).filter(|i| wid >> i & 1 == 1).map(|i| 1 << (8 - i)).sum();
+    cfg.add_word(&format!("{ebr}.WID"), bits(wid_rev as u64, 9));
+    let mut muxes: FxHashMap<String, String> = FxHashMap::default();
+    let mut csd: FxHashMap<&str, [bool; 3]> = FxHashMap::default();
+    for p in ["A", "B"] {
+        let v = param(&format!("CSDECODE_{p}"), "0b000");
+        let v = v.trim_start_matches("0b").as_bytes().to_vec();
+        // `0bXYZ`: Z decodes chip select 0.
+        let bit = |i: usize| v.len() > i && v[v.len() - 1 - i] == b'1';
+        csd.insert(p, [bit(0), bit(1), bit(2)]);
+    }
+    let mut pins: Vec<String> = Vec::new();
+    for p in ["A", "B"] {
+        pins.extend((0..14).map(|i| format!("AD{p}{i}")));
+        pins.extend((0..18).map(|i| format!("DI{p}{i}")));
+        pins.extend((0..3).map(|i| format!("CS{p}{i}")));
+        pins.extend(["CLK", "CE", "OCE", "WE", "RST"].map(|k| format!("{k}{p}")));
+    }
+    for pin in &pins {
+        if nl.pin_net(c, pin).is_some() {
+            continue;
+        }
+        let wire = arch.node(s.x, s.y, &format!("J{pin}_EBR"))?;
+        let mux = format!("{pin}MUX");
+        let base = pin.trim_end_matches(['A', 'B']);
+        if ["CLK", "WE", "RST"].contains(&base) {
+            ties.push((wire, true));
+            muxes.entry(mux).or_insert_with(|| "INV".into());
+        } else if ["CE", "OCE"].contains(&base) {
+            ties.push((wire, true));
+        } else if let Some(i) = pin.strip_prefix("CS").and_then(|r| r[1..].parse::<usize>().ok()) {
+            ties.push((wire, true));
+            let d = csd.get_mut(&pin[2..3]).expect("port");
+            d[i] = !d[i];
+        } else {
+            ties.push((wire, param(&mux, "0") == "1"));
+        }
+    }
+    for p in ["A", "B"] {
+        for k in ["CLK", "RST", "WE", "CE", "OCE"] {
+            let name = format!("{k}{p}MUX");
+            let v = muxes.get(&name).cloned().unwrap_or_else(|| param(&name, &format!("{k}{p}")));
+            cfg.add_enum(&format!("{ebr}.{name}"), &v);
+        }
+        // Written most significant bit first.
+        let d = csd[p];
+        cfg.add_word(&format!("{ebr}.CSDECODE_{p}"), vec![d[2], d[1], d[0]]);
+    }
+    let mut units = vec![0u16; 2048];
+    for k in 0..64 {
+        let Some(p) = nl.param(c, &format!("INITVAL_{k:02X}")) else { continue };
+        let v = p.to_bits(320);
+        for j in 0..16 {
+            for t in 0..18 {
+                if v[20 * j + t].is_one() {
+                    units[2 * (16 * k + j) + t / 9] |= 1 << (t % 9);
+                }
+            }
+        }
+    }
+    let tiles = ebr_tiles(arch, s.x, s.y, s.z)?;
+    Ok((TileGroup { tiles, config: cfg }, units))
+}
+
 /// The bank voltage of an I/O standard.
 fn vccio(iotype: &str) -> Option<&'static str> {
     let t = iotype.trim_end_matches('D');
@@ -230,7 +391,8 @@ pub fn config(
             _ => {}
         }
     }
-    let mut cells: Vec<(&CellId, &crate::place::Site)> = placement.sites.iter().collect();
+    let mut cells: Vec<(&CellId, &crate::place::Site)> =
+        placement.sites.iter().filter(|(c, _)| nl.cell_kind(**c) != DP16KD).collect();
     cells.sort_by_key(|(c, _)| **c);
     for (&c, s) in cells {
         let tname = plc(s.x, s.y)?;
@@ -299,7 +461,7 @@ pub fn config(
     }
     // I/O.
     let mut banks: BTreeMap<u8, &str> = BTreeMap::new();
-    let mut ties: Vec<u32> = Vec::new();
+    let mut ties: Vec<(u32, bool)> = Vec::new();
     let mut ports: Vec<(&CellId, &(usize, usize, char))> = pads.iter().collect();
     ports.sort_by_key(|(c, _)| **c);
     for (&c, &(x, y, l)) in ports {
@@ -331,7 +493,7 @@ pub fn config(
                 }
                 banks.insert(bank, v);
             }
-            ties.push(arch.node(x, y, &format!("JPADDT{l}"))?);
+            ties.push((arch.node(x, y, &format!("JPADDT{l}"))?, false));
         } else {
             cc.tile(&pio_tile)
                 .add_enum(&format!("{pio}.HYSTERESIS"), attr("HYSTERESIS").unwrap_or("ON"));
@@ -347,27 +509,38 @@ pub fn config(
             cc.tile(&pio_tile).add_enum(&format!("{pio}.DRIVE"), v);
         }
     }
-    // Output enables tied low (driving) where no route drives them: the
-    // CIB input feeding each, tied to 0.
-    if !ties.is_empty() {
-        let want: FxHashSet<u32> = ties.iter().copied().collect();
-        let mut found: FxHashMap<u32, u32> = FxHashMap::default();
-        for v in 0..g.num_nodes() as u32 {
-            for e in g.edges(v) {
-                if want.contains(&g.edge_dst[e]) {
-                    found.entry(g.edge_dst[e]).or_insert(v);
+    // Block RAMs.
+    let mut brams: Vec<(&CellId, &crate::place::Site)> =
+        placement.sites.iter().filter(|(c, _)| nl.cell_kind(**c) == DP16KD).collect();
+    brams.sort_by_key(|(c, _)| **c);
+    for (wid, (&c, s)) in brams.into_iter().enumerate() {
+        let (group, units) = bram_config(arch, nl, c, s, wid, &mut ties)?;
+        cc.bram_init.insert(wid as u16, units);
+        cc.groups.push(group);
+    }
+    // Output enables tied low (driving) where no route drives them, and
+    // block RAM inputs nothing drives: the CIB input feeding each, tied.
+    for (cib, value) in cib_ties(arch, &ties)? {
+        let (x, y) = (g.node_x[cib as usize] as usize, g.node_y[cib as usize] as usize);
+        let tile = arch
+            .dev
+            .tiles_at(y, x)
+            .find(|t| t.ttype.starts_with("CIB") || t.ttype.starts_with("VCIB"))
+            .ok_or_else(|| format!("no CIB tile at R{y}C{x}"))?;
+        let name = g.name(cib);
+        // Clock, set/reset and enable inputs only tie with one setting,
+        // `0` for the first two, which reads as high.
+        let setting = match (name.starts_with("JCLK") || name.starts_with("JLSR"), value) {
+            (true, true) => "0",
+            (true, false) => return Err(format!("cannot tie {name} low")),
+            (false, v) => {
+                if name.starts_with("JCE") && !v {
+                    return Err(format!("cannot tie {name} low"));
                 }
+                if v { "1" } else { "0" }
             }
-        }
-        for t in ties {
-            let cib = found.get(&t).ok_or("no input to a pad's output enable")?;
-            let (x, y) = (g.node_x[*cib as usize] as usize, g.node_y[*cib as usize] as usize);
-            let tile = arch
-                .dev
-                .tile_of_type(y, x, &["CIB", "CIB_LR", "CIB_LR_S", "CIB_EFB0", "CIB_EFB1"])
-                .ok_or_else(|| format!("no CIB tile at R{y}C{x}"))?;
-            cc.tile(&tile.name.clone()).add_enum(&format!("CIB.{}MUX", g.name(*cib)), "0");
-        }
+        };
+        cc.tile(&tile.name.clone()).add_enum(&format!("CIB.{name}MUX"), setting);
     }
     for t in &arch.dev.tiles {
         if let Some(bank) = t.ttype.strip_prefix("BANKREF").and_then(|b| b.parse::<u8>().ok())

@@ -18,7 +18,7 @@ use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, NetId, Netlist, OUTPUT_PORT};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4};
 use crate::graph::NO_TILE;
 use crate::pack::{ff_from_lut, pin};
 use crate::place::{Placement, Site};
@@ -99,6 +99,7 @@ fn pin_node(
             }
             format!("M{z}_SLICE")
         }
+        (DP16KD, _) => format!("J{pin}_EBR"),
         (FF, "CE") => format!("CE{}_SLICE", z / 2),
         (FF, "LSR") => format!("LSR{}_SLICE", z / 2),
         (FF, "CLK") => format!("CLK{}_SLICE", z / 2),
@@ -162,9 +163,7 @@ pub fn route(
     // Clocks, most clock pins first, on the 16 globals.
     let mut clocks: Vec<(NetId, usize)> = sinks
         .iter()
-        .map(|(&n, s)| {
-            (n, s.iter().filter(|(_, c, p)| nl.cell_kind(*c) == FF && p == "CLK").count())
-        })
+        .map(|(&n, s)| (n, s.iter().filter(|(_, c, p)| is_clock_pin(nl, *c, p)).count()))
         .filter(|&(n, k)| k > 0 && source.contains_key(&n))
         .collect();
     clocks.sort_by_key(|&(n, k)| (std::cmp::Reverse(k), n));
@@ -178,7 +177,7 @@ pub fn route(
         buffers.insert(input);
         used.insert(output);
         let (clock_pins, rest): (Vec<_>, Vec<_>) =
-            sinks[&net].iter().cloned().partition(|(_, c, p)| nl.cell_kind(*c) == FF && p == "CLK");
+            sinks[&net].iter().cloned().partition(|(_, c, p)| is_clock_pin(nl, *c, p));
         let edges = route_global(arch, output, global, clock_pins.iter().map(|s| s.0), &mut used)
             .map_err(|e| format!("clock {}: {e}", nl.str(nl.nets[net].name)))?;
         // The rest of the net, and the buffer's input, by general routing.
@@ -223,6 +222,15 @@ pub fn route(
     }
     routing.lut_pins = lut_pins(arch, nl, placement, &routing);
     Ok(routing)
+}
+
+/// Whether a pin is a clock input the global network reaches.
+fn is_clock_pin(nl: &Netlist, c: CellId, pin: &str) -> bool {
+    match nl.cell_kind(c) {
+        FF => pin == "CLK",
+        DP16KD => matches!(pin, "CLKA" | "CLKB"),
+        _ => false,
+    }
 }
 
 /// A cell on the net (to name a sink that is no cell's pin).
@@ -295,6 +303,7 @@ fn on_global(name: &str, n: usize) -> bool {
         return q[6..] == n.to_string();
     }
     matches!(name, "CLK0" | "CLK1")
+        || name.starts_with("JCLK")
         || name.starts_with("MUXCLK")
         || (name.starts_with("CLK") && name.ends_with("_SLICE"))
 }

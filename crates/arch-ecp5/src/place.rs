@@ -1,8 +1,8 @@
 //! Placement of logic cells and carry chains by simulated annealing.
 //!
 //! Units are logic cells (a LUT and/or flip-flop, one of a tile's eight
-//! slots) and carry chains (consecutive slices of a row, moved whole); I/O
-//! cells are fixed to their pins. The cost is each net's bounding box half
+//! slots), carry chains (consecutive slices of a row, moved whole) and
+//! block RAMs (on their sites); I/O cells are fixed to their pins. The cost is each net's bounding box half
 //! perimeter, weighted for nets of many cells as VPR weights them, under a
 //! VPR schedule: the temperature falls and the move window narrows by the
 //! share of moves accepted. A tile is legal when its flip-flops share one
@@ -47,6 +47,8 @@ enum Occ {
     Lc(u32),
     /// A chain and which of its slices.
     Chain(u32, u32),
+    /// A block RAM (not in a logic slot).
+    Ebr(u32),
 }
 
 /// The logic tiles of a device: positions, and the rows' runs of
@@ -57,17 +59,20 @@ pub struct Grid {
     at: FxHashMap<(usize, usize), usize>,
     /// Each row's tiles, west to east (all adjacent).
     rows: FxHashMap<usize, Vec<usize>>,
+    /// Block RAM sites `(x, y, z)`.
+    pub ebr: Vec<(usize, usize, usize)>,
 }
 
 impl Grid {
-    pub fn new(mut tiles: Vec<(usize, usize)>) -> Grid {
+    pub fn new(mut tiles: Vec<(usize, usize)>, mut ebr: Vec<(usize, usize, usize)>) -> Grid {
+        ebr.sort_unstable();
         tiles.sort_by_key(|&(x, y)| (y, x));
         let at = tiles.iter().enumerate().map(|(i, &p)| (p, i)).collect();
         let mut rows: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
         for (i, &(_, y)) in tiles.iter().enumerate() {
             rows.entry(y).or_default().push(i);
         }
-        Grid { tiles, at, rows }
+        Grid { tiles, at, rows, ebr }
     }
 }
 
@@ -81,6 +86,9 @@ struct Annealer<'a> {
     lc_slot: Vec<usize>,
     /// Each chain's first slice: its row and index along the row.
     chain_at: Vec<(usize, usize)>,
+    /// Each block RAM's site, and each site's block RAM.
+    ebr_site: Vec<usize>,
+    ebr_occ: Vec<Option<u32>>,
     /// Each cell's unit: `Occ::Lc` or `Occ::Chain`, and its offset in a
     /// chain (slices times two plus half).
     cell_unit: FxHashMap<CellId, (Occ, usize)>,
@@ -128,6 +136,10 @@ impl<'a> Annealer<'a> {
                 let (t, _) = self.chain_slice(row, start, off / 2).expect("chain within its row");
                 self.grid.tiles[t]
             }
+            Some(&(Occ::Ebr(u), _)) => {
+                let (x, y, _) = self.grid.ebr[self.ebr_site[u as usize]];
+                (x, y)
+            }
             _ => (0, 0),
         }
     }
@@ -150,7 +162,7 @@ impl<'a> Annealer<'a> {
         match self.occ[s] {
             Occ::Lc(u) => self.packed.lcs[u as usize].ff,
             Occ::Chain(ch, i) => self.packed.chains[ch as usize][i as usize].ff[s % 2],
-            Occ::Free => None,
+            Occ::Free | Occ::Ebr(_) => None,
         }
     }
 
@@ -194,6 +206,7 @@ impl<'a> Annealer<'a> {
                 .iter()
                 .flat_map(|s| std::iter::once(s.ccu).chain(s.ff.iter().flatten().copied()))
                 .collect(),
+            Occ::Ebr(u) => vec![self.packed.brams[u as usize]],
             Occ::Free => Vec::new(),
         }
     }
@@ -314,14 +327,70 @@ impl<'a> Annealer<'a> {
         self.chain_at[ch] = at;
     }
 
+    /// Moves block RAM `u` to site `to`, swapping with the one there;
+    /// returns the touched nets and the cost change.
+    fn move_ebr(&mut self, u: u32, to: usize) -> Option<(Vec<u32>, f64)> {
+        let from = self.ebr_site[u as usize];
+        if from == to {
+            return None;
+        }
+        let other = self.ebr_occ[to];
+        self.swap_ebr(u, other, from, to);
+        let mut cells = self.unit_cells(Occ::Ebr(u));
+        if let Some(o) = other {
+            cells.extend(self.unit_cells(Occ::Ebr(o)));
+        }
+        let nets = self.touched_nets(&cells);
+        let delta =
+            nets.iter().map(|&n| self.net_bb_cost(n as usize) - self.net_cost[n as usize]).sum();
+        Some((nets, delta))
+    }
+
+    /// Puts block RAM `u` (at `from`) on `to`, and `other` (at `to`) on
+    /// `from`.
+    fn swap_ebr(&mut self, u: u32, other: Option<u32>, from: usize, to: usize) {
+        self.ebr_occ[to] = Some(u);
+        self.ebr_occ[from] = other;
+        self.ebr_site[u as usize] = to;
+        if let Some(o) = other {
+            self.ebr_site[o as usize] = from;
+        }
+    }
+
     /// One move at temperature `temp` within `rlim` tiles; returns whether
     /// it was accepted (`None` if illegal or impossible).
     fn try_move(&mut self, temp: f64, rlim: usize) -> Option<bool> {
         let lcs = self.packed.lcs.len();
         let chains = self.packed.chains.len();
-        let pick = self.rng.below(lcs + chains);
+        let brams = self.packed.brams.len();
+        let pick = self.rng.below(lcs + chains + brams);
         let decide = |rng: &mut Rng, delta: f64| delta <= 0.0 || rng.unit() < (-delta / temp).exp();
-        if pick < lcs {
+        if pick >= lcs + chains {
+            let u = (pick - lcs - chains) as u32;
+            let (x, y, _) = self.grid.ebr[self.ebr_site[u as usize]];
+            // A random site within the window.
+            let r = rlim;
+            let near: Vec<usize> = (0..self.grid.ebr.len())
+                .filter(|&s| {
+                    let (sx, sy, _) = self.grid.ebr[s];
+                    sx.abs_diff(x) <= r && sy.abs_diff(y) <= r
+                })
+                .collect();
+            let to = near[self.rng.below(near.len())];
+            let from = self.ebr_site[u as usize];
+            let (nets, delta) = self.move_ebr(u, to)?;
+            if decide(&mut self.rng, delta) {
+                for n in nets {
+                    self.net_cost[n as usize] = self.net_bb_cost(n as usize);
+                }
+                Some(true)
+            } else {
+                // The one now at `from` goes back to `to`.
+                let back = self.ebr_occ[from];
+                self.swap_ebr(u, back, to, from);
+                Some(false)
+            }
+        } else if pick < lcs {
             let u = pick as u32;
             let (x, y) = self.grid.tiles[self.lc_slot[pick] / 8];
             let r = rlim as i64;
@@ -375,7 +444,8 @@ impl<'a> Annealer<'a> {
     }
 
     fn anneal(&mut self, effort: f64) -> usize {
-        let units = (self.packed.lcs.len() + self.packed.chains.len()).max(1) as f64;
+        let units = (self.packed.lcs.len() + self.packed.chains.len() + self.packed.brams.len())
+            .max(1) as f64;
         let moves = ((effort * units.powf(4.0 / 3.0)) as usize).max(100);
         let nets = self.nets.len().max(1) as f64;
         let mut rlim = self.width.max(self.height);
@@ -446,6 +516,8 @@ pub fn place(
         occ: vec![Occ::Free; grid.tiles.len() * 8],
         lc_slot: vec![usize::MAX; packed.lcs.len()],
         chain_at: vec![(0, 0); packed.chains.len()],
+        ebr_site: vec![usize::MAX; packed.brams.len()],
+        ebr_occ: vec![None; grid.ebr.len()],
         cell_unit: FxHashMap::default(),
         fixed: fixed.clone(),
         nets: Vec::new(),
@@ -458,6 +530,9 @@ pub fn place(
         for c in lc.lut.into_iter().chain(lc.ff) {
             a.cell_unit.insert(c, (Occ::Lc(i as u32), 0));
         }
+    }
+    for (i, &c) in packed.brams.iter().enumerate() {
+        a.cell_unit.insert(c, (Occ::Ebr(i as u32), 0));
     }
     for (i, ch) in packed.chains.iter().enumerate() {
         for (j, s) in ch.iter().enumerate() {
@@ -496,9 +571,10 @@ pub fn place(
     let steps = a.anneal(opts.effort);
     a.net_cost = (0..a.nets.len()).map(|n| a.net_bb_cost(n)).collect();
     log.push(format!(
-        "placement: {} logic cells, {} carry chains, {} nets, wirelength {start:.0} -> {:.0} in {steps} temperature steps",
+        "placement: {} logic cells, {} carry chains, {} block RAMs, {} nets, wirelength {start:.0} -> {:.0} in {steps} temperature steps",
         packed.lcs.len(),
         packed.chains.len(),
+        packed.brams.len(),
         a.nets.len(),
         a.total()
     ));
@@ -509,6 +585,10 @@ pub fn place(
         for c in lc.lut.into_iter().chain(lc.ff) {
             p.sites.insert(c, Site { x, y, z: s % 8 });
         }
+    }
+    for (u, &c) in packed.brams.iter().enumerate() {
+        let (x, y, z) = grid.ebr[a.ebr_site[u]];
+        p.sites.insert(c, Site { x, y, z });
     }
     for (ch, slices) in packed.chains.iter().enumerate() {
         let (row, start) = a.chain_at[ch];
@@ -527,9 +607,27 @@ pub fn place(
     Ok(p)
 }
 
-/// A legal starting placement: chains along the rows, then logic cells
-/// grouped by flip-flop controls into the tiles in order.
+/// A legal starting placement: block RAMs on the sites nearest the
+/// device's center, chains along the rows, then logic cells grouped by
+/// flip-flop controls into the tiles in order.
 fn initial(a: &mut Annealer) -> Result<(), String> {
+    if a.packed.brams.len() > a.grid.ebr.len() {
+        return Err(format!(
+            "design does not fit: {} block RAMs, {} on the device",
+            a.packed.brams.len(),
+            a.grid.ebr.len()
+        ));
+    }
+    let mut sites: Vec<usize> = (0..a.grid.ebr.len()).collect();
+    let (cx, cy) = (a.width / 2, a.height / 2);
+    sites.sort_by_key(|&s| {
+        let (x, y, z) = a.grid.ebr[s];
+        (x.abs_diff(cx) + y.abs_diff(cy), x, y, z)
+    });
+    for (u, &s) in sites.iter().take(a.packed.brams.len()).enumerate() {
+        a.ebr_site[u] = s;
+        a.ebr_occ[s] = Some(u as u32);
+    }
     let mut rows: Vec<usize> = a.grid.rows.keys().copied().collect();
     rows.sort_unstable();
     // Next free slice index along each row.

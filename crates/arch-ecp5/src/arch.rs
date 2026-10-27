@@ -40,7 +40,12 @@ impl Arch {
         let graph = Graph::build(&dev, &db, &speed)?;
         let logic: Vec<(usize, usize)> =
             dev.tiles.iter().filter(|t| t.ttype == "PLC2").map(|t| (t.col, t.row)).collect();
-        let grid = Grid::new(logic);
+        let ebr: Vec<(usize, usize, usize)> = dev
+            .tiles
+            .iter()
+            .filter_map(|t| crate::bitgen::ebr_z(&t.ttype).map(|z| (t.col, t.row, z)))
+            .collect();
+        let grid = Grid::new(logic, ebr);
         let clocks = Geometry::from_json(&dev.globals);
         Ok(Arch { db, dev, graph, speed, grid, clocks, package })
     }
