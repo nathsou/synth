@@ -23,15 +23,51 @@ pub fn pack(argv: &[String]) -> Result<(), String> {
     write(&out, &arch_ecp5::pack_config(&db, &cc, a.flag("--compress"))?)
 }
 
-/// `synth unpack-ecp5 <in.bit> -o <out.config> [--db <dir>]`.
+/// `synth unpack-ecp5 <in.bit> [-o <out.config>] [--timing [--speed 6]
+/// [--freq <MHz>]] [--db <dir>]`: the textual configuration, and with
+/// `--timing` the timing of what the bitstream implements.
 pub fn unpack(argv: &[String]) -> Result<(), String> {
-    let mut a = Args::parse(argv, &["--db", "-o"], &[])?;
+    let mut a = Args::parse(argv, &["--db", "-o", "--speed", "--freq"], &["--timing"])?;
     let input = a.positional(0, "bitstream")?;
-    let out = a.required("-o")?;
-    let db = database(&mut a)?;
+    let out = a.value("-o");
+    let timing = a.flag("--timing");
+    if out.is_none() && !timing {
+        return Err("unpack-ecp5 needs -o or --timing".into());
+    }
+    let speed = a.value("--speed").unwrap_or_else(|| "6".into());
+    let freq: Option<f64> =
+        a.value("--freq").map(|s| s.parse().map_err(|_| "bad --freq")).transpose()?;
+    let root = arch_ecp5::db::locate(a.value("--db").as_deref().map(Path::new))?;
+    a.finish()?;
+    let db = arch_ecp5::db::Database::open(&root)?;
     let bytes = std::fs::read(&input).map_err(|e| format!("{input}: {e}"))?;
-    let cc = arch_ecp5::unpack_bitstream(&db, &bytes).map_err(|e| format!("{input}: {e}"))?;
-    write(&out, cc.to_text().as_bytes())
+    if let Some(out) = out {
+        let cc = arch_ecp5::unpack_bitstream(&db, &bytes).map_err(|e| format!("{input}: {e}"))?;
+        write(&out, cc.to_text().as_bytes())?;
+    }
+    if timing {
+        let bits = arch_ecp5::read_bitstream(&db, &bytes).map_err(|e| format!("{input}: {e}"))?;
+        let arch = arch_ecp5::arch::Arch::load(&root, &bits.info.name, "CABGA381", &speed)?;
+        // Every pad in use, named after its pin.
+        let pins: Vec<(String, (usize, usize, char))> = arch.dev.packages[&arch.package]
+            .iter()
+            .map(|(name, p)| (name.clone(), (p.col, p.row, p.pio)))
+            .collect();
+        let d = arch_ecp5::decode::decode(&arch, &bits.cram, &bits.bram, &pins)?;
+        for w in &d.warnings {
+            info!("warning: {w}");
+        }
+        let clocks = arch_ecp5::timing::ClockConstraints { default_mhz: freq, nets: Vec::new() };
+        let report =
+            arch_ecp5::timing::analyse(&arch, &d.netlist, &d.placement, &d.routing, &clocks);
+        for c in &report.clocks {
+            println!("clock {}: {:.2} MHz ({:.2} ns)", c.clock, c.fmax_mhz, c.period_ns);
+            for p in &c.path {
+                println!("  {p}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The pin constraints of `--lpf`, if given.
@@ -126,11 +162,11 @@ pub fn decoded(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, 
     if bits.info.name != arch.dev.info.name {
         return Err(format!("the bitstream is for {}, not {}", bits.info.name, arch.dev.info.name));
     }
-    let (nl, warnings) = arch_ecp5::decode::decode(&arch, &bits.cram, &bits.bram, &pins)?;
-    for w in warnings {
+    let d = arch_ecp5::decode::decode(&arch, &bits.cram, &bits.bram, &pins)?;
+    for w in &d.warnings {
         eprintln!("warning: {w}");
     }
-    synth_sim::netlist::from_netlist(&nl, &mut arch_ecp5::sim::add_cell)
+    synth_sim::netlist::from_netlist(&d.netlist, &mut arch_ecp5::sim::add_cell)
 }
 
 /// Places, routes and writes the bitstream of a synthesised ECP5 design:

@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use synth_core::FxHashMap;
+use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
 
 use crate::arch::Arch;
@@ -27,6 +27,8 @@ use crate::cells::{CCU2C, DP16KD, FF, LUT4};
 use crate::config::{ChipConfig, TileConfig};
 use crate::db::TileInfo;
 use crate::graph::NO_TILE;
+use crate::place::{Placement, Site};
+use crate::route::Routing;
 
 const SLICES: [char; 4] = ['A', 'B', 'C', 'D'];
 const LUT_PINS: [&str; 4] = ["A", "B", "C", "D"];
@@ -82,6 +84,8 @@ struct Cell {
     params: Vec<(String, Param)>,
     inputs: Vec<(String, u32)>,
     outputs: Vec<(String, u32)>,
+    /// Where a logic cell is.
+    site: Option<Site>,
 }
 
 struct Decoder<'a> {
@@ -150,18 +154,25 @@ impl Decoder<'_> {
             let slice = format!("SLICE{l}");
             let mode = self.enum_value(tile, &format!("{slice}.MODE"))?;
             // A LUT input tied high reads 1 whatever its wire carries.
-            let lut_inputs =
-                |d: &Self, k: usize, suffix: &str| -> Result<Vec<(String, u32)>, String> {
-                    let z = 2 * s + k;
-                    let mut ins = Vec::new();
-                    for p in LUT_PINS {
-                        if d.enum_value(tile, &format!("{slice}.{p}{k}MUX"))? == "1" {
-                            continue;
-                        }
-                        ins.push((format!("{p}{suffix}"), d.wire(tile, &format!("{p}{z}_SLICE"))?));
+            // The inputs a table reads: not those tied high, nor those it
+            // does not depend on (an unused LUT's inputs would otherwise
+            // join whatever its wires carry, even into loops).
+            let lut_inputs = |d: &Self,
+                              k: usize,
+                              init: u64,
+                              suffix: &str|
+             -> Result<Vec<(String, u32)>, String> {
+                let z = 2 * s + k;
+                let mut ins = Vec::new();
+                for (i, p) in LUT_PINS.iter().enumerate() {
+                    let depends = (0..16).any(|e| (init >> e & 1) != (init >> (e ^ 1 << i) & 1));
+                    if !depends || d.enum_value(tile, &format!("{slice}.{p}{k}MUX"))? == "1" {
+                        continue;
                     }
-                    Ok(ins)
-                };
+                    ins.push((format!("{p}{suffix}"), d.wire(tile, &format!("{p}{z}_SLICE"))?));
+                }
+                Ok(ins)
+            };
             match mode.as_str() {
                 "LOGIC" => {
                     for k in 0..2 {
@@ -171,8 +182,9 @@ impl Decoder<'_> {
                             kind: LUT4,
                             name: format!("lut_x{x}_y{y}_{z}"),
                             params: vec![("INIT".into(), Param::Int(init as i64))],
-                            inputs: lut_inputs(self, k, "")?,
+                            inputs: lut_inputs(self, k, init, "")?,
                             outputs: vec![("Z".into(), self.wire(tile, &format!("F{z}_SLICE"))?)],
+                            site: Some(Site { x, y, z }),
                         });
                     }
                 }
@@ -184,7 +196,7 @@ impl Decoder<'_> {
                         params.push((format!("INIT{h}"), Param::Int(init as i64)));
                         let inject = self.enum_value(tile, &format!("{slice}.CCU2.INJECT1_{h}"))?;
                         params.push((format!("INJECT1_{h}"), Param::Str(inject)));
-                        inputs.extend(lut_inputs(self, h, &h.to_string())?);
+                        inputs.extend(lut_inputs(self, h, init, &h.to_string())?);
                     }
                     let (cin, cout) = carry_wires(s);
                     inputs.push(("CIN".into(), self.wire(tile, cin)?));
@@ -198,6 +210,7 @@ impl Decoder<'_> {
                             ("S1".into(), self.wire(tile, &format!("F{}_SLICE", 2 * s + 1))?),
                             ("COUT".into(), self.wire(tile, cout)?),
                         ],
+                        site: Some(Site { x, y, z: 2 * s }),
                     });
                 }
                 other => {
@@ -256,6 +269,7 @@ impl Decoder<'_> {
                         ("CE".into(), self.wire(tile, &format!("CE{s}_SLICE"))?),
                     ],
                     outputs: vec![("Q".into(), self.wire(tile, &format!("Q{z}_SLICE"))?)],
+                    site: Some(Site { x, y, z }),
                 });
             }
         }
@@ -312,17 +326,32 @@ impl Decoder<'_> {
             return Ok(());
         }
         let name = format!("ebr_x{x}_y{y}_{z}");
-        if mode != "DP16KD" {
-            self.warnings.push(format!("{name}: block RAM mode {mode} is not decoded"));
-            return Ok(());
-        }
         let mut params: Vec<(String, Param)> = Vec::new();
+        match mode.as_str() {
+            "DP16KD" => {}
+            // A 36-bit write port A, and port B reading.
+            "PDPW16KD" => {
+                let r = self
+                    .group_enum(&tiles, &format!("{ebr}.PDPW16KD.DATA_WIDTH_R"))?
+                    .unwrap_or_else(|| "36".into());
+                params.push(("DATA_WIDTH_A".into(), Param::Str("36".into())));
+                params.push(("DATA_WIDTH_B".into(), Param::Str(r)));
+            }
+            _ => {
+                self.warnings.push(format!("{name}: block RAM mode {mode} is not decoded"));
+                return Ok(());
+            }
+        }
         for p in ["A", "B"] {
-            for (key, setting) in [
-                (format!("DATA_WIDTH_{p}"), format!("DP16KD.DATA_WIDTH_{p}")),
+            let data_width = if mode == "DP16KD" {
+                Some((format!("DATA_WIDTH_{p}"), format!("DP16KD.DATA_WIDTH_{p}")))
+            } else {
+                None
+            };
+            for (key, setting) in data_width.into_iter().chain([
                 (format!("WRITEMODE_{p}"), format!("DP16KD.WRITEMODE_{p}")),
                 (format!("REGMODE_{p}"), format!("REGMODE_{p}")),
-            ] {
+            ]) {
                 if let Some(v) = self.group_enum(&tiles, &format!("{ebr}.{setting}"))? {
                     params.push((key, Param::Str(v)));
                 }
@@ -377,7 +406,14 @@ impl Decoder<'_> {
                     .push((format!("DO{p}{i}"), self.arch.node(x, y, &format!("JDO{p}{i}_EBR"))?));
             }
         }
-        cells.push(Cell { kind: DP16KD, name, params, inputs, outputs });
+        cells.push(Cell {
+            kind: DP16KD,
+            name,
+            params,
+            inputs,
+            outputs,
+            site: Some(Site { x, y, z }),
+        });
         Ok(())
     }
 
@@ -403,21 +439,35 @@ impl Decoder<'_> {
                 params: vec![("INIT".into(), Param::Int(if high { 0xffff } else { 0 }))],
                 inputs: Vec::new(),
                 outputs: vec![("Z".into(), w)],
+                site: None,
             });
         }
         Ok(())
     }
 }
 
+/// What a configuration implements.
+#[derive(Debug)]
+pub struct Decoded {
+    pub netlist: Netlist,
+    /// Where the logic cells and block RAMs are.
+    pub placement: Placement,
+    /// Each net's switches from its driver to its sinks (as
+    /// [`crate::route::route`] gives them), for timing analysis.
+    pub routing: Routing,
+    /// What was not decoded.
+    pub warnings: Vec<String>,
+}
+
 /// Decodes the configuration memory `cram` (with block RAM contents
 /// `bram_init`) for `arch`, with port bits `pins` (name, pad `(x, y, PIO
-/// letter)`). Returns the netlist and warnings about what was not decoded.
+/// letter)`).
 pub fn decode(
     arch: &Arch,
     cram: &Cram,
     bram_init: &BTreeMap<u16, Vec<u16>>,
     pins: &[(String, (usize, usize, char))],
-) -> Result<(Netlist, Vec<String>), String> {
+) -> Result<Decoded, String> {
     let g = &arch.graph;
     let n = g.num_nodes();
     let prefix = crate::graph::size_prefix(&arch.dev.info.name);
@@ -431,6 +481,13 @@ pub fn decode(
         warnings: Vec::new(),
     };
     let cc = &d.cc.clone();
+    // The switches a configured or zero-bit arc sets, by source wire.
+    let mut active: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    let mut activate = |a: u32, b: u32| {
+        if let Some(e) = g.edges(a).find(|&e| g.edge_dst[e] == b) {
+            active.entry(a).or_default().push(e as u32);
+        }
+    };
     // Configured switches. In carry mode, a slice's output multiplexers
     // share their bits with the carry settings, and stay on the outputs.
     for (name, tc) in &cc.tiles {
@@ -456,7 +513,10 @@ pub fn decode(
                 g.tile_wire(tile.col, tile.row, sink, prefix),
             );
             match (a, b) {
-                (Some(a), Some(b)) => d.uf.union(a, b),
+                (Some(a), Some(b)) => {
+                    d.uf.union(a, b);
+                    activate(a, b);
+                }
                 _ => d.warnings.push(format!("{name}: no switch {source} -> {sink}")),
             }
         }
@@ -488,6 +548,7 @@ pub fn decode(
                 g.tile_wire(tile.col, tile.row, sink, prefix),
             ) {
                 d.uf.union(a, b);
+                activate(a, b);
             }
         }
     }
@@ -544,7 +605,7 @@ pub fn decode(
         } else if is("INPUT") {
             let pad = arch.node(*x, *y, &format!("JPADDI{l}_PIO"))?;
             ports.push((port.clone(), INPUT_PORT, Dir::Output, pad));
-        } else {
+        } else if types.iter().any(|t| t != "NONE") {
             d.warnings.push(format!("port {port}: pad type {} is not decoded", types.join("/")));
         }
     }
@@ -567,22 +628,39 @@ pub fn decode(
         drivers.insert(r, who);
         nets.insert(r, nl.add_net(&g.full_name(r)));
     }
-    let add_pin = |nl: &mut Netlist, c: CellId, pin: &str, dir: Dir, net: Option<NetId>| {
-        nl.add_pin(c, pin, dir, net).map(|_| ()).map_err(|e| e.0)
-    };
+    let mut placement = Placement::default();
+    let mut routing = Routing::default();
+    // Each net's driver and sink wires.
+    let mut net_sinks: FxHashMap<NetId, Vec<u32>> = FxHashMap::default();
+    let mut connect =
+        |nl: &mut Netlist, c: CellId, pin: &str, dir: Dir, net: Option<NetId>, w: u32| {
+            let i = nl.add_pin(c, pin, dir, net).map_err(|e| e.0)?;
+            if let Some(n) = net {
+                if dir == Dir::Output {
+                    routing.sources.insert(n, w);
+                } else {
+                    routing.sink_nodes.insert((c, i), w);
+                    net_sinks.entry(n).or_default().push(w);
+                }
+            }
+            Ok::<(), String>(())
+        };
     for c in &cells {
         let id = nl.add_cell(&c.name, c.kind);
         for (k, v) in &c.params {
             nl.set_param(id, k, v.clone());
         }
+        if let Some(s) = c.site {
+            placement.sites.insert(id, s);
+        }
         for (p, w) in &c.outputs {
             let r = d.uf.find(*w);
             let net = (drivers.get(&r) == Some(&format!("{}.{p}", c.name))).then(|| nets[&r]);
-            add_pin(&mut nl, id, p, Dir::Output, net)?;
+            connect(&mut nl, id, p, Dir::Output, net, *w)?;
         }
         for (p, w) in &c.inputs {
             let net = nets.get(&d.uf.find(*w)).copied();
-            add_pin(&mut nl, id, p, Dir::Input, net)?;
+            connect(&mut nl, id, p, Dir::Input, net, *w)?;
         }
     }
     for (port, kind, dir, w) in ports {
@@ -593,9 +671,51 @@ pub fn decode(
             // An output port reads its pad's net, undriven or not.
             _ => Some(*nets.entry(r).or_insert_with(|| nl.add_net(&g.full_name(r)))),
         };
-        add_pin(&mut nl, c, "PAD", dir, net)?;
+        connect(&mut nl, c, "PAD", dir, net, w)?;
     }
-    Ok((nl, d.warnings))
+    // Routes: breadth first from each driver over the active switches,
+    // pruned to the branches reaching sinks.
+    let fixed = |v: u32| {
+        g.edges(v)
+            .filter(move |&e| {
+                g.edge_tile[e] == NO_TILE && !is_permutation(g.name(v), g.name(g.edge_dst[e]))
+            })
+            .map(|e| e as u32)
+    };
+    for (&net, &source) in &routing.sources {
+        let Some(sinks) = net_sinks.get(&net) else { continue };
+        let mut parent: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut order: FxHashMap<u32, usize> = FxHashMap::default();
+        let mut queue = std::collections::VecDeque::from([source]);
+        order.insert(source, 0);
+        while let Some(v) = queue.pop_front() {
+            let out = active.get(&v).into_iter().flatten().copied().chain(fixed(v));
+            for e in out {
+                let w = g.edge_dst[e as usize];
+                let next = order.len();
+                if let std::collections::hash_map::Entry::Vacant(slot) = order.entry(w) {
+                    slot.insert(next);
+                    parent.insert(w, e);
+                    queue.push_back(w);
+                }
+            }
+        }
+        let mut edges: Vec<u32> = Vec::new();
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
+        for &s in sinks {
+            let mut v = s;
+            while let Some(&e) = parent.get(&v) {
+                if !seen.insert(e) {
+                    break;
+                }
+                edges.push(e);
+                v = crate::route::edge_source(g, e);
+            }
+        }
+        edges.sort_by_key(|&e| order[&g.edge_dst[e as usize]]);
+        routing.nets.insert(net, edges);
+    }
+    Ok(Decoded { netlist: nl, placement, routing, warnings: d.warnings })
 }
 
 #[cfg(test)]

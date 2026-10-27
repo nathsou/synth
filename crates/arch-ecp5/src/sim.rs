@@ -7,12 +7,15 @@
 //! `CO = P & CI`; `PFUMX` selects `ALUT` when `C0` is high, `L6MUX21`
 //! `D1` when `SD` is high. A `TRELLIS_FF` captures `DI` on the `CLKMUX`
 //! edge when `CEMUX` enables it; its set/reset (`LSRMUX`) loads the
-//! `REGSET` value,
-//! synchronously over the enable (`LSR_OVER_CE`) or at once (`ASYNC`), and
-//! with the global set/reset enabled it powers up at that value too. A
+//! `REGSET` value, synchronously over the enable (`LSR_OVER_CE`) or at once
+//! (`ASYNC`), and it powers up at that value (configuration initialises
+//! every flip-flop, whether the global set/reset reaches it or not, as
+//! Yosys' initial values rely on). A
 //! `DP16KD` is 1024 words of 18 bits behind two ports of 18, 9, 4, 2 or 1
 //! bits (see [`crate::bram`]), each reading on its clock edge when enabled
-//! and selected, its reset clearing the output.
+//! and selected, its reset clearing the output; in the pseudo dual port
+//! mode (`PDPW16KD`, a 36-bit port A), port A writes pairs of words with
+//! byte enables and port B reads.
 
 use synth_core::LogicVec;
 use synth_netlist::{CellId, Netlist, Param};
@@ -131,7 +134,6 @@ pub fn add_cell(
                 "INV" => pin("CE").map(|s| Control { sig: s, pol: false }),
                 _ => pin("CE").map(|s| Control { sig: s, pol: true }),
             };
-            let gsr = str_param(nl, c, "GSR", "ENABLED") == "ENABLED";
             m.add_cell(
                 name,
                 CellKind::Dff(Box::new(Dff {
@@ -145,7 +147,7 @@ pub fn add_cell(
                     srst,
                     en_over_srst: false,
                     arst,
-                    init: if gsr { value } else { LogicVec::zeros(1) },
+                    init: value,
                 })),
             );
         }
@@ -181,6 +183,104 @@ fn unit_bits(width: usize, s: usize) -> Vec<usize> {
     }
 }
 
+/// A block RAM port's inputs, and whether it is enabled (clock enable
+/// and chip selects).
+struct EbrPort {
+    clk: Clock,
+    ad: Vec<SigBit>,
+    di: Vec<SigBit>,
+    oce: SigBit,
+    we: SigBit,
+    rst: SigBit,
+    enabled: SigBit,
+}
+
+fn ebr_port(
+    m: &mut Module,
+    nl: &Netlist,
+    c: CellId,
+    pin: &dyn Fn(&str) -> Option<SigBit>,
+    p: &str,
+    name: &str,
+) -> Result<EbrPort, String> {
+    let input = |m: &mut Module, n: &str, d: SigBit| ebr_input(m, nl, c, pin, n, d);
+    let clk = Clock {
+        sig: input(m, &format!("CLK{p}"), SigBit::ZERO),
+        posedge: str_param(nl, c, &format!("CLK{p}MUX"), "") != "INV",
+    };
+    let ad = (0..14).map(|i| input(m, &format!("AD{p}{i}"), SigBit::ZERO)).collect();
+    let di = (0..18).map(|i| input(m, &format!("DI{p}{i}"), SigBit::ZERO)).collect();
+    let cs = Sig((0..3).map(|i| input(m, &format!("CS{p}{i}"), SigBit::ZERO)).collect());
+    let ce = input(m, &format!("CE{p}"), SigBit::ONE);
+    let oce = input(m, &format!("OCE{p}"), SigBit::ONE);
+    let we = input(m, &format!("WE{p}"), SigBit::ZERO);
+    let rst = input(m, &format!("RST{p}"), SigBit::ZERO);
+    let decode = str_param(nl, c, &format!("CSDECODE_{p}"), "0b000");
+    let decode = u64::from_str_radix(decode.trim_start_matches("0b"), 2)
+        .map_err(|_| format!("`{name}`: bad CSDECODE_{p} {decode}"))?;
+    let selected = m.eq_const(cs, &LogicVec::from_u64(decode, 3));
+    let enabled = m.and1(ce, selected);
+    Ok(EbrPort { clk, ad, di, oce, we, rst, enabled })
+}
+
+/// A flip-flop of a block RAM model.
+fn ebr_reg(m: &mut Module, name: String, clk: Clock, d: Sig, en: Option<SigBit>) -> Sig {
+    let q = m.new_sig(d.width());
+    m.add_cell(
+        name,
+        CellKind::Dff(Box::new(Dff {
+            clk,
+            d,
+            q: q.clone(),
+            en: en.map(|sig| Control { sig, pol: true }),
+            srst: None,
+            en_over_srst: false,
+            arst: None,
+            init: LogicVec::zeros(q.width()),
+        })),
+    );
+    q
+}
+
+/// A read port's output: the data read, cleared by the reset until the
+/// next read (at the clock edge, whether enabled or not, or at once), and
+/// registered again in `OUTREG` mode.
+#[allow(clippy::too_many_arguments)]
+fn ebr_output(
+    m: &mut Module,
+    nl: &Netlist,
+    c: CellId,
+    name: &str,
+    p: &str,
+    port: &EbrPort,
+    read_en: SigBit,
+    data: Vec<SigBit>,
+) -> Vec<SigBit> {
+    let cleared = m.new_sig(1);
+    let reset = Some((Control { sig: port.rst, pol: true }, LogicVec::ones(1)));
+    let async_reset = str_param(nl, c, "RESETMODE", "SYNC") == "ASYNC";
+    m.add_cell(
+        format!("{name}$cleared{p}"),
+        CellKind::Dff(Box::new(Dff {
+            clk: port.clk,
+            d: Sig::bit(SigBit::ZERO),
+            q: cleared.clone(),
+            en: Some(Control { sig: read_en, pol: true }),
+            srst: if async_reset { None } else { reset.clone() },
+            en_over_srst: false,
+            arst: if async_reset { reset } else { None },
+            init: LogicVec::zeros(1),
+        })),
+    );
+    let keep = m.not1(cleared.0[0]);
+    let out: Vec<SigBit> = data.into_iter().map(|b| m.and1(b, keep)).collect();
+    if str_param(nl, c, &format!("REGMODE_{p}"), "NOREG") == "OUTREG" {
+        ebr_reg(m, format!("{name}$q{p}"), port.clk, Sig(out), Some(port.oce)).0
+    } else {
+        out
+    }
+}
+
 fn dp16kd(
     m: &mut Module,
     nl: &Netlist,
@@ -201,109 +301,118 @@ fn dp16kd(
             LogicVec::from_u64(v, 18)
         })
         .collect();
-    let async_reset = str_param(nl, c, "RESETMODE", "SYNC") == "ASYNC";
+    let width = |p: &str| -> Result<usize, String> {
+        match str_param(nl, c, &format!("DATA_WIDTH_{p}"), "18") {
+            "36" => Ok(36),
+            "18" => Ok(18),
+            "9" => Ok(9),
+            "4" => Ok(4),
+            "2" => Ok(2),
+            "1" => Ok(1),
+            w => Err(format!("`{name}`: bad DATA_WIDTH_{p} {w}")),
+        }
+    };
+    let ports = [ebr_port(m, nl, c, pin, "A", name)?, ebr_port(m, nl, c, pin, "B", name)?];
+    let widths = [width("A")?, width("B")?];
+    // In the pseudo dual port mode (36-bit port A), port A writes two
+    // words at once, with the byte enables `ADA[3:0]`, and port B reads
+    // (36 bits on `DOA` then `DOB`, as Yosys connects them).
+    let pdp = widths[0] == 36;
     let mut reads = Vec::new();
     let mut writes = Vec::new();
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<(&str, Vec<SigBit>)> = Vec::new();
+    // The word of a 36-bit port's word pair.
+    let pair = |ad: &[SigBit], h: usize| -> Sig {
+        Sig(std::iter::once(if h == 1 { SigBit::ONE } else { SigBit::ZERO })
+            .chain(ad[5..14].iter().copied())
+            .collect())
+    };
+    if pdp {
+        let a = &ports[0];
+        for h in 0..2 {
+            let bytes: Vec<SigBit> = (0..2).map(|k| m.and1(a.enabled, a.ad[2 * h + k])).collect();
+            let data = if h == 0 { a.di.clone() } else { ports[1].di.clone() };
+            writes.push(MemWrite {
+                clk: a.clk,
+                en: Sig((0..18).map(|b| bytes[b / 9]).collect()),
+                addr: pair(&a.ad, h),
+                data: Sig(data),
+            });
+        }
+    }
     for (k, p) in ["A", "B"].iter().enumerate() {
-        let width: usize = match str_param(nl, c, &format!("DATA_WIDTH_{p}"), "18") {
-            "18" => 18,
-            "9" => 9,
-            "4" => 4,
-            "2" => 2,
-            "1" => 1,
-            w => return Err(format!("`{name}`: bad DATA_WIDTH_{p} {w}")),
-        };
-        let input = |m: &mut Module, n: &str, d: SigBit| ebr_input(m, nl, c, pin, n, d);
-        let clk = Clock {
-            sig: input(m, &format!("CLK{p}"), SigBit::ZERO),
-            posedge: str_param(nl, c, &format!("CLK{p}MUX"), "") != "INV",
-        };
-        let ad: Vec<SigBit> =
-            (0..14).map(|i| input(m, &format!("AD{p}{i}"), SigBit::ZERO)).collect();
-        let di: Vec<SigBit> =
-            (0..18).map(|i| input(m, &format!("DI{p}{i}"), SigBit::ZERO)).collect();
-        let cs = Sig((0..3).map(|i| input(m, &format!("CS{p}{i}"), SigBit::ZERO)).collect());
-        let ce = input(m, &format!("CE{p}"), SigBit::ONE);
-        let oce = input(m, &format!("OCE{p}"), SigBit::ONE);
-        let we = input(m, &format!("WE{p}"), SigBit::ZERO);
-        let rst = input(m, &format!("RST{p}"), SigBit::ZERO);
-        // Selected when the chip selects match the decode.
-        let decode = str_param(nl, c, &format!("CSDECODE_{p}"), "0b000");
-        let decode = u64::from_str_radix(decode.trim_start_matches("0b"), 2)
-            .map_err(|_| format!("`{name}`: bad CSDECODE_{p} {decode}"))?;
-        let selected = m.eq_const(cs, &LogicVec::from_u64(decode, 3));
-        let enabled = m.and1(ce, selected);
-        let write = m.and1(enabled, we);
+        let (port, width) = (&ports[k], widths[k]);
+        if pdp && k == 0 {
+            continue;
+        }
+        let write = if pdp { SigBit::ZERO } else { m.and1(port.enabled, port.we) };
         // The word, and the unit of it a narrower port addresses.
-        let word = Sig(ad[4..14].to_vec());
+        let word = Sig(port.ad[4..14].to_vec());
         let low = match width {
-            18 => 4,
+            36 | 18 => 4,
             9 => 3,
             w => w.trailing_zeros() as usize,
         };
-        let sub = Sig(ad[low..4].to_vec());
+        let sub = Sig(port.ad[low..4].to_vec());
         let units = 1usize << (4 - low);
-        let hit = |m: &mut Module, s: usize| -> SigBit {
-            if units == 1 {
-                SigBit::ONE
-            } else {
-                m.eq_const(sub.clone(), &LogicVec::from_u64(s as u64, 4 - low))
+        if !pdp {
+            let mut en = vec![SigBit::ZERO; 18];
+            let mut data = vec![SigBit::ZERO; 18];
+            for s in 0..units {
+                let at = if units == 1 {
+                    write
+                } else {
+                    let h = m.eq_const(sub.clone(), &LogicVec::from_u64(s as u64, 4 - low));
+                    m.and1(write, h)
+                };
+                for (i, b) in unit_bits(width, s).into_iter().enumerate() {
+                    data[b] = port.di[i];
+                    // In the 18-bit mode, `AD[1:0]` enable the halves.
+                    en[b] = if width == 18 { m.and1(at, port.ad[b / 9]) } else { at };
+                }
             }
-        };
-        let mut en = vec![SigBit::ZERO; 18];
-        let mut data = vec![SigBit::ZERO; 18];
-        for s in 0..units {
-            let h = hit(m, s);
-            let at = m.and1(write, h);
-            for (i, b) in unit_bits(width, s).into_iter().enumerate() {
-                data[b] = di[i];
-                // In the 18-bit mode, `AD[1:0]` enable the halves.
-                en[b] = if width == 18 { m.and1(at, ad[b / 9]) } else { at };
-            }
+            writes.push(MemWrite {
+                clk: port.clk,
+                en: Sig(en),
+                addr: word.clone(),
+                data: Sig(data),
+            });
         }
-        writes.push(MemWrite { clk, en: Sig(en), addr: word.clone(), data: Sig(data) });
         // Reads: in NORMAL mode not while writing; WRITETHROUGH shows the
         // written data.
         let mode = str_param(nl, c, &format!("WRITEMODE_{p}"), "NORMAL");
-        let read_en = if mode == "NORMAL" {
-            let nw = m.not1(we);
-            m.and1(enabled, nw)
+        let read_en = if !pdp && mode == "NORMAL" {
+            let nw = m.not1(port.we);
+            m.and1(port.enabled, nw)
         } else {
-            enabled
+            port.enabled
         };
-        let q = m.new_sig(18);
         let mut transparent = vec![false, false];
-        transparent[k] = mode == "WRITETHROUGH";
-        reads.push(MemRead {
-            clk: Some(clk),
-            en: read_en,
-            addr: word,
-            data: q.clone(),
-            transparent,
-        });
-        let reg = |m: &mut Module, d: Sig, en: Option<SigBit>, tag: &str| {
-            let out = m.new_sig(d.width());
-            m.add_cell(
-                format!("{name}${tag}{p}"),
-                CellKind::Dff(Box::new(Dff {
-                    clk,
-                    d,
-                    q: out.clone(),
-                    en: en.map(|sig| Control { sig, pol: true }),
-                    srst: None,
-                    en_over_srst: false,
-                    arst: None,
-                    init: LogicVec::zeros(out.width()),
-                })),
-            );
-            out
+        transparent[k] = !pdp && mode == "WRITETHROUGH";
+        let mut read = |m: &mut Module, addr: Sig| {
+            let q = m.new_sig(18);
+            reads.push(MemRead {
+                clk: Some(port.clk),
+                en: read_en,
+                addr,
+                data: q.clone(),
+                transparent: transparent.clone(),
+            });
+            q
         };
-        // The unit a read took.
-        let mut out: Vec<SigBit> = if units == 1 {
+        if width == 36 {
+            for (h, out) in [(0, "A"), (1, "B")] {
+                let q = read(m, pair(&port.ad, h));
+                let data = ebr_output(m, nl, c, name, &format!("{p}{h}"), port, read_en, q.0);
+                outputs.push((out, data));
+            }
+            continue;
+        }
+        let q = read(m, word);
+        let mut data: Vec<SigBit> = if units == 1 {
             unit_bits(width, 0).into_iter().map(|b| q.0[b]).collect()
         } else {
-            let sel = reg(m, sub.clone(), Some(read_en), "unit");
+            let sel = ebr_reg(m, format!("{name}$unit{p}"), port.clk, sub.clone(), Some(read_en));
             let mut v = Sig(unit_bits(width, 0).into_iter().map(|b| q.0[b]).collect());
             for s in 1..units {
                 let at = m.eq_const(sel.clone(), &LogicVec::from_u64(s as u64, 4 - low));
@@ -312,30 +421,8 @@ fn dp16kd(
             }
             v.0
         };
-        out.resize(18, SigBit::ZERO);
-        // The reset clears the output until the next read: at the clock
-        // edge (whether enabled or not), or at once.
-        let cleared = m.new_sig(1);
-        let reset = Some((Control { sig: rst, pol: true }, LogicVec::ones(1)));
-        m.add_cell(
-            format!("{name}$cleared{p}"),
-            CellKind::Dff(Box::new(Dff {
-                clk,
-                d: Sig::bit(SigBit::ZERO),
-                q: cleared.clone(),
-                en: Some(Control { sig: read_en, pol: true }),
-                srst: if async_reset { None } else { reset.clone() },
-                en_over_srst: false,
-                arst: if async_reset { reset } else { None },
-                init: LogicVec::zeros(1),
-            })),
-        );
-        let keep = m.not1(cleared.0[0]);
-        out = out.into_iter().map(|b| m.and1(b, keep)).collect();
-        if str_param(nl, c, &format!("REGMODE_{p}"), "NOREG") == "OUTREG" {
-            out = reg(m, Sig(out), Some(oce), "q").0;
-        }
-        outputs.push((p, out));
+        data.resize(18, SigBit::ZERO);
+        outputs.push((p, ebr_output(m, nl, c, name, p, port, read_en, data)));
     }
     m.memories.push(Memory {
         name: name.to_string(),

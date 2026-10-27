@@ -14,6 +14,7 @@ use synth_netlist::{CellId, Dir, NetId, Netlist, Param};
 
 use crate::arch::Arch;
 use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::pack::lut_init;
 use crate::place::Placement;
 use crate::route::Routing;
 use crate::speed::{CellTiming, Speed};
@@ -144,6 +145,11 @@ fn bram_setup(t: &CellTiming, pin: &str, clock: &str) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Whether a 16-entry table depends on input `k`.
+fn depends(table: u16, k: usize) -> bool {
+    (0..16).any(|i| (table >> i & 1) != (table >> (i ^ 1 << k) & 1))
+}
+
 /// The port (`A` or `B`) of a block RAM pin (`ADA5`, `CEB`, `DOA0`, ...).
 fn bram_port(pin: &str) -> Option<char> {
     let base = pin.trim_end_matches(|c: char| c.is_ascii_digit());
@@ -252,24 +258,55 @@ impl TimingGraph {
             };
             match nl.cell_kind(c) {
                 LUT4 => {
-                    for p in ["A", "B", "C", "D"] {
-                        cell_arc(pin_of(c, p), pin_of(c, "Z"), arc(&slice, &format!("{p}0"), "F0"));
+                    let init = lut_init(nl, c, "INIT");
+                    for (k, p) in ["A", "B", "C", "D"].into_iter().enumerate() {
+                        if depends(init, k) {
+                            let d = arc(&slice, &format!("{p}0"), "F0");
+                            cell_arc(pin_of(c, p), pin_of(c, "Z"), d);
+                        }
                     }
                 }
                 CCU2C => {
+                    // Each half's sum is P ^ carry in (P with INJECT1),
+                    // its carry out P ? carry in : G: arcs only where the
+                    // tables depend on an input, so that a chain's first
+                    // half (P constant 0) does not depend on the carry in.
                     let (s0, s1, cout) = (pin_of(c, "S0"), pin_of(c, "S1"), pin_of(c, "COUT"));
-                    for p in ["A", "B", "C", "D"] {
-                        let (i0, i1) = (pin_of(c, &format!("{p}0")), pin_of(c, &format!("{p}1")));
-                        cell_arc(i0, s0, arc(&carry, &format!("{p}0"), "F0"));
-                        cell_arc(i0, s1, arc(&carry, &format!("{p}0"), "F1"));
-                        cell_arc(i0, cout, arc(&carry, &format!("{p}0"), "FCO"));
-                        cell_arc(i1, s1, arc(&carry, &format!("{p}1"), "F1"));
-                        cell_arc(i1, cout, arc(&carry, &format!("{p}1"), "FCO"));
+                    let p = [lut_init(nl, c, "INIT0"), lut_init(nl, c, "INIT1")];
+                    let g = [p[0] & 0xf, p[1] & 0xf];
+                    let p_of = |h: usize| (p[h] >> 12) & 0xf;
+                    let sum_reads_carry =
+                        |h: usize| str_param(nl, c, &format!("INJECT1_{h}"), "YES") == "NO";
+                    let propagates = |h: usize| p_of(h) != 0;
+                    let into_carry = |h: usize, k: usize| depends(p[h], k) || depends(g[h], k);
+                    for (k, n) in ["A", "B", "C", "D"].into_iter().enumerate() {
+                        let (i0, i1) = (pin_of(c, &format!("{n}0")), pin_of(c, &format!("{n}1")));
+                        if depends(p[0], k) {
+                            cell_arc(i0, s0, arc(&carry, &format!("{n}0"), "F0"));
+                        }
+                        if into_carry(0, k) && sum_reads_carry(1) {
+                            cell_arc(i0, s1, arc(&carry, &format!("{n}0"), "F1"));
+                        }
+                        if into_carry(0, k) && propagates(1) {
+                            cell_arc(i0, cout, arc(&carry, &format!("{n}0"), "FCO"));
+                        }
+                        if depends(p[1], k) {
+                            cell_arc(i1, s1, arc(&carry, &format!("{n}1"), "F1"));
+                        }
+                        if into_carry(1, k) {
+                            cell_arc(i1, cout, arc(&carry, &format!("{n}1"), "FCO"));
+                        }
                     }
                     let cin = pin_of(c, "CIN");
-                    cell_arc(cin, s0, arc(&carry, "FCI", "F0"));
-                    cell_arc(cin, s1, arc(&carry, "FCI", "F1"));
-                    cell_arc(cin, cout, arc(&carry, "FCI", "FCO"));
+                    if sum_reads_carry(0) {
+                        cell_arc(cin, s0, arc(&carry, "FCI", "F0"));
+                    }
+                    if propagates(0) && sum_reads_carry(1) {
+                        cell_arc(cin, s1, arc(&carry, "FCI", "F1"));
+                    }
+                    if propagates(0) && propagates(1) {
+                        cell_arc(cin, cout, arc(&carry, "FCI", "FCO"));
+                    }
                 }
                 FF => {
                     let Some(clk) = nl.pin_net(c, "CLK") else { continue };
@@ -314,33 +351,50 @@ impl TimingGraph {
         for &(s, _, _, _) in &starts {
             edges[s as usize].clear();
         }
+        // Each node after its fanins (depth first), cutting the edges that
+        // close a combinational loop, if any.
+        let mut order: Vec<u32> = Vec::with_capacity(n);
+        let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
+        let mut stack: Vec<(u32, usize)> = Vec::new();
+        let mut cut: Vec<(u32, u32)> = Vec::new();
+        for root in 0..n as u32 {
+            if state[root as usize] != 0 {
+                continue;
+            }
+            state[root as usize] = 1;
+            stack.push((root, 0));
+            while let Some(&mut (v, ref mut next)) = stack.last_mut() {
+                let fanin = &edges[v as usize];
+                if *next < fanin.len() {
+                    let from = fanin[*next].0;
+                    *next += 1;
+                    match state[from as usize] {
+                        0 => {
+                            state[from as usize] = 1;
+                            stack.push((from, 0));
+                        }
+                        1 => cut.push((from, v)),
+                        _ => {}
+                    }
+                } else {
+                    state[v as usize] = 2;
+                    order.push(v);
+                    stack.pop();
+                }
+            }
+        }
+        for &(from, to) in &cut {
+            edges[to as usize].retain(|&(f, _)| f != from);
+        }
+        if !cut.is_empty() && std::env::var_os("SYNTH_DEBUG").is_some() {
+            eprintln!("debug: {} combinational loop edges cut", cut.len());
+        }
         let mut fanin_off = Vec::with_capacity(n + 1);
         let mut fanin = Vec::new();
         fanin_off.push(0);
         for e in &edges {
             fanin.extend_from_slice(e);
             fanin_off.push(fanin.len() as u32);
-        }
-        // Kahn's algorithm over fanin counts.
-        let mut fanouts: Vec<Vec<u32>> = vec![Vec::new(); n];
-        let mut pending = vec![0u32; n];
-        for (to, e) in edges.iter().enumerate() {
-            pending[to] = e.len() as u32;
-            for &(from, _) in e {
-                fanouts[from as usize].push(to as u32);
-            }
-        }
-        let mut order: Vec<u32> = (0..n as u32).filter(|&v| pending[v as usize] == 0).collect();
-        let mut head = 0;
-        while head < order.len() {
-            let v = order[head] as usize;
-            head += 1;
-            for &w in &fanouts[v] {
-                pending[w as usize] -= 1;
-                if pending[w as usize] == 0 {
-                    order.push(w);
-                }
-            }
         }
         TimingGraph {
             base,
@@ -544,7 +598,15 @@ pub fn routed_delays(
         for k in ks {
             let c = graph.conns[k];
             if let Some(node) = routing.sink_nodes.get(&(c.sink, c.pin as u32)) {
-                delays[k] = d.get(node).copied().unwrap_or(0.0);
+                match d.get(node) {
+                    Some(&t) => delays[k] = t,
+                    None if std::env::var_os("SYNTH_DEBUG").is_some() => eprintln!(
+                        "debug: no route to {} of {}",
+                        arch.graph.full_name(*node),
+                        nl.str(nl.cells[c.sink].name)
+                    ),
+                    None => {}
+                }
             }
         }
     }
@@ -560,7 +622,8 @@ pub fn analyse(
     clocks: &ClockConstraints,
 ) -> TimingReport {
     let graph = TimingGraph::new(arch, nl, clocks);
-    let a = graph.analyse(&routed_delays(arch, nl, placement, routing, &graph));
+    let delays = routed_delays(arch, nl, placement, routing, &graph);
+    let a = graph.analyse(&delays);
     let pin_name = |c: CellId, i: usize| nl.str(nl.cells[c].pins[i].name).to_string();
     let mut report = TimingReport::default();
     for (ci, clk) in graph.clocks.iter().enumerate() {
