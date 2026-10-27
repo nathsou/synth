@@ -57,6 +57,9 @@ pub struct PlaceTiming<'a> {
     pub grade: &'a str,
 }
 
+/// Slots and their previous contents, to undo a chain move.
+type Saved = Vec<(usize, Occ)>;
+
 /// What occupies a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Occ {
@@ -110,14 +113,17 @@ struct Annealer<'a> {
     /// Each block RAM's site, and each site's block RAM.
     block_site: Vec<usize>,
     block_occ: Vec<Option<u32>>,
-    /// Each cell's unit: `Occ::Lc` or `Occ::Chain`, and its offset in a
-    /// chain (slices times two plus half).
-    cell_unit: FxHashMap<CellId, (Occ, usize)>,
-    fixed: FxHashMap<CellId, (usize, usize)>,
-    /// Each net's cells, and each cell's nets.
+    /// Each cell's unit (by cell index): `Occ::Lc`, `Occ::Chain` or
+    /// `Occ::Block`, and its offset in a chain (slices times two plus half).
+    cell_unit: Vec<Option<(Occ, usize)>>,
+    fixed: Vec<Option<(usize, usize)>>,
+    /// Each cell's position (by cell index), following its unit's.
+    xy: Vec<(i16, i16)>,
+    /// Each net's cells, bounding box and cost, and each cell's nets.
     nets: Vec<Vec<CellId>>,
-    cell_nets: FxHashMap<CellId, Vec<u32>>,
+    net_bb: Vec<BBox>,
     net_cost: Vec<f64>,
+    cell_nets: Vec<Vec<u32>>,
     width: usize,
     height: usize,
     timing: Option<PlaceTiming<'a>>,
@@ -127,13 +133,115 @@ struct Annealer<'a> {
     conns: Vec<(CellId, CellId, u32)>,
     conn_weight: Vec<f64>,
     conn_cost: Vec<f64>,
-    cell_conns: FxHashMap<CellId, Vec<u32>>,
+    cell_conns: Vec<Vec<u32>>,
     /// Timing graph connections that are dedicated (no delay).
     dedicated: Vec<bool>,
     lambda: f64,
     /// Normalisers of the wirelength and timing terms.
     bb_norm: f64,
     t_norm: f64,
+}
+
+/// A net's bounding box, with the number of its cells on each side (to
+/// update it as cells move, as VPR does).
+#[derive(Clone, Copy, Debug, Default)]
+struct BBox {
+    x0: i16,
+    x1: i16,
+    y0: i16,
+    y1: i16,
+    on_x0: u32,
+    on_x1: u32,
+    on_y0: u32,
+    on_y1: u32,
+}
+
+impl BBox {
+    /// The box of points `at` (an empty box if there are none).
+    fn of(at: impl Iterator<Item = (i16, i16)>) -> BBox {
+        let mut b: Option<BBox> = None;
+        for (x, y) in at {
+            let Some(b) = b.as_mut() else {
+                b = Some(BBox {
+                    x0: x,
+                    x1: x,
+                    y0: y,
+                    y1: y,
+                    on_x0: 1,
+                    on_x1: 1,
+                    on_y0: 1,
+                    on_y1: 1,
+                });
+                continue;
+            };
+            side(&mut b.x0, &mut b.on_x0, x, |a, b| a < b);
+            side(&mut b.x1, &mut b.on_x1, x, |a, b| a > b);
+            side(&mut b.y0, &mut b.on_y0, y, |a, b| a < b);
+            side(&mut b.y1, &mut b.on_y1, y, |a, b| a > b);
+        }
+        b.unwrap_or_default()
+    }
+
+    /// Moves one cell of the box from `from` to `to`; false if a side it
+    /// alone was on may shrink, which only a new scan finds.
+    fn shift(&mut self, from: (i16, i16), to: (i16, i16)) -> bool {
+        shift(&mut self.x0, &mut self.on_x0, &mut self.x1, &mut self.on_x1, from.0, to.0)
+            && shift(&mut self.y0, &mut self.on_y0, &mut self.y1, &mut self.on_y1, from.1, to.1)
+    }
+
+    fn half_perimeter(&self) -> f64 {
+        (self.x1 - self.x0) as f64 + (self.y1 - self.y0) as f64
+    }
+}
+
+/// Adds coordinate `v` to a side at `at` with `on` points, beyond it when
+/// `beyond(v, at)`.
+#[inline]
+fn side(at: &mut i16, on: &mut u32, v: i16, beyond: impl Fn(i16, i16) -> bool) {
+    if beyond(v, *at) {
+        (*at, *on) = (v, 1);
+    } else if v == *at {
+        *on += 1;
+    }
+}
+
+/// Moves one point of the span `lo..=hi` (with `on_lo` and `on_hi` points
+/// on its ends) from `from` to `to`; false if an end it leaves alone may
+/// move inward.
+#[inline]
+fn shift(lo: &mut i16, on_lo: &mut u32, hi: &mut i16, on_hi: &mut u32, from: i16, to: i16) -> bool {
+    if to < from {
+        if from == *hi {
+            if *on_hi == 1 {
+                return false;
+            }
+            *on_hi -= 1;
+        }
+        side(lo, on_lo, to, |a, b| a < b);
+    } else if to > from {
+        if from == *lo {
+            if *on_lo == 1 {
+                return false;
+            }
+            *on_lo -= 1;
+        }
+        side(hi, on_hi, to, |a, b| a > b);
+    }
+    true
+}
+
+/// Nets with at most this many cells get their bounding boxes by a scan
+/// rather than updates.
+const SCANNED_NET: usize = 8;
+
+/// A move's effect on the costs: the moved cells' previous positions, the
+/// touched nets' new boxes and costs, the connections' new costs, and the
+/// normalised cost change.
+struct Effect {
+    from: Vec<(CellId, (i16, i16))>,
+    nets: Vec<(u32, BBox, f64)>,
+    conns: Vec<(u32, f64)>,
+    delta: f64,
 }
 
 /// VPR's weights of a net's bounding box by its number of cells.
@@ -160,18 +268,19 @@ impl<'a> Annealer<'a> {
         tiles.get(j / 4).map(|&t| (t, j % 4))
     }
 
+    /// A cell's position, from its unit's.
     fn pos(&self, c: CellId) -> (usize, usize) {
-        if let Some(&p) = self.fixed.get(&c) {
+        if let Some(p) = self.fixed[c.index()] {
             return p;
         }
-        match self.cell_unit.get(&c) {
-            Some(&(Occ::Lc(u), _)) => self.grid.tiles[self.lc_slot[u as usize] / 8],
-            Some(&(Occ::Chain(ch, _), off)) => {
+        match self.cell_unit[c.index()] {
+            Some((Occ::Lc(u), _)) => self.grid.tiles[self.lc_slot[u as usize] / 8],
+            Some((Occ::Chain(ch, _), off)) => {
                 let (row, start) = self.chain_at[ch as usize];
                 let (t, _) = self.chain_slice(row, start, off / 2).expect("chain within its row");
                 self.grid.tiles[t]
             }
-            Some(&(Occ::Block(u), _)) => {
+            Some((Occ::Block(u), _)) => {
                 let (x, y, _, _) = self.grid.blocks[self.block_site[u as usize]];
                 (x, y)
             }
@@ -179,24 +288,83 @@ impl<'a> Annealer<'a> {
         }
     }
 
-    fn net_bb_cost(&self, n: usize) -> f64 {
-        let cells = &self.nets[n];
-        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-        for &c in cells {
-            let (x, y) = self.pos(c);
-            x0 = x0.min(x);
-            x1 = x1.max(x);
-            y0 = y0.min(y);
-            y1 = y1.max(y);
+    /// Sets the positions of `cells` from their units', returning their
+    /// previous ones.
+    fn refresh(&mut self, cells: &[CellId]) -> Vec<(CellId, (i16, i16))> {
+        cells
+            .iter()
+            .map(|&c| {
+                let (x, y) = self.pos(c);
+                (c, std::mem::replace(&mut self.xy[c.index()], (x as i16, y as i16)))
+            })
+            .collect()
+    }
+
+    fn scan_bb(&self, n: usize) -> BBox {
+        BBox::of(self.nets[n].iter().map(|c| self.xy[c.index()]))
+    }
+
+    fn bb_cost(&self, n: usize, bb: &BBox) -> f64 {
+        net_weight(self.nets[n].len()) * bb.half_perimeter()
+    }
+
+    /// Every net's box and cost from scratch.
+    fn reset_costs(&mut self) {
+        self.net_bb = (0..self.nets.len()).map(|n| self.scan_bb(n)).collect();
+        self.net_cost = (0..self.nets.len()).map(|n| self.bb_cost(n, &self.net_bb[n])).collect();
+    }
+
+    /// The effect of a move just applied to the units of `cells`, their
+    /// positions updated (and to be restored with [`Annealer::undo_xy`] if
+    /// the move is not taken).
+    fn effect(&mut self, cells: &[CellId]) -> Effect {
+        let from = self.refresh(cells);
+        let nets = self.touched_nets(cells);
+        let mut bb_delta = 0.0;
+        let mut boxes = Vec::with_capacity(nets.len());
+        for n in nets {
+            let i = n as usize;
+            let bb = if self.nets[i].len() <= SCANNED_NET {
+                self.scan_bb(i)
+            } else {
+                let mut bb = self.net_bb[i];
+                let ok = from.iter().all(|&(c, old)| {
+                    !self.cell_nets[c.index()].contains(&n) || bb.shift(old, self.xy[c.index()])
+                });
+                if ok { bb } else { self.scan_bb(i) }
+            };
+            let cost = self.bb_cost(i, &bb);
+            bb_delta += cost - self.net_cost[i];
+            boxes.push((n, bb, cost));
         }
-        net_weight(cells.len()) * ((x1 - x0) + (y1 - y0)) as f64
+        let (dt, conns) = self.timing_delta(cells);
+        let delta = (1.0 - self.lambda) * bb_delta / self.bb_norm + self.lambda * dt / self.t_norm;
+        Effect { from, nets: boxes, conns, delta }
+    }
+
+    /// Restores the positions of a move not taken.
+    fn undo_xy(&mut self, e: &Effect) {
+        for &(c, p) in &e.from {
+            self.xy[c.index()] = p;
+        }
+    }
+
+    /// Records a taken move's costs.
+    fn commit(&mut self, e: &Effect) {
+        for &(n, bb, cost) in &e.nets {
+            self.net_bb[n as usize] = bb;
+            self.net_cost[n as usize] = cost;
+        }
+        for &(k, c) in &e.conns {
+            self.conn_cost[k as usize] = c;
+        }
     }
 
     /// Estimated delay between two cells' positions.
     fn delay(&self, a: CellId, b: CellId) -> f64 {
         let Some(t) = self.timing else { return 0.0 };
-        let ((x0, y0), (x1, y1)) = (self.pos(a), self.pos(b));
-        crate::timing::estimate(t.grade, x0.abs_diff(x1), y0.abs_diff(y1))
+        let ((x0, y0), (x1, y1)) = (self.xy[a.index()], self.xy[b.index()]);
+        crate::timing::estimate(t.grade, x0.abs_diff(x1) as usize, y0.abs_diff(y1) as usize)
     }
 
     /// Recomputes criticalities from the current placement and
@@ -229,10 +397,8 @@ impl<'a> Annealer<'a> {
         if self.lambda <= 0.0 {
             return (0.0, Vec::new());
         }
-        let mut ks: Vec<u32> = cells
-            .iter()
-            .flat_map(|c| self.cell_conns.get(c).into_iter().flatten().copied())
-            .collect();
+        let mut ks: Vec<u32> =
+            cells.iter().flat_map(|c| self.cell_conns[c.index()].iter().copied()).collect();
         ks.sort_unstable();
         ks.dedup();
         let mut d = 0.0;
@@ -248,23 +414,6 @@ impl<'a> Annealer<'a> {
             out.push((k, new));
         }
         (d, out)
-    }
-
-    /// The normalised cost change of a move: its wirelength change `bb`
-    /// and the timing change over `cells`, with the new timing costs.
-    fn move_delta(&self, bb: f64, cells: &[CellId]) -> (f64, Vec<(u32, f64)>) {
-        let (dt, costs) = self.timing_delta(cells);
-        ((1.0 - self.lambda) * bb / self.bb_norm + self.lambda * dt / self.t_norm, costs)
-    }
-
-    /// Records an accepted move's costs.
-    fn commit(&mut self, nets: &[u32], costs: &[(u32, f64)]) {
-        for &n in nets {
-            self.net_cost[n as usize] = self.net_bb_cost(n as usize);
-        }
-        for &(k, c) in costs {
-            self.conn_cost[k as usize] = c;
-        }
     }
 
     /// The flip-flops of a slot.
@@ -297,10 +446,8 @@ impl<'a> Annealer<'a> {
     }
 
     fn touched_nets(&self, cells: &[CellId]) -> Vec<u32> {
-        let mut nets: Vec<u32> = cells
-            .iter()
-            .flat_map(|c| self.cell_nets.get(c).into_iter().flatten().copied())
-            .collect();
+        let mut nets: Vec<u32> =
+            cells.iter().flat_map(|c| self.cell_nets[c.index()].iter().copied()).collect();
         nets.sort_unstable();
         nets.dedup();
         nets
@@ -322,9 +469,9 @@ impl<'a> Annealer<'a> {
     }
 
     /// Tries moving logic cell `u` to slot `to` (swapping with what is
-    /// there); returns the cost change if legal, with the move applied.
-    #[allow(clippy::type_complexity)]
-    fn move_lc(&mut self, u: u32, to: usize) -> Option<(Vec<u32>, f64, usize, Vec<CellId>)> {
+    /// there); if legal, applies it and returns the slot it left and the
+    /// cells moved.
+    fn move_lc(&mut self, u: u32, to: usize) -> Option<(usize, Vec<CellId>)> {
         let from = self.lc_slot[u as usize];
         if from == to {
             return None;
@@ -345,10 +492,7 @@ impl<'a> Annealer<'a> {
         }
         let mut cells = self.unit_cells(Occ::Lc(u));
         cells.extend(self.unit_cells(other));
-        let nets = self.touched_nets(&cells);
-        let delta =
-            nets.iter().map(|&n| self.net_bb_cost(n as usize) - self.net_cost[n as usize]).sum();
-        Some((nets, delta, from, cells))
+        Some((from, cells))
     }
 
     fn undo_lc(&mut self, u: u32, from: usize, to: usize) {
@@ -374,14 +518,14 @@ impl<'a> Annealer<'a> {
     }
 
     /// Tries moving chain `ch` to start at `(row, start)`, the logic cells
-    /// there taking the slots it leaves.
-    #[allow(clippy::type_complexity)]
+    /// there taking the slots it leaves; if legal, applies it and returns
+    /// the slots' previous contents and the cells moved.
     fn move_chain(
         &mut self,
         ch: usize,
         row: usize,
         start: usize,
-    ) -> Option<(Vec<u32>, f64, Vec<(usize, Occ)>, Vec<CellId>)> {
+    ) -> Option<(Saved, Vec<CellId>)> {
         let (orow, ostart) = self.chain_at[ch];
         if (orow, ostart) == (row, start) {
             return None;
@@ -422,10 +566,7 @@ impl<'a> Annealer<'a> {
         for &u in &displaced {
             cells.extend(self.unit_cells(Occ::Lc(u)));
         }
-        let nets = self.touched_nets(&cells);
-        let delta =
-            nets.iter().map(|&n| self.net_bb_cost(n as usize) - self.net_cost[n as usize]).sum();
-        Some((nets, delta, saved, cells))
+        Some((saved, cells))
     }
 
     fn restore(&mut self, saved: &[(usize, Occ)], ch: usize, at: (usize, usize)) {
@@ -438,9 +579,9 @@ impl<'a> Annealer<'a> {
         self.chain_at[ch] = at;
     }
 
-    /// Moves block RAM `u` to site `to`, swapping with the one there;
-    /// returns the touched nets and the cost change.
-    fn move_block(&mut self, u: u32, to: usize) -> Option<(Vec<u32>, f64, Vec<CellId>)> {
+    /// Moves block `u` to site `to`, swapping with the one there; returns
+    /// the cells moved.
+    fn move_block(&mut self, u: u32, to: usize) -> Option<Vec<CellId>> {
         let from = self.block_site[u as usize];
         if from == to {
             return None;
@@ -451,10 +592,7 @@ impl<'a> Annealer<'a> {
         if let Some(o) = other {
             cells.extend(self.unit_cells(Occ::Block(o)));
         }
-        let nets = self.touched_nets(&cells);
-        let delta =
-            nets.iter().map(|&n| self.net_bb_cost(n as usize) - self.net_cost[n as usize]).sum();
-        Some((nets, delta, cells))
+        Some(cells)
     }
 
     /// Puts block RAM `u` (at `from`) on `to`, and `other` (at `to`) on
@@ -489,15 +627,16 @@ impl<'a> Annealer<'a> {
                 .collect();
             let to = near[self.rng.below(near.len())];
             let from = self.block_site[u as usize];
-            let (nets, bb, cells) = self.move_block(u, to)?;
-            let (delta, costs) = self.move_delta(bb, &cells);
-            if decide(&mut self.rng, delta) {
-                self.commit(&nets, &costs);
+            let cells = self.move_block(u, to)?;
+            let e = self.effect(&cells);
+            if decide(&mut self.rng, e.delta) {
+                self.commit(&e);
                 Some(true)
             } else {
                 // The one now at `from` goes back to `to`.
                 let back = self.block_occ[from];
                 self.swap_block(u, back, to, from);
+                self.undo_xy(&e);
                 Some(false)
             }
         } else if pick < lcs {
@@ -513,13 +652,14 @@ impl<'a> Annealer<'a> {
             let &t = self.grid.at.get(&(tx, ty))?;
             let z = self.rng.below(8);
             let to = self.tile_slot(t, z);
-            let (nets, bb, from, cells) = self.move_lc(u, to)?;
-            let (delta, costs) = self.move_delta(bb, &cells);
-            if decide(&mut self.rng, delta) {
-                self.commit(&nets, &costs);
+            let (from, cells) = self.move_lc(u, to)?;
+            let e = self.effect(&cells);
+            if decide(&mut self.rng, e.delta) {
+                self.commit(&e);
                 Some(true)
             } else {
                 self.undo_lc(u, from, to);
+                self.undo_xy(&e);
                 Some(false)
             }
         } else {
@@ -535,13 +675,14 @@ impl<'a> Annealer<'a> {
             }
             let shift = self.rng.range_inclusive(-4 * r, 4 * r);
             let nstart = (start as i64 + shift).clamp(0, (row_len - len) as i64) as usize;
-            let (nets, bb, saved, cells) = self.move_chain(ch, nrow, nstart)?;
-            let (delta, costs) = self.move_delta(bb, &cells);
-            if decide(&mut self.rng, delta) {
-                self.commit(&nets, &costs);
+            let (saved, cells) = self.move_chain(ch, nrow, nstart)?;
+            let e = self.effect(&cells);
+            if decide(&mut self.rng, e.delta) {
+                self.commit(&e);
                 Some(true)
             } else {
                 self.restore(&saved, ch, (row, start));
+                self.undo_xy(&e);
                 Some(false)
             }
         }
@@ -633,37 +774,42 @@ pub fn place(
         chain_at: vec![(0, 0); packed.chains.len()],
         block_site: vec![usize::MAX; packed.blocks.len()],
         block_occ: vec![None; grid.blocks.len()],
-        cell_unit: FxHashMap::default(),
-        fixed: fixed.clone(),
+        cell_unit: vec![None; nl.cells.len()],
+        fixed: vec![None; nl.cells.len()],
+        xy: vec![(0, 0); nl.cells.len()],
         nets: Vec::new(),
-        cell_nets: FxHashMap::default(),
+        net_bb: Vec::new(),
         net_cost: Vec::new(),
+        cell_nets: vec![Vec::new(); nl.cells.len()],
         width,
         height,
         timing,
         conns: Vec::new(),
         conn_weight: Vec::new(),
         conn_cost: Vec::new(),
-        cell_conns: FxHashMap::default(),
+        cell_conns: vec![Vec::new(); nl.cells.len()],
         dedicated: Vec::new(),
         lambda: if timing.is_some() { opts.timing_weight.clamp(0.0, 1.0) } else { 0.0 },
         bb_norm: 1.0,
         t_norm: 1.0,
     };
+    for (&c, &p) in fixed {
+        a.fixed[c.index()] = Some(p);
+    }
     for (i, lc) in packed.lcs.iter().enumerate() {
         for c in lc.lut.into_iter().chain(lc.ff) {
-            a.cell_unit.insert(c, (Occ::Lc(i as u32), 0));
+            a.cell_unit[c.index()] = Some((Occ::Lc(i as u32), 0));
         }
     }
     for (i, &c) in packed.blocks.iter().enumerate() {
-        a.cell_unit.insert(c, (Occ::Block(i as u32), 0));
+        a.cell_unit[c.index()] = Some((Occ::Block(i as u32), 0));
     }
     for (i, ch) in packed.chains.iter().enumerate() {
         for (j, s) in ch.iter().enumerate() {
-            a.cell_unit.insert(s.ccu, (Occ::Chain(i as u32, 0), 2 * j));
+            a.cell_unit[s.ccu.index()] = Some((Occ::Chain(i as u32, 0), 2 * j));
             for (h, ff) in s.ff.iter().enumerate() {
                 if let Some(ff) = ff {
-                    a.cell_unit.insert(*ff, (Occ::Chain(i as u32, 0), 2 * j + h));
+                    a.cell_unit[ff.index()] = Some((Occ::Chain(i as u32, 0), 2 * j + h));
                 }
             }
         }
@@ -676,7 +822,7 @@ pub fn place(
             .iter()
             .chain(&net.users)
             .map(|p| p.cell)
-            .filter(|c| a.cell_unit.contains_key(c) || fixed.contains_key(c))
+            .filter(|c| a.cell_unit[c.index()].is_some() || fixed.contains_key(c))
             .collect();
         cells.sort_unstable();
         cells.dedup();
@@ -685,15 +831,15 @@ pub fn place(
         }
         let i = a.nets.len() as u32;
         for &c in &cells {
-            a.cell_nets.entry(c).or_default().push(i);
+            a.cell_nets[c.index()].push(i);
         }
         a.nets.push(cells);
     }
     // Timing connections between units (those inside one keep their
     // delay); the dedicated ones have none.
     if let Some(t) = timing {
-        let placed = |c: CellId| a.cell_unit.contains_key(&c) || fixed.contains_key(&c);
-        let unit = |c: CellId| a.cell_unit.get(&c).map(|u| u.0);
+        let placed = |c: CellId| a.cell_unit[c.index()].is_some() || fixed.contains_key(&c);
+        let unit = |c: CellId| a.cell_unit[c.index()].map(|u| u.0);
         for (k, c) in t.graph.conns.iter().enumerate() {
             a.dedicated.push(dedicated(nl, c, unit(c.driver), unit(c.sink)));
             let between = unit(c.driver) != unit(c.sink) || unit(c.sink).is_none();
@@ -701,7 +847,7 @@ pub fn place(
                 let i = a.conns.len() as u32;
                 a.conns.push((c.driver, c.sink, k as u32));
                 for cell in [c.driver, c.sink] {
-                    a.cell_conns.entry(cell).or_default().push(i);
+                    a.cell_conns[cell.index()].push(i);
                 }
             }
         }
@@ -709,10 +855,12 @@ pub fn place(
         a.conn_cost = vec![0.0; a.conns.len()];
     }
     initial(&mut a)?;
-    a.net_cost = (0..a.nets.len()).map(|n| a.net_bb_cost(n)).collect();
+    let all: Vec<CellId> = nl.live_cells().collect();
+    a.refresh(&all);
+    a.reset_costs();
     let start = a.net_cost.iter().sum::<f64>();
     let steps = a.anneal(opts.effort);
-    a.net_cost = (0..a.nets.len()).map(|n| a.net_bb_cost(n)).collect();
+    a.reset_costs();
     log.push(format!(
         "placement: {} logic cells, {} carry chains, {} block RAMs and multipliers, {} nets, wirelength {start:.0} -> {:.0} in {steps} temperature steps",
         packed.lcs.len(),
