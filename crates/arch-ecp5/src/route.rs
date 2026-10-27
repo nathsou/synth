@@ -134,19 +134,25 @@ fn pad_node(
 /// Rounds of rerouting critical connections once routing is legal.
 pub const TIMING_ROUNDS: usize = 3;
 
-/// Routes the placed design, critical connections first on fast routes
-/// (criticalities from estimated delays, then from the routes, with
-/// `timing_rounds` rounds of rerouting the critical ones once legal).
-pub fn route(
+/// What routing a placed design takes: the clocks' global routes (in
+/// `routing`, their nodes in `used`), and a request per other net, by net.
+struct Requests {
+    routing: Routing,
+    used: FxHashSet<u32>,
+    source: FxHashMap<NetId, u32>,
+    sink_nodes: FxHashMap<(CellId, u32), u32>,
+    ids: Vec<NetId>,
+    requests: Vec<synth_route::NetRequest>,
+}
+
+/// Routes the clocks of the placed design on the global network, and
+/// makes the requests of every other net.
+fn requests(
     arch: &Arch,
     nl: &Netlist,
     placement: &Placement,
     pads: &PadSites,
-    targets: &ClockConstraints,
-    timing_rounds: usize,
-    log: &mut Vec<String>,
-) -> Result<Routing, String> {
-    let g = &arch.graph;
+) -> Result<Requests, String> {
     let luts = luts_by_site(nl, placement);
     // Each net's source and sinks.
     let mut source: FxHashMap<NetId, u32> = FxHashMap::default();
@@ -202,11 +208,10 @@ pub fn route(
         sinks.insert(net, rest);
         routing.dccs.push(Dcc { net, input, output, global, edges });
     }
-    log.push(format!("{} clocks on the global network", routing.dccs.len()));
     // Everything else.
     let mut ids: Vec<NetId> = sinks.keys().copied().filter(|n| source.contains_key(n)).collect();
     ids.sort_unstable();
-    let mut requests: Vec<synth_route::NetRequest> = ids
+    let requests: Vec<synth_route::NetRequest> = ids
         .iter()
         .map(|n| {
             let mut s: Vec<u32> = sinks[n].iter().map(|t| t.0).collect();
@@ -216,6 +221,46 @@ pub fn route(
             synth_route::NetRequest { source: source[n], sinks: s, criticality }
         })
         .collect();
+    Ok(Requests { routing, used, source, sink_nodes, ids, requests })
+}
+
+/// The router's lookahead offsets: the whole device.
+fn lookahead_radius(arch: &Arch) -> i16 {
+    arch.dev.info.max_col.max(arch.dev.info.max_row) as i16 + 1
+}
+
+/// The router's lookahead for the design as placed: it serves the design's
+/// other placements too (see [`synth_route::lookahead`]).
+pub fn lookahead(
+    arch: &Arch,
+    nl: &Netlist,
+    placement: &Placement,
+    pads: &PadSites,
+) -> Result<synth_route::Lookahead, String> {
+    let r = requests(arch, nl, placement, pads)?;
+    let g = &arch.graph;
+    Ok(synth_route::lookahead(g.route_graph(), &g.node_class, &r.requests, lookahead_radius(arch)))
+}
+
+/// Routes the placed design, critical connections first on fast routes
+/// (criticalities from estimated delays, then from the routes, with
+/// `timing_rounds` rounds of rerouting the critical ones once legal), with
+/// `lookahead` if given (else one for this placement).
+#[allow(clippy::too_many_arguments)]
+pub fn route(
+    arch: &Arch,
+    nl: &Netlist,
+    placement: &Placement,
+    pads: &PadSites,
+    targets: &ClockConstraints,
+    timing_rounds: usize,
+    lookahead: Option<&synth_route::Lookahead>,
+    log: &mut Vec<String>,
+) -> Result<Routing, String> {
+    let g = &arch.graph;
+    let Requests { mut routing, used, source, sink_nodes, ids, mut requests } =
+        requests(arch, nl, placement, pads)?;
+    log.push(format!("{} clocks on the global network", routing.dccs.len()));
     // Criticalities from estimated delays, and the request and sink node
     // of each timing connection.
     let timing = TimingGraph::new(arch, nl, targets);
@@ -284,7 +329,7 @@ pub fn route(
     };
     let blocked: Vec<u32> = used.iter().copied().collect();
     let opts = synth_route::RouteOptions {
-        lookahead_radius: arch.dev.info.max_col.max(arch.dev.info.max_row) as i16 + 1,
+        lookahead_radius: lookahead_radius(arch),
         timing_rounds,
         ..synth_route::RouteOptions::default()
     };
@@ -292,6 +337,7 @@ pub fn route(
         blocked: &blocked,
         node_class: &g.node_class,
         retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
+        lookahead,
         ..Default::default()
     };
     let (routes, stats) = synth_route::route_with(g.route_graph(), &requests, &opts, hooks)

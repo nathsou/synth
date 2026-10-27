@@ -133,30 +133,24 @@ pub fn clock_constraints(
     }
 }
 
-/// Placement and routing from one seed.
+/// Placement from one seed.
 #[allow(clippy::too_many_arguments)]
-fn place_and_route(
+fn place(
     arch: &Arch,
     nl: &Netlist,
     packed: &crate::pack::Packed,
     fixed: &FxHashMap<CellId, (usize, usize)>,
-    pads: &PadSites,
     graph: &crate::timing::TimingGraph,
-    clocks: &crate::timing::ClockConstraints,
     opts: &FlowOptions,
     seed: u64,
     log: &mut Vec<String>,
-) -> Result<(Placement, Routing), String> {
+) -> Result<Placement, String> {
     let t = Instant::now();
     let timing = crate::place::PlaceTiming { graph, grade: &arch.speed.grade };
     let popts = PlaceOptions { seed, effort: opts.effort, timing_weight: opts.timing_weight };
     let placement = crate::place::place(nl, packed, &arch.grid, fixed, Some(timing), &popts, log)?;
     log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
-    let t = Instant::now();
-    let routing =
-        crate::route::route(arch, nl, &placement, pads, clocks, crate::route::TIMING_ROUNDS, log)?;
-    log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
-    Ok((placement, routing))
+    Ok(placement)
 }
 
 /// Places, routes and configures a synthesised netlist.
@@ -180,15 +174,40 @@ pub fn implement(
     let clocks = crate::pll::clock_targets(&nl, &clock_constraints(cons, opts));
     let graph = crate::timing::TimingGraph::new(&arch, &nl, &clocks);
     // Each seed placed and routed on a thread of its own; the best timed
-    // kept. Seeds after the first are far from it.
+    // kept. Seeds after the first are far from it. The router's lookahead
+    // is built once, for the first seed's placement, and serves them all.
     let tries = opts.tries.max(1);
     let seeds: Vec<u64> =
         (0..tries as u64).map(|k| opts.seed.wrapping_add(k * 1_000_003)).collect();
-    let runs = synth_core::par::map(&seeds, tries, |&seed| {
+    let placed = synth_core::par::map(&seeds, tries, |&seed| {
         let mut log = Vec::new();
-        let run = place_and_route(
-            &arch, &nl, &packed, &fixed, &pads, &graph, &clocks, opts, seed, &mut log,
-        );
+        let placement = place(&arch, &nl, &packed, &fixed, &graph, opts, seed, &mut log);
+        (placement, log)
+    });
+    let t = Instant::now();
+    let lookahead = match &placed[0].0 {
+        Ok(p) => Some(crate::route::lookahead(&arch, &nl, p, &pads)?),
+        Err(_) => None,
+    };
+    log.push(format!("routing lookahead built in {:.2}s", t.elapsed().as_secs_f64()));
+    let runs = synth_core::par::map(&placed, tries, |(placement, log)| {
+        let mut log = log.clone();
+        let t = Instant::now();
+        let run = placement.clone().and_then(|placement| {
+            let rounds = crate::route::TIMING_ROUNDS;
+            let routing = crate::route::route(
+                &arch,
+                &nl,
+                &placement,
+                &pads,
+                &clocks,
+                rounds,
+                lookahead.as_ref(),
+                &mut log,
+            )?;
+            Ok((placement, routing))
+        });
+        log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
         // Each clock's period beyond its target (or its period, without
         // one), worst first.
         let score = run.as_ref().ok().map(|(placement, routing)| {

@@ -163,25 +163,27 @@ on the same routed design, see above). LUTs count the LUT4 sites used (a
 
 | Design | synth LUTs | FFs | MULT18 | Fmax | time | Y+N LUTs | FFs | MULT18 | Fmax | time |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| PicoRV32 SoC | 1324 | 556 | 0 | 112.9 MHz | 16 s | 2093 | 517 | 0 | 86.6 MHz | 10 s |
-| Euler 10 | 6570 | 1859 | 0 | 38.4 MHz | 34 s | 137,099 | 1643 | 0 | does not fit | 441 s |
-| Euler 14 | 5214 | 2214 | 0 | 81.7 MHz | 21 s | 7401 | 2233 | 0 | 76.2 MHz | 58 s |
-| Euler 25 | 978 | 187 | 0 | 73.9 MHz | 13 s | 1678 | 187 | 0 | 64.6 MHz | 7 s |
-| Euler 31 | 315 | 402 | 0 | 144.7 MHz | 12 s | 744 | 668 | 0 | 118.3 MHz | 4 s |
-| Euler 43 | 5738 | 1497 | 0 | 52.8 MHz | 24 s | 6641 | 1517 | 0 | 54.9 MHz | 124 s |
-| Euler 48 | 5267 | 2412 | 13 | 95.8 MHz | 18 s | 6429 | 2438 | 6 | 80.6 MHz | 45 s |
-| Euler 57 | 1808 | 857 | 0 | 68.5 MHz | 16 s | 2961 | 1114 | 0 | 67.3 MHz | 15 s |
-| Euler 58 | 5831 | 2158 | 0 | 79.1 MHz | 27 s | 7853 | 2030 | 5 | 59.4 MHz | 50 s |
-| Euler 92 | 1183 | 2806 | 0 | 79.9 MHz | 16 s | 1662 | 2867 | 1 | 68.8 MHz | 15 s |
-| Euler 97 | 968 | 445 | 3 | 61.6 MHz | 13 s | 989 | 445 | 2 | 58.3 MHz | 5 s |
+| PicoRV32 SoC | 1324 | 556 | 0 | 112.1 MHz | 8 s | 2093 | 517 | 0 | 86.6 MHz | 10 s |
+| Euler 10 | 6570 | 1859 | 0 | 38.3 MHz | 24 s | 137,099 | 1643 | 0 | does not fit | 441 s |
+| Euler 14 | 5214 | 2214 | 0 | 81.7 MHz | 16 s | 7401 | 2233 | 0 | 76.2 MHz | 58 s |
+| Euler 25 | 978 | 187 | 0 | 73.9 MHz | 6 s | 1678 | 187 | 0 | 64.6 MHz | 7 s |
+| Euler 31 | 315 | 402 | 0 | 144.7 MHz | 4 s | 744 | 668 | 0 | 118.3 MHz | 4 s |
+| Euler 43 | 5738 | 1497 | 0 | 52.8 MHz | 18 s | 6641 | 1517 | 0 | 54.9 MHz | 124 s |
+| Euler 48 | 5267 | 2412 | 13 | 94.8 MHz | 13 s | 6429 | 2438 | 6 | 80.6 MHz | 45 s |
+| Euler 57 | 1808 | 857 | 0 | 68.5 MHz | 8 s | 2961 | 1114 | 0 | 67.3 MHz | 15 s |
+| Euler 58 | 5831 | 2158 | 0 | 79.8 MHz | 21 s | 7853 | 2030 | 5 | 59.4 MHz | 50 s |
+| Euler 92 | 1183 | 2806 | 0 | 81.4 MHz | 10 s | 1662 | 2867 | 1 | 68.8 MHz | 15 s |
+| Euler 97 | 968 | 445 | 3 | 61.6 MHz | 5 s | 989 | 445 | 2 | 58.3 MHz | 5 s |
 
 synth uses fewer LUTs on every design (2–58% fewer; Yosys maps Euler 10 to
 137,099, five times the device) and reaches a higher Fmax on all but Euler 43
-(4% lower), by 2% (Euler 57) to 33% (Euler 58). PicoRV32 SoC and Euler 58
+(4% lower), by 2% (Euler 57) to 34% (Euler 58). PicoRV32 SoC and Euler 58
 take 6–8% more flip-flops. The whole flow is faster than Yosys + nextpnr on
-the five large designs, by 1.9–13 times, but slower on the small ones: routing costs
-about 9 s whatever the design's size, each seed building the router's
-lookahead over the whole device (see below).
+nine designs (up to 18 times, on Euler 10) and within 0.5 s of it on the
+other two, small ones: about 4 s of every build goes to loading the device
+(1 s) and building the router's lookahead (searching the whole device from
+sample sinks; once per build, for the first seed's placement, and shared by
+the seeds).
 
 ## Remaining work
 
@@ -190,5 +192,5 @@ lookahead over the whole device (see below).
   cascaded DSPs, I/O registers and DDR, bidirectional pads.
 - The PLL's secondary outputs, and placing a PLL by the dedicated clock pin
   feeding it (the annealer places it today, by wirelength).
-- Run time on small designs: each seed's router builds its lookahead by
-  searching the whole device from each sample sink.
+- Run time on small designs: the router's lookahead could be built once
+  per device rather than per build.

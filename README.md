@@ -307,8 +307,8 @@ congestion) and times the design with Trellis' delays; and writes bitstreams
 byte for byte as `ecppack` does. Decoded bitstreams of four RISC-V SoCs and
 the Euler solvers simulate correctly against their RTL, but no ECP5 board has
 run one yet. Against Yosys + nextpnr-ecp5 on the LFE5U-25F, it uses fewer
-LUTs on all eleven designs measured and reaches a higher Fmax on ten (by 2–33%),
-faster on the large designs, slower on the small ones. See
+LUTs on all eleven designs measured and reaches a higher Fmax on ten (by 2–34%),
+in less time on nine. See
 [docs/ECP5.md](docs/ECP5.md).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): pipeline, IRs, algorithms,

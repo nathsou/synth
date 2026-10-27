@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU16, AtomicU32, AtomicUsize};
 use synth_core::{FxHashMap, FxHashSet};
 
 mod lookahead;
-use lookahead::Lookahead;
+pub use lookahead::Lookahead;
 
 /// A routing graph: nodes with positions and base costs, directed edges
 /// with intrinsic delays.
@@ -239,6 +239,8 @@ struct State {
     /// Reverse edge lookup: source node of each edge.
     edge_src: Vec<u32>,
     lookahead: Option<Lookahead>,
+    /// The sinks the lookahead bounds (of a kind it sampled).
+    informed: FxHashSet<u32>,
 }
 
 /// Search state of one thread.
@@ -416,6 +418,9 @@ pub struct RouteHooks<'a> {
     /// rounds after the first legal routing; the best scoring legal routing
     /// is returned.
     pub retime: Option<Retime<'a>>,
+    /// A lookahead built beforehand ([`lookahead`]) instead of one for these
+    /// nets, as for several placements of one design.
+    pub lookahead: Option<&'a Lookahead>,
 }
 
 impl std::fmt::Debug for RouteHooks<'_> {
@@ -427,6 +432,28 @@ impl std::fmt::Debug for RouteHooks<'_> {
             .field("retime", &self.retime.is_some())
             .finish()
     }
+}
+
+/// A lookahead for routing `nets` on `graph` (with node classes
+/// `node_class`, offsets up to `radius`), as [`route_with`] builds one when
+/// none is given. It bounds the remaining cost to the sinks of the kinds it
+/// sampled wherever they are, so one table serves several routings of the
+/// same graph, such as one design placed with several seeds.
+pub fn lookahead(
+    graph: Graph<'_>,
+    node_class: &[u16],
+    nets: &[NetRequest],
+    radius: i16,
+) -> Lookahead {
+    let edge_src = edge_sources(&graph);
+    let (preds, pred_edges) = predecessors(&graph);
+    let searched = lookahead::Searched {
+        graph: &graph,
+        preds: &preds,
+        pred_edges: &pred_edges,
+        edge_src: &edge_src,
+    };
+    Lookahead::new(&searched, node_class, nets, radius)
 }
 
 /// [`route`] with caller hooks.
@@ -451,12 +478,7 @@ pub fn route_with_initial(
 ) -> Result<(Vec<NetRoute>, RouteStats), RouteError> {
     let mut crit: Vec<Vec<f32>> = nets.iter().map(|n| n.criticality.clone()).collect();
     let n = graph.num_nodes();
-    let mut edge_src = vec![0u32; graph.edge_dst.len()];
-    for node in 0..n {
-        for e in graph.offsets[node]..graph.offsets[node + 1] {
-            edge_src[e as usize] = node as u32;
-        }
-    }
+    let edge_src = edge_sources(&graph);
     // A blocked edge becomes a loop on its source node, which never
     // improves a search.
     let looped: Vec<u32>;
@@ -473,15 +495,28 @@ pub fn route_with_initial(
     synth_core::progress::advance(0.0, || "preparing the routing graph".into());
     let (preds, pred_edges) = predecessors(&graph);
     let confined = confined_nodes(&graph, &edge_src, &preds, &pred_edges);
-    let lookahead = (opts.lookahead_radius > 0).then(|| {
-        let searched = lookahead::Searched {
-            graph: &graph,
-            preds: &preds,
-            pred_edges: &pred_edges,
-            edge_src: &edge_src,
-        };
-        Lookahead::new(&searched, hooks.node_class, nets, opts.lookahead_radius)
-    });
+    let lookahead = match hooks.lookahead {
+        Some(l) => Some(l.clone()),
+        None => (opts.lookahead_radius > 0).then(|| {
+            let searched = lookahead::Searched {
+                graph: &graph,
+                preds: &preds,
+                pred_edges: &pred_edges,
+                edge_src: &edge_src,
+            };
+            Lookahead::new(&searched, hooks.node_class, nets, opts.lookahead_radius)
+        }),
+    };
+    let informed: FxHashSet<u32> = match &lookahead {
+        Some(l) => nets
+            .iter()
+            .flat_map(|n| n.sinks.iter().copied())
+            .filter(|&k| {
+                l.informs(&lookahead::kind(&preds, &pred_edges, &edge_src, hooks.node_class, k))
+            })
+            .collect(),
+        None => FxHashSet::default(),
+    };
     let hot = (0..n)
         .map(|k| Hot {
             x: graph.node_x[k],
@@ -493,8 +528,13 @@ pub fn route_with_initial(
             confined: confined[k],
         })
         .collect();
-    let mut st =
-        State { hot, users: (0..n).map(|_| AtomicU32::new(0)).collect(), edge_src, lookahead };
+    let mut st = State {
+        hot,
+        users: (0..n).map(|_| AtomicU32::new(0)).collect(),
+        edge_src,
+        lookahead,
+        informed,
+    };
     let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(4);
     let mut scratch: Vec<Scratch> = (0..threads).map(|_| Scratch::new(n)).collect();
     let mut routes: Vec<NetRoute> = vec![NetRoute::default(); nets.len()];
@@ -999,6 +1039,17 @@ pub struct RouteStats {
 
 /// Nodes from which every path stays at the node's position.
 /// The edges entering each node `k`: `pred_edges[preds[k]..preds[k + 1]]`.
+/// The source node of each edge.
+fn edge_sources(graph: &Graph<'_>) -> Vec<u32> {
+    let mut edge_src = vec![0u32; graph.edge_dst.len()];
+    for node in 0..graph.num_nodes() {
+        for e in graph.offsets[node]..graph.offsets[node + 1] {
+            edge_src[e as usize] = node as u32;
+        }
+    }
+    edge_src
+}
+
 fn predecessors(graph: &Graph<'_>) -> (Vec<u32>, Vec<u32>) {
     let n = graph.num_nodes();
     let mut preds = vec![0u32; n + 1];
@@ -1111,7 +1162,7 @@ fn route_net(
         let crit = criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, opts.max_criticality);
         let tx = graph.node_x[sink as usize];
         let ty = graph.node_y[sink as usize];
-        let informed = st.lookahead.as_ref().is_some_and(|l| l.informs(sink));
+        let informed = st.informed.contains(&sink);
         loop {
             sc.search_gen += 1;
             let search_gen = sc.search_gen;
@@ -1617,12 +1668,14 @@ mod tests {
             request(grid(0, 4), (rare..rare + 3).collect()),
         ];
         let table = Lookahead::new(&searched, &class, &nets, 10);
-        assert!((data..data + n_grid).all(|k| table.informs(k)));
+        let informs =
+            |k: u32| table.informs(&lookahead::kind(&preds, &pred_edges, &src, &class, k));
+        assert!((data..data + n_grid).all(informs));
         // The clock pins got a sample of their own: from the spine, the
         // table knows the hop into a pin.
-        assert!((pins..pins + 8).all(|k| table.informs(k)));
+        assert!((pins..pins + 8).all(informs));
         assert!(table.at(2, 0, 0).0 <= 1.0);
-        assert!(!(rare..rare + 3).any(|k| table.informs(k)));
+        assert!(!(rare..rare + 3).any(informs));
     }
 
     #[test]
