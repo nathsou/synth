@@ -289,6 +289,7 @@ pub(crate) fn route_incremental(
     // Connection criticalities from estimated delays, so that critical
     // connections take fast routes.
     let timing = crate::timing::TimingGraph::new(arch, nl, clocks);
+    let delays = arch.delay_table();
     let est: Vec<f64> = timing
         .conns
         .iter()
@@ -304,9 +305,8 @@ pub(crate) fn route_incremental(
             ) {
                 (Ok(a), Ok(b)) => {
                     let (a, b) = (a.raw() as usize, b.raw() as usize);
-                    let dist = (g.node_x[a] as i32 - g.node_x[b] as i32).abs()
-                        + (g.node_y[a] as i32 - g.node_y[b] as i32).abs();
-                    crate::place::est_delay(dist)
+                    delays
+                        .at((g.node_x[b] - g.node_x[a]) as i32, (g.node_y[b] - g.node_y[a]) as i32)
                 }
                 _ => 0.0,
             }
@@ -373,8 +373,18 @@ pub(crate) fn route_incremental(
         requests.push(NetRequest { source: source.raw(), sinks, criticality });
         ids.push(n);
     }
-    let mut opts =
-        RouteOptions { astar_cost_per_tile: 0.15, timing_rounds, ..RouteOptions::default() };
+    let die = arch.db.die;
+    let mut opts = RouteOptions {
+        astar_cost_per_tile: 0.15,
+        // Span wires cover four and twelve tiles: a lookahead by wire class
+        // bounds the remaining cost and delay far better than a cost per
+        // tile (on Euler 14, a tenth of the routing time, and critical
+        // connections get a delay estimate).
+        lookahead_radius: die.width().max(die.height()) as i16 + 1,
+        timing_rounds,
+        ..RouteOptions::default()
+    };
+    let classes: Vec<u16> = g.node_class.iter().map(|&c| c as u16).collect();
     // A repair: new routes avoid the kept ones from the start rather than
     // negotiate with them, and a repair that stops making progress gives
     // way to fresh place and route sooner.
@@ -454,9 +464,9 @@ pub(crate) fn route_incremental(
     let hooks = synth_route::RouteHooks {
         blocked: &blocked,
         blocked_edges: &blocked_edges,
+        node_class: &classes,
         progress: Some(&mut progress),
         retime: if timing_rounds > 0 { Some(&mut retime) } else { None },
-        ..Default::default()
     };
     let previous = checkpoint.map(|c| c.routes()).unwrap_or_default();
     let initial: Vec<_> = requests

@@ -135,24 +135,7 @@ pub fn analyse_full(
 ) -> (TimingReport, TimingGraph, Analysis) {
     let graph = TimingGraph::with_lut_pins(arch, nl, clocks, &routing.lut_pins);
     let pin_name = |c: CellId, i: usize| nl.str(nl.cells[c].pins[i].name).to_string();
-    // Routed delay of every connection.
-    let mut delays = vec![0.0; graph.conns.len()];
-    let mut by_net: FxHashMap<NetId, Vec<usize>> = FxHashMap::default();
-    for (k, c) in graph.conns.iter().enumerate() {
-        if let Some(n) = nl.cells[c.sink].pins[c.pin].net {
-            by_net.entry(n).or_default().push(k);
-        }
-    }
-    for (n, ks) in by_net {
-        let d = net_node_delays(arch, routing, n);
-        for k in ks {
-            let c = graph.conns[k];
-            if let Ok(node) = sink_node(arch, nl, placement, c.sink, &pin_name(c.sink, c.pin)) {
-                delays[k] = d.get(&node.raw()).copied().unwrap_or(0.0);
-            }
-        }
-    }
-    let a = graph.analyse(&delays);
+    let a = graph.analyse(&routed_delays(arch, nl, placement, routing, &graph));
     let mut report = TimingReport::default();
     for (ci, clk) in graph.clocks.iter().enumerate() {
         let Some(path) = a.paths[ci].as_ref() else { continue };
@@ -177,6 +160,34 @@ pub fn analyse_full(
         });
     }
     (report, graph, a)
+}
+
+/// The routed delay of every connection of `graph`.
+pub fn routed_delays(
+    arch: &Arch,
+    nl: &Netlist,
+    placement: &Placement,
+    routing: &Routing,
+    graph: &TimingGraph,
+) -> Vec<f64> {
+    let mut delays = vec![0.0; graph.conns.len()];
+    let mut by_net: FxHashMap<NetId, Vec<usize>> = FxHashMap::default();
+    for (k, c) in graph.conns.iter().enumerate() {
+        if let Some(n) = nl.cells[c.sink].pins[c.pin].net {
+            by_net.entry(n).or_default().push(k);
+        }
+    }
+    for (n, ks) in by_net {
+        let d = net_node_delays(arch, routing, n);
+        for k in ks {
+            let c = graph.conns[k];
+            let pin = nl.str(nl.cells[c.sink].pins[c.pin].name);
+            if let Ok(node) = sink_node(arch, nl, placement, c.sink, pin) {
+                delays[k] = d.get(&node.raw()).copied().unwrap_or(0.0);
+            }
+        }
+    }
+    delays
 }
 
 /// Global clock distribution jitter added to every launch, as icetime does

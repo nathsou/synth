@@ -84,6 +84,10 @@ pub struct RouteOptions {
     pub arc_bounding_boxes: bool,
     /// Iterations without a new best (least overuse) before giving up.
     pub stall_iterations: usize,
+    /// Give up once congestion falls too slowly to be resolved within this
+    /// many times `max_iterations` (VPR's routing failure predictor; 0:
+    /// never): see [`hopeless`].
+    pub failure_prediction: f32,
     /// Iterations between criticality updates while congested (0: never).
     pub retime_every: usize,
     /// Nets with a sink at least this critical are routed again after an
@@ -112,6 +116,7 @@ impl Default for RouteOptions {
             bbox_margin: 3,
             arc_bounding_boxes: false,
             stall_iterations: 120,
+            failure_prediction: 2.0,
             retime_every: 0,
             reroute_criticality: 0.95,
             timing_rounds: 0,
@@ -645,6 +650,17 @@ pub fn route_with_initial(
             if timing_rounds >= opts.timing_rounds || to_route.is_empty() {
                 break;
             }
+            // Only the critical connections are routed again: each net keeps
+            // the branches of its tree to its other sinks.
+            for &i in &to_route {
+                let keep = nets[i]
+                    .sinks
+                    .iter()
+                    .zip(&crit[i])
+                    .filter(|&(_, &c)| c < opts.reroute_criticality)
+                    .map(|(&k, _)| k);
+                seeds[i] = branches_to(&graph, &st, &routes[i].edges, keep);
+            }
             timing_rounds += 1;
             best_iter = iter;
             // Critical nets may take others' nodes again, which then
@@ -654,6 +670,13 @@ pub fn route_with_initial(
         }
         // No progress for a long while: give up (the caller may place again).
         if iter >= best_iter + opts.stall_iterations {
+            break;
+        }
+        // Congestion that will not be resolved in time: give up now rather
+        // than at the last iteration.
+        if timing_rounds == 0
+            && hopeless(&stats.overused_history, opts.max_iterations, opts.failure_prediction)
+        {
             break;
         }
         // A timing round that does not become legal soon is abandoned.
@@ -707,6 +730,33 @@ pub fn route_with_initial(
     let (nodes, nets) = best.unwrap_or_default();
     let overused_nodes = nodes.len();
     Err(RouteError::Congested { overused_nodes, nodes, nets })
+}
+
+/// Whether congestion falls too slowly to be resolved within `factor`
+/// times `max_iterations`, by the overused node counts of each iteration
+/// so far (VPR's routing failure predictor): a line fitted to the latter
+/// half of them (by least squares) must reach zero by then. Judged once a
+/// quarter of the iterations allowed are done, when the first rounds'
+/// steep fall is past; on a placement that leaves more wire than the
+/// device has, the count falls ever more slowly and routing would run to
+/// the last iteration before failing.
+fn hopeless(history: &[usize], max_iterations: usize, factor: f32) -> bool {
+    let n = history.len();
+    if factor <= 0.0 || n < (max_iterations / 4).max(4) {
+        return false;
+    }
+    let recent = &history[n / 2..];
+    let m = recent.len() as f64;
+    let (mx, my) = ((m - 1.0) / 2.0, recent.iter().sum::<usize>() as f64 / m);
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (x, &y) in recent.iter().enumerate() {
+        let dx = x as f64 - mx;
+        sxy += dx * (y as f64 - my);
+        sxx += dx * dx;
+    }
+    let slope = sxy / sxx;
+    let now = my + slope * (m - 1.0 - mx);
+    slope >= 0.0 || n as f64 + now / -slope > factor as f64 * max_iterations as f64
 }
 
 /// Routes the nets of `to_route` concurrently where they lie in disjoint
@@ -863,16 +913,26 @@ fn clear_branches(
         }
     }
     // Drop branches that lead to no sink, from the leaves up.
-    let mut useful: FxHashSet<u32> =
-        net.sinks.iter().copied().filter(|k| reached.contains(k)).collect();
-    let mut keep = vec![false; kept.len()];
-    for (j, &e) in kept.iter().enumerate().rev() {
+    branches_to(graph, st, &kept, net.sinks.iter().copied().filter(|k| reached.contains(k)))
+}
+
+/// The edges of tree `edges` (in tree order) on its paths to `sinks`, in
+/// tree order.
+fn branches_to(
+    graph: &Graph<'_>,
+    st: &State,
+    edges: &[u32],
+    sinks: impl Iterator<Item = u32>,
+) -> Vec<u32> {
+    let mut useful: FxHashSet<u32> = sinks.collect();
+    let mut keep = vec![false; edges.len()];
+    for (j, &e) in edges.iter().enumerate().rev() {
         if useful.contains(&graph.edge_dst[e as usize]) {
             keep[j] = true;
             useful.insert(st.edge_src[e as usize]);
         }
     }
-    kept.into_iter().zip(keep).filter_map(|(e, k)| k.then_some(e)).collect()
+    edges.iter().zip(keep).filter_map(|(&e, k)| k.then_some(e)).collect()
 }
 
 /// The part of candidate tree `edges` for net `i` that leads to its current
@@ -1051,6 +1111,7 @@ fn route_net(
         let crit = criticality.get(k).copied().unwrap_or(0.0).clamp(0.0, opts.max_criticality);
         let tx = graph.node_x[sink as usize];
         let ty = graph.node_y[sink as usize];
+        let informed = st.lookahead.as_ref().is_some_and(|l| l.informs(sink));
         loop {
             sc.search_gen += 1;
             let search_gen = sc.search_gen;
@@ -1058,7 +1119,9 @@ fn route_net(
             let lookahead = st.lookahead.as_ref();
             let est = |h: &Hot| {
                 let (dx, dy) = (h.x - tx, h.y - ty);
-                if let Some(table) = lookahead {
+                // Toward sinks of a kind the table does not bound, the
+                // distance estimate.
+                if let Some(table) = lookahead.filter(|_| informed) {
                     let (cost, delay) = table.at(h.class as usize, dx, dy);
                     return opts.lookahead_weight
                         * ((1.0 - crit) * cost + crit * delay * opts.delay_scale);
@@ -1460,6 +1523,106 @@ mod tests {
         assert_eq!(stats.reused_nets, 2);
         assert!(repaired[3].edges.iter().any(|&e| d[e as usize] == r1));
         assert!(repaired[2].edges.iter().any(|&e| d[e as usize] == s3));
+    }
+
+    #[test]
+    fn failure_predicted_from_slowing_congestion() {
+        // Halving every few iterations: resolved in time.
+        let fast: Vec<usize> = (0..60).map(|i| 4000 >> (i / 6)).collect();
+        assert!(!hopeless(&fast, 200, 2.0));
+        // Falling by a few nodes an iteration from thousands: not in time.
+        let slow: Vec<usize> = (0..60).map(|i| 2400 - 5 * i).collect();
+        assert!(hopeless(&slow, 200, 2.0));
+        assert!(!hopeless(&slow, 200, 0.0));
+        // Too early to tell.
+        assert!(!hopeless(&slow[..40], 200, 2.0));
+    }
+
+    #[test]
+    fn lookahead_samples_each_kind_of_sink() {
+        // A 40 x 8 grid of interconnect (class 0), each node entering a data
+        // sink (class 1); a clock spine (class 2) along row 0 entering the
+        // grid and 8 clock pins (class 3); 3 sinks of a rarer kind (class 4).
+        // In node order the data sinks come first,
+        // so samples spread over all sinks miss the clock pins.
+        let (w, h) = (40i16, 8i16);
+        let grid = |x: i16, y: i16| (y * w + x) as u32;
+        let n_grid = (w * h) as u32;
+        let (data, spine, pins, rare) =
+            (n_grid, 2 * n_grid, 2 * n_grid + w as u32, 2 * n_grid + w as u32 + 8);
+        // Each rare sink is entered through a wire of its own class (5).
+        let n = rare as usize + 6;
+        let mut edges: Vec<(u32, u32)> = Vec::new();
+        let (mut xs, mut ys, mut class) = (vec![0i16; n], vec![0i16; n], vec![0u16; n]);
+        for y in 0..h {
+            for x in 0..w {
+                let k = grid(x, y);
+                (xs[k as usize], ys[k as usize]) = (x, y);
+                let d = (data + k) as usize;
+                (xs[d], ys[d], class[d]) = (x, y, 1);
+                edges.push((k, data + k));
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if (0..w).contains(&nx) && (0..h).contains(&ny) {
+                        edges.push((k, grid(nx, ny)));
+                    }
+                }
+            }
+        }
+        for x in 0..w {
+            let c = spine + x as u32;
+            (xs[c as usize], class[c as usize]) = (x, 2);
+            edges.push((c, grid(x, 0)));
+            if x + 1 < w {
+                edges.push((c, c + 1));
+            }
+        }
+        for i in 0..8u32 {
+            let (p, x) = (pins + i, 5 * i as i16);
+            (xs[p as usize], class[p as usize]) = (x, 3);
+            edges.push((spine + x as u32, p));
+        }
+        for i in 0..3u32 {
+            let (r, via) = (rare + i, rare + 3 + i);
+            for k in [r, via] {
+                (xs[k as usize], ys[k as usize]) = (3 * i as i16, 4);
+            }
+            (class[r as usize], class[via as usize]) = (4, 5);
+            edges.push((grid(3 * i as i16, 4), via));
+            edges.push((via, r));
+        }
+        let (o, d, dl, _, _, c) = edge_graph(n, &edges);
+        let g = Graph {
+            offsets: &o,
+            edge_dst: &d,
+            edge_delay: &dl,
+            node_x: &xs,
+            node_y: &ys,
+            node_cost: &c,
+        };
+        let src: Vec<u32> = (0..n as u32)
+            .flat_map(|k| (o[k as usize]..o[k as usize + 1]).map(move |_| k))
+            .collect();
+        let (preds, pred_edges) = predecessors(&g);
+        let searched = lookahead::Searched {
+            graph: &g,
+            preds: &preds,
+            pred_edges: &pred_edges,
+            edge_src: &src,
+        };
+        let request = |source, sinks: Vec<u32>| NetRequest { source, sinks, criticality: vec![] };
+        let nets = vec![
+            request(grid(0, 0), (data..data + n_grid).collect()),
+            request(spine, (pins..pins + 8).collect()),
+            request(grid(0, 4), (rare..rare + 3).collect()),
+        ];
+        let table = Lookahead::new(&searched, &class, &nets, 10);
+        assert!((data..data + n_grid).all(|k| table.informs(k)));
+        // The clock pins got a sample of their own: from the spine, the
+        // table knows the hop into a pin.
+        assert!((pins..pins + 8).all(|k| table.informs(k)));
+        assert!(table.at(2, 0, 0).0 <= 1.0);
+        assert!(!(rare..rare + 3).any(|k| table.informs(k)));
     }
 
     #[test]

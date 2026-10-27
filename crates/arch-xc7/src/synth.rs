@@ -152,20 +152,31 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
             &synth_logic::lower::LowerOptions { carry_min_width: Some(min) },
         )
     };
-    // Progress: a step per mapping (the shared and wide ones may not run).
-    let mappings = alternatives.len() + 4;
-    let mut mapped = 0;
-    let mut next = |what: &str| {
-        mapped += 1;
-        let f = (mapped - 1) as f64 / mappings as f64;
-        synth_core::progress::advance(f, || format!("mapping {mapped} of {mappings}: {what}"));
+    // Every partition is mapped with 8 cuts, and with threads to spare with
+    // 16 too, on threads of their own; the candidates are then compared in
+    // a fixed order, so the selection does not depend on what ran at once.
+    let widths: Vec<usize> = std::iter::once(3).chain(alternatives.iter().copied()).collect();
+    let threads = synth_core::par::threads(2 * widths.len());
+    let mut jobs: Vec<(usize, usize)> = widths.iter().map(|&w| (w, 8)).collect();
+    if threads > widths.len() {
+        jobs.extend(widths.iter().map(|&w| (w, 16)));
+    }
+    synth_core::progress::advance(0.0, || format!("mapping {} candidates", jobs.len()));
+    let mut mapped: Vec<Option<Result<Mapped, String>>> =
+        synth_core::par::map(&jobs, threads, |&(min, cuts)| {
+            let net = if (min, cuts) == (3, 8) { initial.clone() } else { lower(min)? };
+            map_logic(net, cuts)
+        })
+        .into_iter()
+        .map(Some)
+        .collect();
+    let mut take = |min: usize, cuts: usize| {
+        jobs.iter().position(|&j| j == (min, cuts)).and_then(|i| mapped[i].take())
     };
-    next("carry chains of 3 bits and more");
-    let mut best = map_logic(initial, 8)?;
+    let mut best = take(3, 8).expect("mapped")?;
     let mut selected = 3;
-    for min in alternatives {
-        next(&format!("carry chains of {min} bits and more"));
-        let candidate = map_logic(lower(min)?, 8)?;
+    for &min in &alternatives {
+        let candidate = take(min, 8).expect("mapped")?;
         if candidate.improves(&best) {
             (best, selected) = (candidate, min);
         }
@@ -174,11 +185,20 @@ pub fn synthesize(mut m: Module) -> Result<(Netlist, Vec<String>), String> {
     // a worse local optimum. Retry only the selected arithmetic partition
     // and keep the existing mapping when any cost increases.
     let mut cuts = 8;
-    next("more cuts");
-    let candidate = map_logic(lower(selected)?, 16)?;
+    let candidate = match take(selected, 16) {
+        Some(candidate) => candidate?,
+        None => map_logic(lower(selected)?, 16)?,
+    };
     if candidate.improves(&best) {
         (best, cuts) = (candidate, 16);
     }
+    // Progress: the shared and wide mappings are left (they may not run).
+    let mut mapped = 0;
+    let mut next = |what: &str| {
+        mapped += 1;
+        let f = 0.5 + 0.25 * (mapped - 1) as f64;
+        synth_core::progress::advance(f, || format!("mapping {what}"));
+    };
     best.share_luts()?;
     // Sharing arithmetic changes mapper heuristics as well as removing boxes.
     // Keep it only when the final resource vector and delay dominate the

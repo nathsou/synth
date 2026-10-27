@@ -281,6 +281,8 @@ pub struct Arch {
     /// nodes and the virtual nodes standing for the LUT's logical inputs
     /// (numbered after the device's nodes).
     lut_perm: Vec<LutPermutation>,
+    /// Estimated delays between logic cells, searched when first needed.
+    delays: std::sync::OnceLock<crate::estimate::DelayTable>,
 }
 
 /// A logic cell's physical LUT input pins, the virtual nodes of its logical
@@ -348,6 +350,7 @@ impl Arch {
             },
             pip_delays,
             span_delays,
+            delays: std::sync::OnceLock::new(),
             lut_perm: Vec::new(),
         };
         arch.build_bels()?;
@@ -678,6 +681,11 @@ impl Arch {
     /// input it feeds.
     pub fn permutation(pip: PipRef) -> Option<(usize, usize)> {
         (pip.tile == PERMUTATION_TILE).then_some((pip.tpip as usize / 4, pip.tpip as usize % 4))
+    }
+
+    /// Estimated delays of unrouted connections between logic cells.
+    pub fn delay_table(&self) -> &crate::estimate::DelayTable {
+        self.delays.get_or_init(|| crate::estimate::DelayTable::new(self))
     }
 
     /// Delay of a span wire driver of `kind` whose wire is used up to

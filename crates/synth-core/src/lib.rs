@@ -9,6 +9,7 @@
 //! - [`logic`]: four-state bit vectors with Verilog semantics.
 //! - [`diag`]: source maps, spans and diagnostics.
 //! - [`bigint`]: arbitrary-precision integers for compile-time arithmetic.
+//! - [`par`]: deterministic parallel maps.
 
 pub mod bigint;
 pub mod bin;
@@ -20,6 +21,7 @@ pub mod intern;
 pub mod json;
 pub mod logic;
 pub mod ordered;
+pub mod par;
 pub mod progress;
 pub mod rng;
 pub mod time;

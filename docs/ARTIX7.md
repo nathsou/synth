@@ -85,8 +85,10 @@ mapper are heuristics; the printed LUT-level delay is not an Fmax.
 Short arithmetic is evaluated with minimum carry widths of 3, 4 and 5, and
 the selection retried with more priority cuts; a candidate is kept only if
 no LUT, FF, CARRY4, BRAM18 or DSP48 count increases, its estimated delay
-does not increase, and something improves. Exact duplicate LUTs and
-identical carry chains are shared.
+does not increase, and something improves. The candidates are mapped on
+threads of their own and compared in a fixed order, so the selection does
+not depend on the number of threads. Exact duplicate LUTs and identical
+carry chains are shared.
 
 ## Native physical flow
 
@@ -196,14 +198,29 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   gained 0.3% more by the estimate, within its noise, and is not done.
 - **Routing.** Negotiated congestion (PathFinder) with A*. The estimate is
   a lookahead: the least remaining cost and delay to a sink by wire class
-  and distance, found by searching backwards from sample sinks. Nets in
+  and distance, found by searching backwards from sample sinks. It bounds
+  sinks like those sampled only: sinks are told apart by the classes of
+  the wires entering them, and each kind of at least eight sinks that the
+  samples spread over all sinks miss gets one of its own; toward rarer
+  kinds the searches take a cost per tile of distance (searched with no
+  estimate at all, Euler 31's few such sinks took most of its routing).
+  Before, built from data inputs alone, the table knew from the clock tree
+  only long routes into the fabric, never the two hops into a clock pin,
+  and each of a clock net's sinks
+  expanded almost everything else first (on Euler 10, 12 s every time its
+  clock net of 1,019 sinks was routed). This made routing 39% faster on
+  the Euler designs at the same Fmax. Nets in
   disjoint regions (quadrants, then halves) are routed concurrently, and
   each connection searches only around its own source and sink; congested
   nets keep the branches of their trees clear of overused nodes and reroute
   only the sinks they lose. Routing is timing-driven: sink criticalities
   come from the placement's predicted delays, then from the routes every
   other iteration; a connection's criticality (at most 0.99) weighs its
-  delay against congestion. The router also picks each LUT input pin, so a
+  delay against congestion. Once routing is legal, the critical
+  connections are routed again three times, keeping the best timed
+  routing; each net keeps the branches of its tree to its other sinks, as
+  connection-based routers do (rerouting whole nets gave the same Fmax).
+  The router also picks each LUT input pin, so a
   critical connection takes a fast one. Address cascades between block RAM
   tiles and buffer pass-throughs are not general routing.
 - **LUT input pins.** A lane's six pins differ by up to 515 ps into the
@@ -559,9 +576,12 @@ How to read the timing columns:
   and 97 have only synth's estimate.
 - Extend timing to I/O, and characterize the BRAM pips
   missing from the upstream data.
-- Reduce routing time on designs with wide high-fanout critical nets
-  (Euler 48: three times nextpnr's). Their sinks' A* searches are loosely
-  bounded by a lookahead that classes wires without their index.
+- Reduce routing time further. With a lookahead sample for each kind of
+  sink, Euler 48 routes in 69 s rather than 113 s and Euler 10 in 99 s
+  rather than 234 s (four seeds at once; the whole suite's flow takes a
+  third less time at the same Fmax), but the lookahead's thirty-odd
+  backward searches cost seconds on any design: Euler 31, of 54 LUTs,
+  takes 6 s longer than before.
 - Close the remaining synthesis gaps: Euler 43's wide multiplexing, and
   carry-lane LUT replication that costs 2–5% slices on Euler 43, 48 and 97.
 - Validate on hardware with a SoC and realistic clock and I/O constraints;

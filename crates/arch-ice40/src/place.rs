@@ -31,7 +31,7 @@ pub struct PlaceOptions {
 impl Default for PlaceOptions {
     fn default() -> Self {
         PlaceOptions {
-            timing_weight: 0.5,
+            timing_weight: crate::flow::TIMING_WEIGHT,
             seed: 1,
             effort: 1.0,
             max_locals: 32,
@@ -49,23 +49,29 @@ pub struct Placement {
     pub cell_global: FxHashMap<CellId, u8>,
 }
 
-/// Clock, clock enable, set/reset and clock polarity shared by a tile's flops.
-type ControlSet = (Option<NetId>, Option<NetId>, Option<NetId>, bool);
+/// No net, in [`LcInfo`].
+const NO_NET: u32 = u32::MAX;
 
-#[derive(Clone, Copy, Debug, Default)]
+/// What tile legality needs of a logic cell, nets as raw ids.
+#[derive(Clone, Copy, Debug)]
 struct LcInfo {
-    dff: bool,
-    neg_clk: bool,
-    clk: Option<NetId>,
-    cen: Option<NetId>,
-    sr: Option<NetId>,
+    /// The control set of the cell's flip-flop (clock, clock enable,
+    /// set/reset and clock polarity, which a tile's flip-flops share),
+    /// numbered from 1 in the order of those nets; 0 without a flip-flop.
+    ctrl: u32,
     /// Nets on inputs `I0`/`I2` and on `I1`/`I3` (unless it is the carry
     /// input). In even logic cells the former use class A local tracks and
     /// the latter class B; odd cells are the other way round.
-    even_pins: [Option<NetId>; 2],
-    odd_pins: [Option<NetId>; 2],
+    even_pins: [u32; 2],
+    odd_pins: [u32; 2],
     /// Control nets that need a class A local track (not on a global).
-    fabric_ctrl: [Option<NetId>; 3],
+    fabric_ctrl: [u32; 3],
+}
+
+impl Default for LcInfo {
+    fn default() -> Self {
+        LcInfo { ctrl: 0, even_pins: [NO_NET; 2], odd_pins: [NO_NET; 2], fabric_ctrl: [NO_NET; 3] }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -367,19 +373,152 @@ struct Conn {
     sink: CellId,
 }
 
-/// Estimated routed delay (ps) of a connection spanning `d` tiles: mean
-/// routed delays of logic cell connections on an HX8K (PicoSoC and Euler 25
-/// routed by this flow), piecewise linear.
-pub(crate) fn est_delay(d: i32) -> f64 {
-    let d = d as f64;
-    if d <= 4.0 {
-        530.0 + 235.0 * d
-    } else if d <= 12.0 {
-        1470.0 + 110.0 * (d - 4.0)
-    } else {
-        2350.0 + 30.0 * (d - 12.0)
+/// Lists of `u32` by index, in compressed sparse row form.
+#[derive(Debug, Default)]
+struct Adjacency {
+    off: Vec<u32>,
+    items: Vec<u32>,
+}
+
+impl Adjacency {
+    fn new(lists: Vec<Vec<u32>>) -> Self {
+        let mut off = Vec::with_capacity(lists.len() + 1);
+        off.push(0);
+        let mut items = Vec::new();
+        for l in lists {
+            items.extend(l);
+            off.push(items.len() as u32);
+        }
+        Adjacency { off, items }
+    }
+
+    #[inline]
+    fn of(&self, i: usize) -> &[u32] {
+        match self.off.get(i + 1) {
+            Some(&end) => &self.items[self.off[i] as usize..end as usize],
+            None => &[],
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.off.len().saturating_sub(1)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
+
+/// No unit, RAM slot or position: the marker of the dense per-cell tables.
+const NONE: u32 = u32::MAX;
+
+/// A net's bounding box, with the number of its cells on each side, so
+/// that moves update it without visiting the other cells (as VPR does).
+#[derive(Clone, Copy, Debug, Default)]
+struct BBox {
+    x0: i16,
+    x1: i16,
+    y0: i16,
+    y1: i16,
+    on_x0: u32,
+    on_x1: u32,
+    on_y0: u32,
+    on_y1: u32,
+}
+
+impl BBox {
+    /// The box of points `at` (none if there are none).
+    fn of(at: impl Iterator<Item = (i16, i16)>) -> Option<BBox> {
+        let mut b: Option<BBox> = None;
+        for (x, y) in at {
+            let Some(b) = b.as_mut() else {
+                b = Some(BBox {
+                    x0: x,
+                    x1: x,
+                    y0: y,
+                    y1: y,
+                    on_x0: 1,
+                    on_x1: 1,
+                    on_y0: 1,
+                    on_y1: 1,
+                });
+                continue;
+            };
+            side(&mut b.x0, &mut b.on_x0, x, |a, b| a < b);
+            side(&mut b.x1, &mut b.on_x1, x, |a, b| a > b);
+            side(&mut b.y0, &mut b.on_y0, y, |a, b| a < b);
+            side(&mut b.y1, &mut b.on_y1, y, |a, b| a > b);
+        }
+        b
+    }
+
+    /// Moves one cell of the box from `from` to `to`; false if a side it
+    /// alone was on may shrink, which only a new scan finds.
+    fn shift(&mut self, from: (i16, i16), to: (i16, i16)) -> bool {
+        shift(&mut self.x0, &mut self.on_x0, &mut self.x1, &mut self.on_x1, from.0, to.0)
+            && shift(&mut self.y0, &mut self.on_y0, &mut self.y1, &mut self.on_y1, from.1, to.1)
+    }
+
+    fn half_perimeter(&self) -> f64 {
+        (self.x1 - self.x0) as f64 + (self.y1 - self.y0) as f64
+    }
+}
+
+/// Adds coordinate `v` to a side at `at` with `on` points, beyond it when
+/// `beyond(v, at)`.
+#[inline]
+fn side(at: &mut i16, on: &mut u32, v: i16, beyond: impl Fn(i16, i16) -> bool) {
+    if beyond(v, *at) {
+        (*at, *on) = (v, 1);
+    } else if v == *at {
+        *on += 1;
+    }
+}
+
+/// Moves one point of the span `lo..=hi` (with `on_lo` and `on_hi` points
+/// on its ends) from `from` to `to`; false if an end it leaves alone may
+/// move inward.
+#[inline]
+fn shift(lo: &mut i16, on_lo: &mut u32, hi: &mut i16, on_hi: &mut u32, from: i16, to: i16) -> bool {
+    if to < from {
+        if from == *hi {
+            if *on_hi == 1 {
+                return false;
+            }
+            *on_hi -= 1;
+        }
+        side(lo, on_lo, to, |a, b| a < b);
+    } else if to > from {
+        if from == *lo {
+            if *on_lo == 1 {
+                return false;
+            }
+            *on_lo -= 1;
+        }
+        side(hi, on_hi, to, |a, b| a > b);
+    }
+    true
+}
+
+/// What the annealing rule makes of a move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    Accepted,
+    Rejected,
+    /// A move that changes no cost: always taken.
+    Free,
+}
+
+impl Decision {
+    /// Whether the move was accepted, for the moves the schedule counts.
+    fn counted(self) -> Option<bool> {
+        (self != Decision::Free).then_some(self == Decision::Accepted)
+    }
+}
+
+/// Nets with at most this many cells get their bounding boxes by a scan
+/// rather than updates.
+const SCANNED_NET: usize = 8;
 
 struct Annealer<'a> {
     arch: &'a Arch,
@@ -390,28 +529,34 @@ struct Annealer<'a> {
     height: usize,
     logic_cols: Vec<usize>,
     units: Vec<Unit>,
-    /// Unit of each movable cell.
-    cell_unit: FxHashMap<CellId, usize>,
-    lc_info: FxHashMap<CellId, LcInfo>,
-    /// Position of every cell that takes part in wirelength (x, y, z).
-    pos: FxHashMap<CellId, (i16, i16, u8)>,
+    /// The per-cell tables below are indexed by cell index.
+    /// Unit of each movable cell ([`NONE`] if none).
+    cell_unit: Vec<u32>,
+    lc_info: Vec<LcInfo>,
+    /// Position of every placed cell (x, y, z).
+    pos: Vec<Option<(i16, i16, u8)>>,
+    /// Where each cell counts in the costs: where it is placed, else where
+    /// it is fixed, else the origin.
+    xy: Vec<(i16, i16)>,
     /// Logic cell slot occupancy, indexed by `slot(x, y, z)`.
     lc_occ: Vec<Option<CellId>>,
     ram_bels: Vec<BelId>,
     ram_occ: Vec<Option<CellId>>,
-    cell_ram_slot: FxHashMap<CellId, usize>,
-    /// Nets that matter for wirelength, with their distinct cells.
-    nets: Vec<Vec<CellId>>,
+    cell_ram_slot: Vec<u32>,
+    /// Nets that matter for wirelength: their distinct cells (raw ids).
+    nets: Adjacency,
+    /// Bounding box of each net, and its cost.
+    net_bb: Vec<BBox>,
     net_cost: Vec<f64>,
-    cell_nets: FxHashMap<CellId, Vec<u32>>,
-    fixed: FxHashMap<CellId, (i16, i16)>,
+    cell_nets: Adjacency,
+    fixed: Vec<Option<(i16, i16)>>,
     /// Logic cells placed beforehand, and where.
     pinned: Vec<(CellId, (i16, i16, u8))>,
     /// Units moves may pick (all when empty): those an incremental repair
     /// placed anew.
     movable: Vec<usize>,
     conns: Vec<Conn>,
-    cell_conns: FxHashMap<CellId, Vec<u32>>,
+    cell_conns: Adjacency,
     timing: crate::timing::TimingGraph,
     /// The placement connection of each timing graph connection (`u32::MAX`
     /// for connections that do not depend on placement).
@@ -422,7 +567,22 @@ struct Annealer<'a> {
     /// Normalisation of the two cost terms (their totals at the last update).
     bb_norm: f64,
     t_norm: f64,
+    /// New bounding boxes of the nets, and costs of the connections, that
+    /// the move being tried changes.
+    net_scratch: Vec<(u32, BBox)>,
     conn_scratch: Vec<(u32, f64)>,
+    /// Cells the move being tried displaces, and where they were.
+    moved: Vec<(CellId, (i16, i16))>,
+    /// Marks of the nets, connections and cells a step has visited: those
+    /// equal to `stamp`.
+    net_seen: Vec<u32>,
+    conn_seen: Vec<u32>,
+    cell_seen: Vec<u32>,
+    stamp: u32,
+    /// Median move scratch: bounding box sides of the moved cells' nets.
+    xs: Vec<i16>,
+    ys: Vec<i16>,
+    delays: &'a crate::estimate::DelayTable,
 }
 
 impl<'a> Annealer<'a> {
@@ -438,61 +598,82 @@ impl<'a> Annealer<'a> {
             (1..=width).filter(|&x| die.tile_kind(x, 1) == TileKind::Logic).collect();
         let ram_bels: Vec<BelId> = arch.bels_of(BelKind::Ram).collect();
         let timing = crate::timing::TimingGraph::new(arch, nl, &opts.clocks);
+        let ncells = nl.cells.len();
         let mut sa = Annealer {
             arch,
             nl,
             conn_of_timing: vec![u32::MAX; timing.conns.len()],
             timing,
             conns: Vec::new(),
-            cell_conns: FxHashMap::default(),
+            cell_conns: Adjacency::default(),
             conn_weight: Vec::new(),
             conn_cost: Vec::new(),
             bb_norm: 1.0,
             t_norm: 1.0,
+            net_scratch: Vec::new(),
             conn_scratch: Vec::new(),
+            moved: Vec::new(),
+            net_seen: Vec::new(),
+            conn_seen: Vec::new(),
+            cell_seen: vec![0; ncells],
+            stamp: 0,
+            xs: Vec::new(),
+            ys: Vec::new(),
+            delays: arch.delay_table(),
             rng: Rng::new(opts.seed),
             opts: opts.clone(),
             width,
             height,
             logic_cols,
             units: Vec::new(),
-            cell_unit: FxHashMap::default(),
-            lc_info: FxHashMap::default(),
-            pos: FxHashMap::default(),
+            cell_unit: vec![NONE; ncells],
+            lc_info: vec![LcInfo::default(); ncells],
+            pos: vec![None; ncells],
+            xy: vec![(0, 0); ncells],
             lc_occ: vec![None; (width + 2) * (height + 2) * 8],
             ram_occ: vec![None; ram_bels.len()],
             ram_bels,
-            cell_ram_slot: FxHashMap::default(),
-            nets: Vec::new(),
+            cell_ram_slot: vec![NONE; ncells],
+            nets: Adjacency::default(),
+            net_bb: Vec::new(),
             net_cost: Vec::new(),
-            cell_nets: FxHashMap::default(),
-            fixed: FxHashMap::default(),
+            cell_nets: Adjacency::default(),
+            fixed: vec![None; ncells],
             pinned: Vec::new(),
             movable: Vec::new(),
         };
 
         let is_global = |n: NetId| on_global(nl, n);
+        let raw = |n: Option<NetId>| n.map_or(NO_NET, |n| n.raw());
+        let mut sets = Vec::new();
         for c in nl.live_cells() {
             if nl.cell_kind(c) != LC {
                 continue;
             }
             let p = |name: &str| nl.param(c, name).and_then(Param::as_u64).unwrap_or(0) != 0;
-            let mut info =
-                LcInfo { dff: p("DFF_ENABLE"), neg_clk: p("NEG_CLK"), ..Default::default() };
-            if info.dff {
-                info.clk = nl.pin_net(c, "CLK");
-                info.cen = nl.pin_net(c, "CEN");
-                info.sr = nl.pin_net(c, "SR");
-                let fab = |n: Option<NetId>| n.filter(|&n| !is_global(n));
-                info.fabric_ctrl = [fab(info.clk), fab(info.cen), fab(info.sr)];
+            let mut info = LcInfo::default();
+            if p("DFF_ENABLE") {
+                let ctrl = [nl.pin_net(c, "CLK"), nl.pin_net(c, "CEN"), nl.pin_net(c, "SR")];
+                let n = |n: Option<NetId>| n.map_or(0, |n| n.index() + 1);
+                sets.push(((n(ctrl[0]), n(ctrl[1]), n(ctrl[2]), p("NEG_CLK")), c));
+                info.fabric_ctrl = ctrl.map(|n| raw(n.filter(|&n| !is_global(n))));
             }
             let cin = nl.pin_net(c, "CIN");
-            info.even_pins = [nl.pin_net(c, "I0"), nl.pin_net(c, "I2")];
-            info.odd_pins = [nl.pin_net(c, "I1"), nl.pin_net(c, "I3").filter(|&n| Some(n) != cin)];
-            sa.lc_info.insert(c, info);
+            info.even_pins = [raw(nl.pin_net(c, "I0")), raw(nl.pin_net(c, "I2"))];
+            info.odd_pins =
+                [raw(nl.pin_net(c, "I1")), raw(nl.pin_net(c, "I3").filter(|&n| Some(n) != cin))];
+            sa.lc_info[c.index()] = info;
+        }
+        sets.sort_unstable();
+        let mut set = 0;
+        for (i, &(key, c)) in sets.iter().enumerate() {
+            if i == 0 || key != sets[i - 1].0 {
+                set += 1;
+            }
+            sa.lc_info[c.index()].ctrl = set;
         }
         // Units: chains first, then single logic cells and RAMs.
-        let mut in_chain = std::collections::HashSet::new();
+        let mut in_chain = vec![false; ncells];
         for chain in &packed.chains {
             let chain: Vec<CellId> = chain.iter().copied().filter(|c| nl.cells[*c].alive).collect();
             if chain.len() > 8 * height {
@@ -503,46 +684,52 @@ impl<'a> Annealer<'a> {
                 ));
             }
             for &c in &chain {
-                in_chain.insert(c);
-                sa.cell_unit.insert(c, sa.units.len());
+                in_chain[c.index()] = true;
+                sa.cell_unit[c.index()] = sa.units.len() as u32;
             }
             sa.units.push(Unit::Chain(chain));
         }
         for c in nl.live_cells() {
             match nl.cell_kind(c) {
-                LC if !in_chain.contains(&c) => {
-                    sa.cell_unit.insert(c, sa.units.len());
+                LC if !in_chain[c.index()] => {
+                    sa.cell_unit[c.index()] = sa.units.len() as u32;
                     sa.units.push(Unit::Lc(c));
                 }
                 RAM => {
-                    sa.cell_unit.insert(c, sa.units.len());
+                    sa.cell_unit[c.index()] = sa.units.len() as u32;
                     sa.units.push(Unit::Ram(c));
                 }
                 _ => {}
             }
         }
         // Nets for the wirelength cost, skipping global networks.
+        let mut nets = Vec::new();
+        let mut cell_nets: Vec<Vec<u32>> = vec![Vec::new(); ncells];
         for n in nl.live_nets() {
             let net = &nl.nets[n];
             if is_global(n) {
                 continue;
             }
-            let mut cells: Vec<CellId> =
-                net.driver.iter().chain(&net.users).map(|p| p.cell).collect();
+            let mut cells: Vec<u32> =
+                net.driver.iter().chain(&net.users).map(|p| p.cell.raw()).collect();
             cells.sort();
             cells.dedup();
             if cells.len() < 2 {
                 continue;
             }
-            let id = sa.nets.len() as u32;
+            let id = nets.len() as u32;
             for &c in &cells {
-                sa.cell_nets.entry(c).or_default().push(id);
+                cell_nets[c as usize].push(id);
             }
-            sa.nets.push(cells);
+            nets.push(cells);
         }
+        sa.nets = Adjacency::new(nets);
+        sa.cell_nets = Adjacency::new(cell_nets);
         sa.net_cost = vec![0.0; sa.nets.len()];
+        sa.net_seen = vec![0; sa.nets.len()];
         // Connections for the timing cost (not on globals, not inside carry
         // chains, whose cells move together).
+        let mut cell_conns: Vec<Vec<u32>> = vec![Vec::new(); ncells];
         for n in nl.live_nets() {
             let net = &nl.nets[n];
             let Some(d) = net.driver else { continue };
@@ -560,20 +747,39 @@ impl<'a> Annealer<'a> {
                     sa.conn_of_timing[t] = id;
                 }
                 sa.conns.push(Conn { drv: d.cell, sink: p.cell });
-                sa.cell_conns.entry(d.cell).or_default().push(id);
-                sa.cell_conns.entry(p.cell).or_default().push(id);
+                cell_conns[d.cell.index()].push(id);
+                cell_conns[p.cell.index()].push(id);
             }
         }
+        sa.cell_conns = Adjacency::new(cell_conns);
         sa.conn_weight = vec![0.0; sa.conns.len()];
         sa.conn_cost = vec![0.0; sa.conns.len()];
+        sa.conn_seen = vec![0; sa.conns.len()];
         Ok(sa)
+    }
+
+    /// Places cell `c` at `p`.
+    #[inline]
+    fn set_pos(&mut self, c: CellId, p: (i16, i16, u8)) {
+        self.pos[c.index()] = Some(p);
+        self.xy[c.index()] = (p.0, p.1);
+    }
+
+    #[inline]
+    fn pos_of(&self, c: CellId) -> (i16, i16, u8) {
+        self.pos[c.index()].expect("placed cell")
+    }
+
+    #[inline]
+    fn unit_of(&self, c: CellId) -> usize {
+        self.cell_unit[c.index()] as usize
     }
 
     fn conn_delay(&self, k: usize) -> f64 {
         let c = self.conns[k];
         let (x0, y0) = self.cell_xy(c.drv);
         let (x1, y1) = self.cell_xy(c.sink);
-        est_delay(((x1 - x0).abs() + (y1 - y0).abs()) as i32)
+        self.delays.at((x1 - x0) as i32, (y1 - y0) as i32)
     }
 
     /// Recomputes connection criticalities from the current placement and
@@ -623,11 +829,13 @@ impl<'a> Annealer<'a> {
     fn set_fixed(&mut self, placement: &Placement) {
         for (&c, &bel) in &placement.cell_bel {
             let b = self.arch.bel(bel);
-            self.fixed.insert(c, (b.x as i16, b.y as i16));
+            self.fixed[c.index()] = Some((b.x as i16, b.y as i16));
+            if self.pos[c.index()].is_none() {
+                self.xy[c.index()] = (b.x as i16, b.y as i16);
+            }
             // Logic cells placed beforehand stay where they are.
-            if b.kind == BelKind::Lc
-                && let Some(&u) = self.cell_unit.get(&c)
-            {
+            if b.kind == BelKind::Lc && self.cell_unit[c.index()] != NONE {
+                let u = self.unit_of(c);
                 self.units[u] = Unit::Pinned(c);
                 self.pinned.push((c, (b.x as i16, b.y as i16, b.z)));
             }
@@ -645,40 +853,38 @@ impl<'a> Annealer<'a> {
     /// even cells (`I1`/`I3` of odd cells) take class A, the other inputs
     /// class B (a net reaching several pins of a class needs one track).
     fn tile_ok(&self, x: usize, y: usize) -> bool {
-        let mut ctrl: Option<ControlSet> = None;
-        let mut a: [Option<NetId>; 19] = [None; 19];
-        let mut b: [Option<NetId>; 16] = [None; 16];
+        let mut ctrl = 0;
+        let mut a = [NO_NET; 19];
+        let mut b = [NO_NET; 16];
         let (mut na, mut nb) = (0, 0);
+        let base = self.slot(x, y, 0);
         for z in 0..8 {
-            let Some(c) = self.lc_occ[self.slot(x, y, z)] else { continue };
-            let i = &self.lc_info[&c];
-            if i.dff {
-                let key = (i.clk, i.cen, i.sr, i.neg_clk);
-                match ctrl {
-                    None => {
-                        ctrl = Some(key);
-                        for n in i.fabric_ctrl.iter().flatten() {
-                            if !a[..na].contains(&Some(*n)) {
-                                a[na] = Some(*n);
-                                na += 1;
-                            }
+            let Some(c) = self.lc_occ[base + z] else { continue };
+            let i = &self.lc_info[c.index()];
+            if i.ctrl != 0 {
+                if ctrl == 0 {
+                    ctrl = i.ctrl;
+                    for &n in &i.fabric_ctrl {
+                        if n != NO_NET && !a[..na].contains(&n) {
+                            a[na] = n;
+                            na += 1;
                         }
                     }
-                    Some(k) if k != key => return false,
-                    _ => {}
+                } else if ctrl != i.ctrl {
+                    return false;
                 }
             }
             let (ca, cb) =
                 if z % 2 == 0 { (&i.even_pins, &i.odd_pins) } else { (&i.odd_pins, &i.even_pins) };
-            for n in ca.iter().flatten() {
-                if !a[..na].contains(&Some(*n)) {
-                    a[na] = Some(*n);
+            for &n in ca {
+                if n != NO_NET && !a[..na].contains(&n) {
+                    a[na] = n;
                     na += 1;
                 }
             }
-            for n in cb.iter().flatten() {
-                if !b[..nb].contains(&Some(*n)) {
-                    b[nb] = Some(*n);
+            for &n in cb {
+                if n != NO_NET && !b[..nb].contains(&n) {
+                    b[nb] = n;
                     nb += 1;
                 }
             }
@@ -687,32 +893,47 @@ impl<'a> Annealer<'a> {
         na <= half && nb <= half
     }
 
+    #[inline]
     fn cell_xy(&self, c: CellId) -> (i16, i16) {
-        if let Some(&(x, y, _)) = self.pos.get(&c) {
-            (x, y)
-        } else {
-            self.fixed.get(&c).copied().unwrap_or((0, 0))
-        }
+        self.xy[c.index()]
     }
 
-    fn compute_net_cost(&self, n: usize) -> f64 {
-        let cells = &self.nets[n];
-        let (mut x0, mut y0, mut x1, mut y1) = (i16::MAX, i16::MAX, i16::MIN, i16::MIN);
-        for &c in cells {
-            let (x, y) = self.cell_xy(c);
-            x0 = x0.min(x);
-            x1 = x1.max(x);
-            y0 = y0.min(y);
-            y1 = y1.max(y);
+    /// The bounding box of net `n` where its cells are now.
+    fn scan_bb(&self, n: usize) -> BBox {
+        BBox::of(self.nets.of(n).iter().map(|&c| self.xy[c as usize])).expect("nets have cells")
+    }
+
+    fn bb_cost(&self, n: usize, bb: &BBox) -> f64 {
+        net_weight(self.nets.of(n).len()) * bb.half_perimeter()
+    }
+
+    /// Bounding boxes and costs of every net from scratch.
+    fn reset_costs(&mut self) {
+        self.net_bb = (0..self.nets.len()).map(|n| self.scan_bb(n)).collect();
+        self.net_cost = (0..self.nets.len()).map(|n| self.bb_cost(n, &self.net_bb[n])).collect();
+    }
+
+    /// The bounding box of net `n` after the move being tried: updated for
+    /// each moved cell of a large net, or scanned.
+    fn moved_bb(&self, n: usize) -> BBox {
+        let cells = self.nets.of(n);
+        if cells.len() <= SCANNED_NET {
+            return self.scan_bb(n);
         }
-        net_weight(cells.len()) * ((x1 - x0) as f64 + (y1 - y0) as f64)
+        let mut bb = self.net_bb[n];
+        for &(c, from) in &self.moved {
+            if cells.binary_search(&c.raw()).is_ok() && !bb.shift(from, self.xy[c.index()]) {
+                return self.scan_bb(n);
+            }
+        }
+        bb
     }
 
     fn initial_placement(&mut self) -> Result<(), String> {
         for (c, (x, y, z)) in self.pinned.clone() {
             let s = self.slot(x as usize, y as usize, z as usize);
             self.lc_occ[s] = Some(c);
-            self.pos.insert(c, (x, y, z));
+            self.set_pos(c, (x, y, z));
         }
         // Chains: fill columns bottom-up.
         let mut col_fill: Vec<usize> = vec![1; self.width + 2]; // next free tile row per column
@@ -734,7 +955,7 @@ impl<'a> Annealer<'a> {
                         let (y, z) = (y0 + i / 8, i % 8);
                         let s = self.slot(x, y, z);
                         self.lc_occ[s] = Some(c);
-                        self.pos.insert(c, (x as i16, y as i16, z as u8));
+                        self.set_pos(c, (x as i16, y as i16, z as u8));
                     }
                     col_fill[x] += tiles;
                     ci += 1;
@@ -754,9 +975,8 @@ impl<'a> Annealer<'a> {
             self.logic_cols.iter().flat_map(|&x| (1..=self.height).map(move |y| (x, y))).collect();
         self.rng.shuffle(&mut tiles);
         let key = |c: CellId, sa: &Self| {
-            let i = &sa.lc_info[&c];
-            let n = |n: Option<NetId>| n.map_or(0, |n| n.index() + 1);
-            (!i.dff, n(i.clk), n(i.cen), n(i.sr), i.neg_clk)
+            let ctrl = sa.lc_info[c.index()].ctrl;
+            (ctrl == 0, ctrl)
         };
         let mut singles: Vec<CellId> = units
             .iter()
@@ -775,7 +995,7 @@ impl<'a> Annealer<'a> {
                     }
                     self.lc_occ[s] = Some(c);
                     if self.tile_ok(x, y) {
-                        self.pos.insert(c, (x as i16, y as i16, z as u8));
+                        self.set_pos(c, (x as i16, y as i16, z as u8));
                         placed = true;
                         ti = (ti + attempt) % tiles.len();
                         break 'tiles;
@@ -795,14 +1015,12 @@ impl<'a> Annealer<'a> {
                     .position(|o| o.is_none())
                     .ok_or("design needs more block RAMs than available")?;
                 self.ram_occ[slot] = Some(*c);
-                self.cell_ram_slot.insert(*c, slot);
+                self.cell_ram_slot[c.index()] = slot as u32;
                 let b = self.arch.bel(self.ram_bels[slot]);
-                self.pos.insert(*c, (b.x as i16, b.y as i16, 0));
+                self.set_pos(*c, (b.x as i16, b.y as i16, 0));
             }
         }
-        for n in 0..self.nets.len() {
-            self.net_cost[n] = self.compute_net_cost(n);
-        }
+        self.reset_costs();
         Ok(())
     }
 
@@ -822,8 +1040,8 @@ impl<'a> Annealer<'a> {
             }
             let b = self.arch.bel(bels[0]);
             self.ram_occ[slot] = Some(*c);
-            self.cell_ram_slot.insert(*c, slot);
-            self.pos.insert(*c, (b.x as i16, b.y as i16, b.z));
+            self.cell_ram_slot[c.index()] = slot as u32;
+            self.set_pos(*c, (b.x as i16, b.y as i16, b.z));
             return true;
         }
         let first = self.arch.bel(bels[0]);
@@ -857,7 +1075,7 @@ impl<'a> Annealer<'a> {
         }
         for (&c, &bel) in unit.cells().iter().zip(bels) {
             let b = self.arch.bel(bel);
-            self.pos.insert(c, (b.x as i16, b.y as i16, b.z));
+            self.set_pos(c, (b.x as i16, b.y as i16, b.z));
         }
         true
     }
@@ -866,7 +1084,7 @@ impl<'a> Annealer<'a> {
         for (c, (x, y, z)) in self.pinned.clone() {
             let s = self.slot(x as usize, y as usize, z as usize);
             self.lc_occ[s] = Some(c);
-            self.pos.insert(c, (x, y, z));
+            self.set_pos(c, (x, y, z));
         }
         let units = self.units.clone();
         let mut reused = 0;
@@ -881,7 +1099,7 @@ impl<'a> Annealer<'a> {
         }
         let mut placed_anew = Vec::new();
         for (u, unit) in units.iter().enumerate() {
-            if unit.cells().iter().all(|c| self.pos.contains_key(c)) {
+            if unit.cells().iter().all(|c| self.pos[c.index()].is_some()) {
                 continue;
             }
             placed_anew.push(u);
@@ -890,10 +1108,11 @@ impl<'a> Annealer<'a> {
             // placement if the remaining sites cannot accommodate the edit.
             let mut neighbors = Vec::new();
             for c in unit.cells() {
-                for &n in self.cell_nets.get(c).into_iter().flatten() {
-                    for other in &self.nets[n as usize] {
-                        if self.pos.contains_key(other) || self.fixed.contains_key(other) {
-                            neighbors.push(self.cell_xy(*other));
+                for &n in self.cell_nets.of(c.index()) {
+                    for &other in self.nets.of(n as usize) {
+                        let o = other as usize;
+                        if self.pos[o].is_some() || self.fixed[o].is_some() {
+                            neighbors.push(self.xy[o]);
                         }
                     }
                 }
@@ -955,39 +1174,40 @@ impl<'a> Annealer<'a> {
         self.net_cost.iter().sum()
     }
 
-    /// Recomputes costs of the nets (and connections) touching `cells`;
-    /// returns the normalised cost delta. New costs are applied with
-    /// [`Annealer::commit`] if the move is accepted.
-    fn delta(&mut self, cells: &[CellId], scratch: &mut Vec<(u32, f64)>) -> f64 {
+    /// Recomputes costs of the nets (and connections) touching the cells of
+    /// `self.moved`; returns the normalised cost delta. New costs are
+    /// applied with [`Annealer::commit`] if the move is accepted.
+    fn delta(&mut self) -> f64 {
+        let stamp = self.next_stamp();
+        let mut scratch = std::mem::take(&mut self.net_scratch);
         scratch.clear();
         let mut d = 0.0;
-        for &c in cells {
-            if let Some(nets) = self.cell_nets.get(&c) {
-                for &n in nets {
-                    if scratch.iter().any(|(m, _)| *m == n) {
-                        continue;
-                    }
-                    let new = self.compute_net_cost(n as usize);
-                    d += new - self.net_cost[n as usize];
-                    scratch.push((n, new));
+        for &(c, _) in &self.moved {
+            for &n in self.cell_nets.of(c.index()) {
+                if std::mem::replace(&mut self.net_seen[n as usize], stamp) == stamp {
+                    continue;
                 }
+                let bb = self.moved_bb(n as usize);
+                d += self.bb_cost(n as usize, &bb) - self.net_cost[n as usize];
+                scratch.push((n, bb));
             }
         }
+        self.net_scratch = scratch;
         let l = self.opts.timing_weight;
         let mut dt = 0.0;
         let mut cs = std::mem::take(&mut self.conn_scratch);
         cs.clear();
         if l > 0.0 {
-            for &c in cells {
-                if let Some(conns) = self.cell_conns.get(&c) {
-                    for &k in conns {
-                        if self.conn_weight[k as usize] == 0.0 || cs.iter().any(|(m, _)| *m == k) {
-                            continue;
-                        }
-                        let new = self.conn_weight[k as usize] * self.conn_delay(k as usize);
-                        dt += new - self.conn_cost[k as usize];
-                        cs.push((k, new));
+            for &(c, _) in &self.moved {
+                for &k in self.cell_conns.of(c.index()) {
+                    if self.conn_weight[k as usize] == 0.0
+                        || std::mem::replace(&mut self.conn_seen[k as usize], stamp) == stamp
+                    {
+                        continue;
                     }
+                    let new = self.conn_weight[k as usize] * self.conn_delay(k as usize);
+                    dt += new - self.conn_cost[k as usize];
+                    cs.push((k, new));
                 }
             }
         }
@@ -995,16 +1215,29 @@ impl<'a> Annealer<'a> {
         (1.0 - l) * d / self.bb_norm + l * dt / self.t_norm
     }
 
-    fn commit(&mut self, scratch: &[(u32, f64)]) {
-        for &(n, cost) in scratch {
-            self.net_cost[n as usize] = cost;
+    /// A fresh mark for [`Annealer::net_seen`] and the like.
+    fn next_stamp(&mut self) -> u32 {
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            self.net_seen.fill(0);
+            self.conn_seen.fill(0);
+            self.cell_seen.fill(0);
+            self.stamp = 1;
+        }
+        self.stamp
+    }
+
+    fn commit(&mut self) {
+        for i in 0..self.net_scratch.len() {
+            let (n, bb) = self.net_scratch[i];
+            self.net_cost[n as usize] = self.bb_cost(n as usize, &bb);
+            self.net_bb[n as usize] = bb;
         }
         for &(k, cost) in &self.conn_scratch {
             self.conn_cost[k as usize] = cost;
         }
     }
 
-    /// Tries one move; returns whether it was accepted.
     /// Half of the time: a random point in the median region of the
     /// bounding boxes of `cells`' nets without them (VPR's median move),
     /// where moving the cells most shortens their nets.
@@ -1012,53 +1245,85 @@ impl<'a> Annealer<'a> {
         if self.rng.below(2) == 0 {
             return None;
         }
-        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        let (mut xs, mut ys) = (std::mem::take(&mut self.xs), std::mem::take(&mut self.ys));
+        xs.clear();
+        ys.clear();
+        let stamp = self.next_stamp();
         for c in cells {
-            for &n in self.cell_nets.get(c).into_iter().flatten() {
-                let net = &self.nets[n as usize];
+            self.cell_seen[c.index()] = stamp;
+        }
+        for c in cells {
+            for &n in self.cell_nets.of(c.index()) {
+                let net = self.nets.of(n as usize);
                 if net.len() > 64 {
                     continue;
                 }
-                let mut bb: Option<(i16, i16, i16, i16)> = None;
-                for &o in net {
-                    if cells.contains(&o) {
-                        continue;
-                    }
-                    let (ox, oy) = self.cell_xy(o);
-                    bb = Some(match bb {
-                        None => (ox, ox, oy, oy),
-                        Some((x0, x1, y0, y1)) => (x0.min(ox), x1.max(ox), y0.min(oy), y1.max(oy)),
-                    });
-                }
-                if let Some((x0, x1, y0, y1)) = bb {
-                    xs.extend([x0, x1]);
-                    ys.extend([y0, y1]);
+                // The net's box without a single cell is its box, unless
+                // the cell alone is on a side of it.
+                let bb = self.net_bb[n as usize];
+                let alone = |&c: &CellId| {
+                    let (x, y) = self.xy[c.index()];
+                    (x == bb.x0 && bb.on_x0 == 1)
+                        || (x == bb.x1 && bb.on_x1 == 1)
+                        || (y == bb.y0 && bb.on_y0 == 1)
+                        || (y == bb.y1 && bb.on_y1 == 1)
+                };
+                let bb = if let [c] = cells
+                    && !alone(c)
+                {
+                    Some(bb)
+                } else {
+                    let others = net.iter().filter(|&&o| self.cell_seen[o as usize] != stamp);
+                    BBox::of(others.map(|&o| self.xy[o as usize]))
+                };
+                if let Some(bb) = bb {
+                    xs.extend([bb.x0, bb.x1]);
+                    ys.extend([bb.y0, bb.y1]);
                 }
             }
         }
-        if xs.is_empty() {
-            return None;
-        }
-        xs.sort_unstable();
-        ys.sort_unstable();
-        let m = xs.len() / 2;
-        let pick = |rng: &mut Rng, v: &[i16], hi: usize| {
-            rng.range_inclusive(v[m - 1] as i64, v[m] as i64).clamp(1, hi as i64) as usize
-        };
-        Some((pick(&mut self.rng, &xs, self.width), pick(&mut self.rng, &ys, self.height)))
+        let target = (!xs.is_empty()).then(|| {
+            xs.sort_unstable();
+            ys.sort_unstable();
+            let m = xs.len() / 2;
+            let pick = |rng: &mut Rng, v: &[i16], hi: usize| {
+                rng.range_inclusive(v[m - 1] as i64, v[m] as i64).clamp(1, hi as i64) as usize
+            };
+            (pick(&mut self.rng, &xs, self.width), pick(&mut self.rng, &ys, self.height))
+        });
+        (self.xs, self.ys) = (xs, ys);
+        target
     }
 
-    fn try_move(&mut self, temp: f64, rlim: f64, scratch: &mut Vec<(u32, f64)>) -> Option<bool> {
+    /// The annealing rule's decision on the move being tried.
+    fn decide(&mut self, temp: f64) -> Decision {
+        let d = self.delta();
+        if d == 0.0 {
+            Decision::Free
+        } else if d < 0.0 || self.rng.unit() < (-d / temp).exp() {
+            Decision::Accepted
+        } else {
+            Decision::Rejected
+        }
+    }
+
+    /// Tries one move; returns whether it was accepted, or `None` for a
+    /// move the schedule does not count: illegal, or changing no cost. The
+    /// acceptance rate tells how hot the annealing is; illegal moves (most
+    /// at first, to tiles of another control set) would hold it near half
+    /// from the first temperature on, and moves within a tile, which cost
+    /// nothing, would keep it there to the end.
+    fn try_move(&mut self, temp: f64, rlim: f64) -> Option<bool> {
         let u = if self.movable.is_empty() {
             self.rng.below(self.units.len())
         } else {
             self.movable[self.rng.below(self.movable.len())]
         };
         let r = rlim.max(1.0) as i64;
-        match self.units[u].clone() {
+        match self.units[u] {
             Unit::Pinned(_) => None,
             Unit::Lc(c) => {
-                let (x, y, z) = self.pos[&c];
+                let (x, y, z) = self.pos_of(c);
                 let (nx, ny) = match self.median_target(&[c]) {
                     Some(t) => t,
                     None => (
@@ -1084,92 +1349,49 @@ impl<'a> Annealer<'a> {
                 let s_new = self.slot(nx, ny, nz);
                 let other = self.lc_occ[s_new];
                 if let Some(o) = other
-                    && !matches!(self.units[self.cell_unit[&o]], Unit::Lc(_))
+                    && !matches!(self.units[self.unit_of(o)], Unit::Lc(_))
                 {
                     return None;
                 }
                 // Apply.
                 self.lc_occ[s_new] = Some(c);
                 self.lc_occ[s_old] = other;
-                self.pos.insert(c, (nx as i16, ny as i16, nz as u8));
+                self.set_pos(c, (nx as i16, ny as i16, nz as u8));
                 if let Some(o) = other {
-                    self.pos.insert(o, (ox as i16, oy as i16, oz as u8));
+                    self.set_pos(o, (ox as i16, oy as i16, oz as u8));
                 }
                 let legal = self.tile_ok(nx, ny) && ((ox, oy) == (nx, ny) || self.tile_ok(ox, oy));
-                let moved: Vec<CellId> = std::iter::once(c).chain(other).collect();
-                let accept = legal && {
-                    let d = self.delta(&moved, scratch);
-                    d <= 0.0 || self.rng.unit() < (-d / temp).exp()
-                };
+                self.moved.clear();
+                self.moved.push((c, (x, y)));
+                self.moved.extend(other.map(|o| (o, (nx as i16, ny as i16))));
+                let decision = legal.then(|| self.decide(temp));
+                let accept = decision.is_some_and(|d| d != Decision::Rejected);
                 if accept {
-                    self.commit(scratch);
+                    self.commit();
                 } else {
                     self.lc_occ[s_old] = Some(c);
                     self.lc_occ[s_new] = other;
-                    self.pos.insert(c, (x, y, z));
+                    self.set_pos(c, (x, y, z));
                     if let Some(o) = other {
-                        self.pos.insert(o, (nx as i16, ny as i16, nz as u8));
+                        self.set_pos(o, (nx as i16, ny as i16, nz as u8));
                     }
                 }
-                Some(accept)
+                decision.and_then(Decision::counted)
             }
-            Unit::Chain(cells) => {
-                let (x, y, _) = self.pos[&cells[0]];
-                let tiles = cells.len().div_ceil(8);
-                let max_y0 = self.height + 1 - tiles;
-                let (nx, ny) = match self.median_target(&cells) {
-                    // The nearest logic column; the chain centred on the target.
-                    Some((tx, ty)) => {
-                        let &col = self
-                            .logic_cols
-                            .iter()
-                            .min_by_key(|&&c| (c as i64 - tx as i64).abs())
-                            .unwrap();
-                        (col, (ty as i64 - tiles as i64 / 2).clamp(1, max_y0 as i64) as usize)
-                    }
-                    None => {
-                        let col = self.rng.below(self.logic_cols.len());
-                        let nx = self.logic_cols[col];
-                        if (nx as i64 - x as i64).abs() > r {
-                            return None;
-                        }
-                        let ny = self.rng.range_inclusive(
-                            (y as i64 - r).max(1),
-                            (y as i64 + r).min(max_y0 as i64),
-                        ) as usize;
-                        (nx, ny)
-                    }
+            Unit::Chain(_) => {
+                let Unit::Chain(cells) = std::mem::replace(&mut self.units[u], Unit::Chain(vec![]))
+                else {
+                    unreachable!()
                 };
-                if (nx, ny) == (x as usize, y as usize) {
-                    return None;
-                }
-                // A chain in the way swaps places with this one.
-                let mut others: Vec<usize> = (0..cells.len())
-                    .filter_map(|i| self.lc_occ[self.slot(nx, ny + i / 8, i % 8)])
-                    .map(|o| self.cell_unit[&o])
-                    .filter(|&v| v != u && matches!(self.units[v], Unit::Chain(_)))
-                    .collect();
-                others.sort_unstable();
-                others.dedup();
-                let mut moves = vec![(cells, nx, ny)];
-                match others[..] {
-                    [] => {}
-                    [v] => {
-                        let Unit::Chain(other) = self.units[v].clone() else { unreachable!() };
-                        if y as usize + other.len().div_ceil(8) > self.height + 1 {
-                            return None;
-                        }
-                        moves.push((other, x as usize, y as usize));
-                    }
-                    _ => return None,
-                }
-                self.move_chains(&moves, temp, scratch)
+                let result = self.try_chain_move(u, &cells, r, temp);
+                self.units[u] = Unit::Chain(cells);
+                result
             }
             Unit::Ram(c) => {
                 if self.ram_bels.len() < 2 {
                     return None;
                 }
-                let s_old = self.cell_ram_slot[&c];
+                let s_old = self.cell_ram_slot[c.index()] as usize;
                 let s_new = self.rng.below(self.ram_bels.len());
                 if s_new == s_old {
                     return None;
@@ -1177,20 +1399,26 @@ impl<'a> Annealer<'a> {
                 let other = self.ram_occ[s_new];
                 let place = |sa: &mut Self, cell: CellId, slot: usize| {
                     sa.ram_occ[slot] = Some(cell);
-                    sa.cell_ram_slot.insert(cell, slot);
+                    sa.cell_ram_slot[cell.index()] = slot as u32;
                     let b = sa.arch.bel(sa.ram_bels[slot]);
-                    sa.pos.insert(cell, (b.x as i16, b.y as i16, 0));
+                    sa.set_pos(cell, (b.x as i16, b.y as i16, 0));
                 };
+                let at = |sa: &Self, slot: usize| {
+                    let b = sa.arch.bel(sa.ram_bels[slot]);
+                    (b.x as i16, b.y as i16)
+                };
+                self.moved.clear();
+                self.moved.push((c, at(self, s_old)));
+                self.moved.extend(other.map(|o| (o, at(self, s_new))));
                 place(self, c, s_new);
                 self.ram_occ[s_old] = None;
                 if let Some(o) = other {
                     place(self, o, s_old);
                 }
-                let moved: Vec<CellId> = std::iter::once(c).chain(other).collect();
-                let d = self.delta(&moved, scratch);
-                let accept = d <= 0.0 || self.rng.unit() < (-d / temp).exp();
+                let decision = self.decide(temp);
+                let accept = decision != Decision::Rejected;
                 if accept {
-                    self.commit(scratch);
+                    self.commit();
                 } else {
                     place(self, c, s_old);
                     self.ram_occ[s_new] = None;
@@ -1198,8 +1426,59 @@ impl<'a> Annealer<'a> {
                         place(self, o, s_new);
                     }
                 }
-                Some(accept)
+                decision.counted()
             }
+        }
+    }
+
+    /// Tries moving the carry chain of unit `u` (its `cells`, taken out of
+    /// `units` meanwhile), swapping it with a chain in the way.
+    fn try_chain_move(&mut self, u: usize, cells: &[CellId], r: i64, temp: f64) -> Option<bool> {
+        let (x, y, _) = self.pos_of(cells[0]);
+        let tiles = cells.len().div_ceil(8);
+        let max_y0 = self.height + 1 - tiles;
+        let (nx, ny) = match self.median_target(cells) {
+            // The nearest logic column; the chain centred on the target.
+            Some((tx, ty)) => {
+                let &col =
+                    self.logic_cols.iter().min_by_key(|&&c| (c as i64 - tx as i64).abs()).unwrap();
+                (col, (ty as i64 - tiles as i64 / 2).clamp(1, max_y0 as i64) as usize)
+            }
+            None => {
+                let col = self.rng.below(self.logic_cols.len());
+                let nx = self.logic_cols[col];
+                if (nx as i64 - x as i64).abs() > r {
+                    return None;
+                }
+                let ny = self
+                    .rng
+                    .range_inclusive((y as i64 - r).max(1), (y as i64 + r).min(max_y0 as i64))
+                    as usize;
+                (nx, ny)
+            }
+        };
+        if (nx, ny) == (x as usize, y as usize) {
+            return None;
+        }
+        // A chain in the way swaps places with this one.
+        let mut others: Vec<usize> = (0..cells.len())
+            .filter_map(|i| self.lc_occ[self.slot(nx, ny + i / 8, i % 8)])
+            .map(|o| self.unit_of(o))
+            .filter(|&v| v != u && matches!(self.units[v], Unit::Chain(_)))
+            .collect();
+        others.sort_unstable();
+        others.dedup();
+        match others[..] {
+            [] => self.move_chains(&[(cells, nx, ny)], temp),
+            [v] => {
+                let Unit::Chain(other) = &self.units[v] else { unreachable!() };
+                if y as usize + other.len().div_ceil(8) > self.height + 1 {
+                    return None;
+                }
+                let other = other.clone();
+                self.move_chains(&[(cells, nx, ny), (&other, x as usize, y as usize)], temp)
+            }
+            _ => None,
         }
     }
 
@@ -1207,12 +1486,7 @@ impl<'a> Annealer<'a> {
     /// accepted or rejected by the annealing rule. Their target slots must
     /// be free, belong to a moving chain or hold single logic cells, which
     /// move to the slots the chains leave.
-    fn move_chains(
-        &mut self,
-        moves: &[(Vec<CellId>, usize, usize)],
-        temp: f64,
-        scratch: &mut Vec<(u32, f64)>,
-    ) -> Option<bool> {
+    fn move_chains(&mut self, moves: &[(&[CellId], usize, usize)], temp: f64) -> Option<bool> {
         let moving: Vec<CellId> = moves.iter().flat_map(|m| m.0.iter().copied()).collect();
         let mut target: Vec<usize> = Vec::with_capacity(moving.len());
         for (cells, nx, ny) in moves {
@@ -1228,13 +1502,13 @@ impl<'a> Annealer<'a> {
             if let Some(o) = self.lc_occ[s]
                 && !moving.contains(&o)
             {
-                if !matches!(self.units[self.cell_unit[&o]], Unit::Lc(_)) {
+                if !matches!(self.units[self.unit_of(o)], Unit::Lc(_)) {
                     return None;
                 }
-                displaced.push((o, self.pos[&o]));
+                displaced.push((o, self.pos_of(o)));
             }
         }
-        let old: Vec<(i16, i16, u8)> = moving.iter().map(|c| self.pos[c]).collect();
+        let old: Vec<(i16, i16, u8)> = moving.iter().map(|&c| self.pos_of(c)).collect();
         let slot_of =
             |sa: &Self, p: (i16, i16, u8)| sa.slot(p.0 as usize, p.1 as usize, p.2 as usize);
         let at = |s: usize, sa: &Self| {
@@ -1255,7 +1529,7 @@ impl<'a> Annealer<'a> {
         }
         for (i, &c) in moving.iter().enumerate() {
             self.lc_occ[target[i]] = Some(c);
-            self.pos.insert(c, at(target[i], self));
+            self.set_pos(c, at(target[i], self));
         }
         // Displaced cells fill the chains' old slots that are free now.
         let vacated: Vec<(i16, i16, u8)> =
@@ -1264,7 +1538,7 @@ impl<'a> Annealer<'a> {
             let p = vacated[k];
             let s = slot_of(self, p);
             self.lc_occ[s] = Some(o);
-            self.pos.insert(o, p);
+            self.set_pos(o, p);
         }
         let mut touched: Vec<(usize, usize)> = target
             .iter()
@@ -1275,14 +1549,13 @@ impl<'a> Annealer<'a> {
         touched.sort_unstable();
         touched.dedup();
         let legal = touched.iter().all(|&(tx, ty)| self.tile_ok(tx, ty));
-        let moved: Vec<CellId> =
-            moving.iter().copied().chain(displaced.iter().map(|d| d.0)).collect();
-        let accept = legal && {
-            let d = self.delta(&moved, scratch);
-            d <= 0.0 || self.rng.unit() < (-d / temp).exp()
-        };
+        self.moved.clear();
+        self.moved.extend(moving.iter().zip(&old).map(|(&c, p)| (c, (p.0, p.1))));
+        self.moved.extend(displaced.iter().map(|&(o, p)| (o, (p.0, p.1))));
+        let decision = legal.then(|| self.decide(temp));
+        let accept = decision.is_some_and(|d| d != Decision::Rejected);
         if accept {
-            self.commit(scratch);
+            self.commit();
         } else {
             for p in vacated.iter().take(displaced.len()) {
                 let s = slot_of(self, *p);
@@ -1294,15 +1567,15 @@ impl<'a> Annealer<'a> {
             for (i, &c) in moving.iter().enumerate() {
                 let s = slot_of(self, old[i]);
                 self.lc_occ[s] = Some(c);
-                self.pos.insert(c, old[i]);
+                self.set_pos(c, old[i]);
             }
             for &(o, p) in &displaced {
                 let s = slot_of(self, p);
                 self.lc_occ[s] = Some(o);
-                self.pos.insert(o, p);
+                self.set_pos(o, p);
             }
         }
-        Some(accept)
+        decision.and_then(Decision::counted)
     }
 
     fn anneal(&mut self, log: &mut Vec<String>) {
@@ -1318,7 +1591,6 @@ impl<'a> Annealer<'a> {
         }
         let n = if self.movable.is_empty() { self.units.len() } else { self.movable.len() } as f64;
         let moves_per_temp = ((self.opts.effort * n.powf(4.0 / 3.0)) as usize).max(100);
-        let mut scratch = Vec::new();
         let nets = self.nets.len() as f64;
         let start = self.total_cost();
         self.bb_norm = start.max(1.0);
@@ -1334,7 +1606,7 @@ impl<'a> Annealer<'a> {
                 let mut deltas = Vec::new();
                 for _ in 0..self.units.len().min(500) {
                     let before = self.norm_cost();
-                    if self.try_move(f64::INFINITY, rlim, &mut scratch) == Some(true) {
+                    if self.try_move(f64::INFINITY, rlim) == Some(true) {
                         deltas.push(self.norm_cost() - before);
                     }
                 }
@@ -1357,7 +1629,7 @@ impl<'a> Annealer<'a> {
             }
             let (mut tried, mut accepted) = (0usize, 0usize);
             for _ in 0..moves_per_temp {
-                if let Some(a) = self.try_move(temp, rlim, &mut scratch) {
+                if let Some(a) = self.try_move(temp, rlim) {
                     tried += 1;
                     accepted += a as usize;
                 }
@@ -1385,12 +1657,10 @@ impl<'a> Annealer<'a> {
         }
         // Final greedy pass at zero temperature.
         for _ in 0..moves_per_temp * 2 {
-            self.try_move(1e-9, 3.0, &mut scratch);
+            self.try_move(1e-9, 3.0);
         }
         // Re-sum to avoid accumulated rounding.
-        for i in 0..self.nets.len() {
-            self.net_cost[i] = self.compute_net_cost(i);
-        }
+        self.reset_costs();
         log.push(format!(
             "placement: {} units, {} nets, wirelength {:.0} -> {:.0} in {} temperature steps",
             self.units.len(),
@@ -1402,8 +1672,10 @@ impl<'a> Annealer<'a> {
     }
 
     fn finish(&self, placement: &mut Placement) {
-        for (&c, &(x, y, z)) in &self.pos {
-            let kind = if matches!(self.units[self.cell_unit[&c]], Unit::Ram(_)) {
+        for (i, p) in self.pos.iter().enumerate() {
+            let Some((x, y, z)) = *p else { continue };
+            let c = CellId::new(i);
+            let kind = if matches!(self.units[self.unit_of(c)], Unit::Ram(_)) {
                 BelKind::Ram
             } else {
                 BelKind::Lc
@@ -1458,7 +1730,7 @@ pub(crate) fn place_incremental(
     let mut sa = Annealer::new(arch, nl, packed, opts)?;
     sa.set_fixed(placement);
     let reused = sa.repair_placement(previous)?;
-    let total = sa.pos.len();
+    let total = sa.pos.iter().filter(|p| p.is_some()).count();
     log.push(format!("incremental placement: reused {reused}/{total} logic/RAM cells"));
     // Repairing a mostly new design costs more than placing it afresh, and
     // places it worse.
@@ -1468,9 +1740,7 @@ pub(crate) fn place_incremental(
             100.0 * reused as f64 / total.max(1) as f64
         ));
     }
-    for n in 0..sa.nets.len() {
-        sa.net_cost[n] = sa.compute_net_cost(n);
-    }
+    sa.reset_costs();
     // A small edit refines only the units placed anew; a wider one, whose
     // new units need room the kept ones hold, refines everything (colder).
     if !sa.movable.is_empty() {

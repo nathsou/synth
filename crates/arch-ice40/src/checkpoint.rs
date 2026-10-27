@@ -51,7 +51,7 @@ fn context(opts: &FlowOptions) -> String {
     let mut clocks: Vec<_> = opts.clocks.nets.iter().collect();
     clocks.sort_by(|a, b| a.0.cmp(&b.0));
     format!(
-        "{} {} {} {} {} {} {:?} {:?} {}",
+        "{} {} {} {} {} {} {:?} {:?} {} {}",
         env!("CARGO_PKG_VERSION"),
         opts.part,
         opts.package,
@@ -60,7 +60,8 @@ fn context(opts: &FlowOptions) -> String {
         opts.timing_weight,
         opts.clocks.default_mhz,
         clocks,
-        opts.route_timing_rounds
+        opts.route_timing_rounds,
+        opts.tries
     )
 }
 
@@ -268,6 +269,7 @@ mod tests {
             timing_weight: 0.5,
             clocks: Default::default(),
             route_timing_rounds: 0,
+            tries: 1,
         }
     }
 
