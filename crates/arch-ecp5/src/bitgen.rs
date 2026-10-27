@@ -8,7 +8,7 @@ use synth_core::{FxHashMap, FxHashSet};
 use synth_netlist::{CellId, INOUT_PORT, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
+use crate::cells::{CCU2C, DP16KD, EHXPLLL, FF, LUT4, MULT18X18D};
 use crate::config::{ChipConfig, TileConfig, TileGroup};
 use crate::graph::NO_TILE;
 use crate::lpf::Constraints;
@@ -485,7 +485,7 @@ pub fn config(
     let mut cells: Vec<(&CellId, &crate::place::Site)> = placement
         .sites
         .iter()
-        .filter(|(c, _)| !matches!(nl.cell_kind(**c), DP16KD | MULT18X18D))
+        .filter(|(c, _)| !matches!(nl.cell_kind(**c), DP16KD | MULT18X18D | EHXPLLL))
         .collect();
     cells.sort_by_key(|(c, _)| **c);
     for (&c, s) in cells {
@@ -619,9 +619,23 @@ pub fn config(
     for (&c, s) in mults {
         cc.groups.push(mult18_config(arch, nl, c, s, &mut ties)?);
     }
+    // PLLs. The reference clock's selector follows the input its route
+    // takes (`CLK0` or `CLK1`), as nextpnr sets it.
+    let mut plls: Vec<(&CellId, &crate::place::Site)> =
+        placement.sites.iter().filter(|(c, _)| nl.cell_kind(**c) == EHXPLLL).collect();
+    plls.sort_by_key(|(c, _)| **c);
+    for (&c, s) in plls {
+        cc.groups.push(crate::pll::config(arch, nl, c, (s.x, s.y), &mut ties)?);
+        let clk1 = g.node(s.x, s.y, "CLK1_PLLREFCS");
+        let second = nl
+            .pin_net(c, "CLKI")
+            .and_then(|n| nodes_of.get(&n))
+            .is_some_and(|nodes| clk1.is_some_and(|w| nodes.contains(&w)));
+        ties.push((arch.node(s.x, s.y, "JSEL_PLLREFCS")?, second));
+    }
     // Output enables tied low (driving) where no route drives them, and
-    // block RAM and multiplier inputs nothing drives: the CIB input feeding
-    // each, tied.
+    // block RAM, multiplier and PLL inputs nothing drives: the CIB input
+    // feeding each, tied.
     for (cib, value) in cib_ties(arch, &ties)? {
         let (x, y) = (g.node_x[cib as usize] as usize, g.node_y[cib as usize] as usize);
         let tile = arch

@@ -13,7 +13,7 @@
 use synth_core::FxHashMap;
 use synth_netlist::{CellId, Const, NetId, Netlist, Param};
 
-use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
+use crate::cells::{CCU2C, DP16KD, EHXPLLL, FF, LUT4, MULT18X18D};
 
 /// A logic cell's contents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,8 +88,10 @@ pub fn lut_init(nl: &Netlist, c: CellId, param: &str) -> u16 {
 /// block RAM's address or data input, a multiplier's operand, high where
 /// its `<pin>MUX` parameter is `1`) or reads its default when unconnected
 /// (a block RAM's clock enables high, its clocks, write enables, resets and
-/// chip selects low); and any other constant reader gets a LUT driving the
-/// constant. Returns the LUTs added.
+/// chip selects low); a PLL's control inputs take their constants from
+/// ties too (its standby input, which ties only high, stays low); and any
+/// other constant reader gets a LUT driving the constant. Returns the LUTs
+/// added.
 pub fn legalize_constants(nl: &mut Netlist) -> Result<usize, String> {
     let constant = |nl: &Netlist, n: NetId| nl.nets[n].constant.map(|k| k == Const::One);
     let luts: Vec<CellId> = nl.live_cells().filter(|&c| nl.cell_kind(c) == LUT4).collect();
@@ -127,9 +129,36 @@ pub fn legalize_constants(nl: &mut Netlist) -> Result<usize, String> {
             );
         }
     }
-    let blocks: Vec<CellId> =
-        nl.live_cells().filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D)).collect();
+    let blocks: Vec<CellId> = nl
+        .live_cells()
+        .filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D | EHXPLLL))
+        .collect();
     for c in blocks {
+        if nl.cell_kind(c) == EHXPLLL {
+            if nl.pin_net(c, "STDBY").is_none() {
+                let zero = nl.add_const_net(Const::Zero);
+                match nl.cells[c].pins.iter().position(|p| nl.str(p.name) == "STDBY") {
+                    Some(i) => nl
+                        .connect(synth_netlist::PinRef { cell: c, pin: i as u32 }, zero)
+                        .map_err(|e| e.0)?,
+                    None => {
+                        nl.add_pin(c, "STDBY", synth_netlist::Dir::Input, Some(zero))
+                            .map_err(|e| e.0)?;
+                    }
+                }
+            }
+            for i in 0..nl.cells[c].pins.len() as u32 {
+                let Some(v) = nl.cells[c].pins[i as usize].net.and_then(|n| constant(nl, n)) else {
+                    continue;
+                };
+                let name = pin(nl, c, i).to_string();
+                if crate::pll::is_control(&name) {
+                    nl.disconnect(synth_netlist::PinRef { cell: c, pin: i });
+                    nl.set_param(c, &format!("{name}MUX"), Param::Str(u8::from(v).to_string()));
+                }
+            }
+            continue;
+        }
         let ram = nl.cell_kind(c) == DP16KD;
         for i in 0..nl.cells[c].pins.len() as u32 {
             let Some(v) = nl.cells[c].pins[i as usize].net.and_then(|n| constant(nl, n)) else {
@@ -267,8 +296,10 @@ pub fn pack(nl: &Netlist) -> Result<Packed, String> {
             p.lcs.push(Lc { lut: None, ff: Some(c) });
         }
     }
-    p.blocks =
-        nl.live_cells().filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D)).collect();
+    p.blocks = nl
+        .live_cells()
+        .filter(|&c| matches!(nl.cell_kind(c), DP16KD | MULT18X18D | EHXPLLL))
+        .collect();
     Ok(p)
 }
 

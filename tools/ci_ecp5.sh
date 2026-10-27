@@ -2,10 +2,10 @@
 # ECP5 simulation checks with `synth sim --family ecp5` (development / CI
 # only): synthesised netlists and bitstreams (built by synth on an
 # LFE5U-25F, decoded back to cells) against their RTL under random inputs,
-# and Project Euler solvers' answers and cycle counts from their bitstreams
-# (logic, block RAMs and multipliers). Needs a built `synth` and Project
-# Trellis' database (Debian/Ubuntu's fpga-trellis-database, or
-# SYNTH_TRELLIS_DB).
+# a solver behind a PLL likewise, and Project Euler solvers' answers and
+# cycle counts from their bitstreams (logic, block RAMs and multipliers).
+# Needs a built `synth` and Project Trellis' database (Debian/Ubuntu's
+# fpga-trellis-database, or SYNTH_TRELLIS_DB).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 synth=${SYNTH:-$root/target/release/synth}
@@ -55,9 +55,12 @@ c=$root/examples/alchitry_cu_hazard3
 check "alchitry_cu_hazard3 bitstream" "$c" -I "$h" top.v "${hfiles[@]}" --top top --compare bitstream \
   --cycles 400000 --hold 1 --set rst_n=1
 
-# Project Euler: answers from the bitstreams after the original cycle
-# counts (plus two cycles of reset).
+# Project Euler: a solver and its UART reporter behind a PLL, against the
+# RTL; then answers from the bitstreams after the original cycle counts
+# (plus two cycles of reset).
 eu=$d/euler
+check "p031 board bitstream (PLL)" "$eu" p031_board.v p031.v euler_board.v report.v --top top \
+  --compare bitstream --cycles 300000
 while read -r n width answer cycles extra; do
   case $n in \#*|'') continue ;; esac
   if [ "$cycles" -gt "${MAX_RUN:-200000}" ] && [ -z "${LONG:-}" ]; then

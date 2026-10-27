@@ -145,7 +145,8 @@ pub fn synthesize(mut m: Module, opts: &SynthOptions) -> Result<(Netlist, Vec<St
         &mut log,
         |_| {},
     )?;
-    let nl = emit(&net, &mapping)?;
+    let mut nl = emit(&net, &mapping)?;
+    crate::pll::lower(&mut nl, &mut log)?;
     Ok((nl, log))
 }
 

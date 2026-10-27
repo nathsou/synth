@@ -17,6 +17,9 @@
 //! mode (`PDPW16KD`, a 36-bit port A), port A writes pairs of words with
 //! byte enables and port B reads. A `MULT18X18D` (without registers)
 //! multiplies `A` by `B`, each signed where its `SIGNED` input is high.
+//! An `EHXPLLL` passes its input clock to `CLKOP`, locked from the start,
+//! as the RTL simulator takes `synth_pll`: cycles of the simulation are
+//! cycles of whichever clock a flip-flop reads.
 
 use synth_core::LogicVec;
 use synth_netlist::{CellId, Netlist, Param};
@@ -24,7 +27,7 @@ use synth_rtl::{
     BinaryOp, CellKind, Clock, Control, Dff, MemRead, MemWrite, Memory, Module, Sig, SigBit,
 };
 
-use crate::cells::{CCU2C, DP16KD, FF, L6MUX21, LUT4, MULT18X18D, PFUMX};
+use crate::cells::{CCU2C, DP16KD, EHXPLLL, FF, L6MUX21, LUT4, MULT18X18D, PFUMX};
 use crate::pack::lut_init;
 
 fn str_param<'a>(nl: &'a Netlist, c: CellId, name: &str, default: &'a str) -> &'a str {
@@ -167,6 +170,12 @@ pub fn add_cell(
             for i in 0..36 {
                 drive(m, pin(&format!("P{i}")), product.0[i]);
             }
+        }
+        EHXPLLL => {
+            if let Some(i) = pin("CLKI") {
+                drive(m, pin("CLKOP"), i);
+            }
+            drive(m, pin("LOCK"), SigBit::ONE);
         }
         _ => return Ok(false),
     }

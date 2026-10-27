@@ -122,7 +122,7 @@ fn assign_pads(
 }
 
 /// The clock targets: the constraints' frequencies, and `opts.freq` for
-/// the others.
+/// the others (a PLL's output adds its own, [`crate::pll::clock_targets`]).
 pub fn clock_constraints(
     cons: &Constraints,
     opts: &FlowOptions,
@@ -177,7 +177,7 @@ pub fn implement(
     log.push(format!("packed in {:.2}s", t.elapsed().as_secs_f64()));
     let fixed: FxHashMap<CellId, (usize, usize)> =
         pads.iter().map(|(&c, &(x, y, _))| (c, (x, y))).collect();
-    let clocks = clock_constraints(cons, opts);
+    let clocks = crate::pll::clock_targets(&nl, &clock_constraints(cons, opts));
     let graph = crate::timing::TimingGraph::new(&arch, &nl, &clocks);
     // Each seed placed and routed on a thread of its own; the best timed
     // kept. Seeds after the first are far from it.

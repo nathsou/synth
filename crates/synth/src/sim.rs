@@ -155,7 +155,10 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     }
     let level = a.value("--level").unwrap_or_else(|| "rtl".into());
     m = match level.as_str() {
-        "rtl" => m,
+        "rtl" => {
+            synth_sim::plls_as_wires(&mut m);
+            m
+        }
         "synth" => synthesized_for(&mut a, m)?,
         "bitstream" => bitstream(&mut a, m)?,
         _ => return Err(format!("--level expects rtl, synth or bitstream, got `{level}`")),
@@ -414,6 +417,7 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
 /// comparing every output bit the RTL defines after every rising edge.
 fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String> {
     let mut reference = m.clone();
+    synth_sim::plls_as_wires(&mut reference);
     synth_rtl::opt::two_state(&mut reference);
     let other = match what {
         "synth" => synthesized_for(a, m)?,

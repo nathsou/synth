@@ -14,8 +14,8 @@
 //! wires nothing drives are left unconnected (a slice reads them high),
 //! and routing inputs tied to a constant become LUTs driving it. Block
 //! RAMs in use become `DP16KD`s with their initial contents, multipliers
-//! without registers `MULT18X18D`s. Distributed RAM, wide multiplexers
-//! and I/O registers are not decoded.
+//! without registers `MULT18X18D`s, PLLs `EHXPLLL`s with their dividers.
+//! Distributed RAM, wide multiplexers and I/O registers are not decoded.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, P
 
 use crate::arch::Arch;
 use crate::bits::Cram;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
+use crate::cells::{CCU2C, DP16KD, EHXPLLL, FF, LUT4, MULT18X18D};
 use crate::config::{ChipConfig, TileConfig};
 use crate::db::TileInfo;
 use crate::graph::NO_TILE;
@@ -458,6 +458,38 @@ impl Decoder<'_> {
         Ok(())
     }
 
+    /// The PLL at `(x, y)`, if in use.
+    fn pll(&mut self, x: usize, y: usize, cells: &mut Vec<Cell>) -> Result<(), String> {
+        let names = crate::pll::tiles(self.arch, x, y)?;
+        let tiles: Vec<&TileInfo> = names.iter().filter_map(|n| self.arch.dev.tile(n)).collect();
+        if self.group_enum(&tiles, "MODE")?.as_deref() != Some(EHXPLLL) {
+            return Ok(());
+        }
+        let mut params = Vec::new();
+        for k in ["CLKI_DIV", "CLKFB_DIV", "CLKOP_DIV"] {
+            let v = self.group_word(&tiles, k)?.unwrap_or(0) + 1;
+            params.push((k.to_string(), Param::Int(v as i64)));
+        }
+        let path = self.group_enum(&tiles, "FEEDBK_PATH")?.unwrap_or_default();
+        params.push(("FEEDBK_PATH".to_string(), Param::Str(path)));
+        let wire = |pin: &str| match pin {
+            "CLKI" | "CLKFB" | "CLKINTFB" => format!("{pin}_PLL"),
+            _ => format!("J{pin}_PLL"),
+        };
+        let mut inputs = Vec::new();
+        for pin in ["CLKI", "CLKFB", "RST", "STDBY"] {
+            inputs.push((pin.to_string(), self.arch.node(x, y, &wire(pin))?));
+        }
+        let mut outputs = Vec::new();
+        for pin in ["CLKOP", "LOCK", "CLKINTFB"] {
+            outputs.push((pin.to_string(), self.arch.node(x, y, &wire(pin))?));
+        }
+        let name = format!("pll_x{x}_y{y}");
+        let site = Some(Site { x, y, z: 0 });
+        cells.push(Cell { kind: EHXPLLL, name, params, inputs, outputs, site });
+        Ok(())
+    }
+
     /// The constants a routing tile's input multiplexers tie wires to
     /// (`CIB.<wire>MUX` `0` or `1`). Clock and set/reset inputs only tie
     /// with `0`, which nextpnr takes as high (inverting at the block where
@@ -630,6 +662,9 @@ pub fn decode(
         if let Some(z) = crate::bitgen::dsp_z(&tile.ttype) {
             d.mult18(tile.col, tile.row, z, &mut cells)?;
         }
+    }
+    for (x, y) in crate::pll::sites(&arch.dev.tiles) {
+        d.pll(x, y, &mut cells)?;
     }
     let mut ports = Vec::new();
     for (port, (x, y, l)) in pins {

@@ -240,11 +240,16 @@ impl TimingGraph {
             if let Some(k) = clocks.iter().position(|c| c.net == net) {
                 return k as u16;
             }
-            // A clock from an input port is named after it.
-            let name = nl.nets[net]
-                .driver
-                .map(|d| nl.str(nl.cells[d.cell].name).to_string())
-                .unwrap_or_else(|| nl.str(nl.nets[net].name).to_string());
+            // A clock from an input port is named after it, one on an
+            // unnamed net after the pin driving it (a PLL's output).
+            let net_name = nl.str(nl.nets[net].name);
+            let name = match nl.nets[net].driver {
+                Some(d) if nl.cell_kind(d.cell) == synth_netlist::INPUT_PORT => {
+                    nl.str(nl.cells[d.cell].name).to_string()
+                }
+                Some(d) if net_name.starts_with('$') => nl.pin_name(d),
+                _ => net_name.to_string(),
+            };
             let target_ps = constraints.target_ps(&[&name, nl.str(nl.nets[net].name)]);
             clocks.push(Clock { net, name, target_ps });
             (clocks.len() - 1) as u16

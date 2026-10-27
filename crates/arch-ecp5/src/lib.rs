@@ -18,6 +18,7 @@ pub mod graph;
 pub mod lpf;
 pub mod pack;
 pub mod place;
+pub mod pll;
 pub mod route;
 pub mod sim;
 pub mod speed;
