@@ -56,30 +56,24 @@ pub fn size_prefix(device: &str) -> &'static str {
     }
 }
 
-/// Resolves a database wire name (Trellis' `globalise_net_ecp5`).
-fn wire_ref(db_name: &str, prefix: &str, names: &mut Interner) -> WireRef {
+/// A database wire name's parts (Trellis' `globalise_net_ecp5`): its
+/// offset from the tile, its own name, and whether it is a global at the
+/// origin. `None` for a name of another size of device.
+fn split_wire<'a>(db_name: &'a str, prefix: &str) -> Option<(i16, i16, &'a str, bool)> {
     let mut name = db_name;
     if ["25K_", "45K_", "85K_"].iter().any(|p| db_name.starts_with(p)) {
         if !db_name.starts_with(prefix) {
-            return WireRef::Skip;
+            return None;
         }
         name = &db_name[4..];
     }
-    let alt_of = |n: &str, names: &mut Interner| match n.find("PCSA") {
-        Some(i) => names.intern(&format!("{}PCSB{}", &n[..i], &n[i + 4..])),
-        None => names.intern(n),
-    };
-    if name.starts_with("G_") || name.starts_with("L_") || name.starts_with("R_") {
-        let s = names.intern(name);
-        if name.starts_with("G_") && !["VPTX", "HPBX", "HPRX"].iter().any(|k| name.contains(k)) {
-            return WireRef::Origin(s);
-        }
-        return WireRef::At { dx: 0, dy: 0, name: s, alt: s };
+    if is_global(name) {
+        let origin =
+            name.starts_with("G_") && !["VPTX", "HPBX", "HPRX"].iter().any(|k| name.contains(k));
+        return Some((0, 0, name, origin));
     }
     // `^([NS]\d+)?([EW]\d+)?_(.*)`.
     let b = name.as_bytes();
-    let mut i = 0;
-    let (mut dx, mut dy) = (0i16, 0i16);
     let take = |dirs: &[u8], i: &mut usize| -> Option<(u8, i16)> {
         if *i < b.len() && dirs.contains(&b[*i]) {
             let start = *i + 1;
@@ -96,18 +90,11 @@ fn wire_ref(db_name: &str, prefix: &str, names: &mut Interner) -> WireRef {
         }
         None
     };
-    let (mut ns, mut ew) = (None, None);
-    let mut j = i;
-    if let Some(v) = take(b"NS", &mut j) {
-        ns = Some(v);
-        i = j;
-    }
-    let mut j = i;
-    if let Some(v) = take(b"EW", &mut j) {
-        ew = Some(v);
-        i = j;
-    }
+    let mut i = 0;
+    let ns = take(b"NS", &mut i);
+    let ew = take(b"EW", &mut i);
     if i < b.len() && b[i] == b'_' && (ns.is_some() || ew.is_some() || i == 0) {
+        let (mut dx, mut dy) = (0i16, 0i16);
         for (d, n) in ns.into_iter().chain(ew) {
             match d {
                 b'N' => dy -= n,
@@ -116,10 +103,35 @@ fn wire_ref(db_name: &str, prefix: &str, names: &mut Interner) -> WireRef {
                 _ => dx += n,
             }
         }
-        let rest = &name[i + 1..];
-        return WireRef::At { dx, dy, name: names.intern(rest), alt: alt_of(rest, names) };
+        return Some((dx, dy, &name[i + 1..], false));
     }
-    WireRef::At { dx: 0, dy: 0, name: names.intern(name), alt: alt_of(name, names) }
+    Some((0, 0, name, false))
+}
+
+/// A wire of the clock network, named the same in every tile.
+fn is_global(name: &str) -> bool {
+    name.starts_with("G_") || name.starts_with("L_") || name.starts_with("R_")
+}
+
+/// The name of `name` in the transceiver columns (from column 69 on, whose
+/// blocks reuse tile databases with `PCSA` for `PCSB`).
+fn pcsb_name(name: &str) -> Option<String> {
+    let i = name.find("PCSA")?;
+    Some(format!("{}PCSB{}", &name[..i], &name[i + 4..]))
+}
+
+/// Resolves a database wire name.
+fn wire_ref(db_name: &str, prefix: &str, names: &mut Interner) -> WireRef {
+    let Some((dx, dy, name, origin)) = split_wire(db_name, prefix) else { return WireRef::Skip };
+    let s = names.intern(name);
+    if origin {
+        return WireRef::Origin(s);
+    }
+    let alt = match pcsb_name(name) {
+        Some(alt) if !is_global(name) => names.intern(&alt),
+        _ => s,
+    };
+    WireRef::At { dx, dy, name: s, alt }
 }
 
 /// The routing graph of a device, in compressed sparse row form.
@@ -502,12 +514,30 @@ impl Graph {
         }
     }
 
+    /// The wire the database of the tile at `(x, y)` names `db_name`, on a
+    /// device of size prefix `prefix` ([`size_prefix`]).
+    pub fn tile_wire(&self, x: usize, y: usize, db_name: &str, prefix: &str) -> Option<u32> {
+        let (dx, dy, name, origin) = split_wire(db_name, prefix)?;
+        if origin {
+            return self.lookup(0, 0, name);
+        }
+        let (wx, wy) = (x as i64 + dx as i64, y as i64 + dy as i64);
+        if wx < 0 || wy < 0 {
+            return None;
+        }
+        let (wx, wy) = (wx as usize, wy as usize);
+        match pcsb_name(name) {
+            Some(alt) if x >= 69 && !is_global(name) => self.lookup(wx, wy, &alt),
+            _ => self.lookup(wx, wy, name),
+        }
+    }
+
     /// A wire's name as the database of the tile at `(x, y)` names it:
     /// relative to the tile, or a global's own name (Trellis' wire naming,
     /// as nextpnr writes switches).
     pub fn name_in_tile(&self, n: u32, x: usize, y: usize) -> String {
         let base = self.name(n);
-        if base.starts_with("G_") || base.starts_with("L_") || base.starts_with("R_") {
+        if is_global(base) {
             return base.to_string();
         }
         let (wx, wy) = (self.node_x[n as usize] as i64, self.node_y[n as usize] as i64);

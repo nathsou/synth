@@ -44,7 +44,12 @@ pub fn permute(init: u16, pins: [u8; 4], connected: [bool; 4]) -> u16 {
 
 /// The pad tile (`PIO*`) and the I/O logic tile (`PIC*`) of a pad (as
 /// nextpnr's `get_pio_tile` and `get_pic_tile`).
-fn io_tiles(arch: &Arch, x: usize, y: usize, l: char) -> Result<(String, String), String> {
+pub(crate) fn io_tiles(
+    arch: &Arch,
+    x: usize,
+    y: usize,
+    l: char,
+) -> Result<(String, String), String> {
     let (max_x, max_y) = (arch.dev.info.max_col, arch.dev.info.max_row);
     let find = |row: usize, col: usize, types: &[&str]| -> Result<String, String> {
         arch.dev

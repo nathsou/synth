@@ -34,10 +34,8 @@ pub fn unpack(argv: &[String]) -> Result<(), String> {
     write(&out, cc.to_text().as_bytes())
 }
 
-/// Places, routes and writes the bitstream of a synthesised ECP5 design:
-/// `--device LFE5U-25F [--package CABGA381] [--speed 6] [--lpf <file>]
-/// [-o <out.bit>] [--textcfg <out.config>] [--compress] [--db <dir>]`.
-pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
+/// The pin constraints of `--lpf`, if given.
+fn constraints(a: &mut Args) -> Result<arch_ecp5::lpf::Constraints, String> {
     let cons = match a.value("--lpf") {
         Some(p) => {
             arch_ecp5::lpf::Constraints::parse(&read(&p)?).map_err(|e| format!("{p}: {e}"))?
@@ -47,7 +45,12 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
     for w in &cons.warnings {
         info!("warning: {w}");
     }
-    let opts = arch_ecp5::flow::FlowOptions {
+    Ok(cons)
+}
+
+/// `--device`, `--package`, `--speed`, `--db`, `--seed` and `--effort`.
+fn flow_options(a: &mut Args) -> Result<arch_ecp5::flow::FlowOptions, String> {
+    Ok(arch_ecp5::flow::FlowOptions {
         device: a.required("--device")?,
         package: a.value("--package").unwrap_or_else(|| "CABGA381".into()),
         speed: a.value("--speed").unwrap_or_else(|| "6".into()),
@@ -62,7 +65,70 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
             .map(|s| s.parse().map_err(|_| "bad --effort"))
             .transpose()?
             .unwrap_or(1.0),
+    })
+}
+
+/// The design after ECP5 synthesis, as RTL built from the primitives'
+/// simulation models.
+pub fn synthesized(m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    let (nl, _) = arch_ecp5::synth::synthesize(m, &arch_ecp5::synth::SynthOptions::default())?;
+    synth_sim::netlist::from_netlist(&nl, &mut arch_ecp5::sim::add_cell)
+}
+
+/// What the ECP5 bitstream of the design (built, or read from
+/// `--bitstream` with the pads of `--lpf`) implements, decoded back to
+/// cells, as RTL.
+pub fn decoded(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    let cons = constraints(a)?;
+    let opts = flow_options(a)?;
+    let (arch, bytes, pins) = match a.value("--bitstream") {
+        Some(path) => {
+            let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+            let arch = arch_ecp5::flow::arch(&opts)?;
+            let mut pins = Vec::new();
+            for (port, site) in &cons.sites {
+                let p = arch.pin(site).ok_or_else(|| format!("{port}: no pin {site}"))?;
+                pins.push((port.clone(), (p.col, p.row, p.pio)));
+            }
+            if pins.is_empty() {
+                return Err("--bitstream needs the pads of the ports (--lpf)".into());
+            }
+            (arch, bytes, pins)
+        }
+        None => {
+            let (nl, _) =
+                arch_ecp5::synth::synthesize(m, &arch_ecp5::synth::SynthOptions::default())?;
+            let mut log = Vec::new();
+            let imp = arch_ecp5::flow::implement(
+                arch_ecp5::flow::arch(&opts)?,
+                nl,
+                &cons,
+                &opts,
+                &mut log,
+            )?;
+            let bytes = arch_ecp5::flow::bitstream(&imp, false)?;
+            let pins = imp
+                .pads
+                .iter()
+                .map(|(&c, &at)| (imp.netlist.str(imp.netlist.cells[c].name).to_string(), at))
+                .collect();
+            (imp.arch, bytes, pins)
+        }
     };
+    let cc = arch_ecp5::unpack_bitstream(&arch.db, &bytes)?;
+    let (nl, warnings) = arch_ecp5::decode::decode(&arch, &cc, &pins)?;
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+    synth_sim::netlist::from_netlist(&nl, &mut arch_ecp5::sim::add_cell)
+}
+
+/// Places, routes and writes the bitstream of a synthesised ECP5 design:
+/// `--device LFE5U-25F [--package CABGA381] [--speed 6] [--lpf <file>]
+/// [-o <out.bit>] [--textcfg <out.config>] [--compress] [--db <dir>]`.
+pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
+    let cons = constraints(a)?;
+    let opts = flow_options(a)?;
     let t = std::time::Instant::now();
     synth_core::progress::step("load device", "");
     let arch = arch_ecp5::flow::arch(&opts)?;

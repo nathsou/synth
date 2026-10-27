@@ -11,12 +11,14 @@ pub mod cells;
 pub mod clocks;
 pub mod config;
 pub mod db;
+pub mod decode;
 pub mod flow;
 pub mod graph;
 pub mod lpf;
 pub mod pack;
 pub mod place;
 pub mod route;
+pub mod sim;
 pub mod speed;
 pub mod synth;
 
