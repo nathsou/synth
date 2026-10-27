@@ -87,6 +87,59 @@ pub(crate) fn io_tiles(
     }
 }
 
+/// The block RAM (`EBR<z>`) whose bel a tile of type `ttype` holds.
+pub(crate) fn ebr_z(ttype: &str) -> Option<usize> {
+    match ttype {
+        "MIB_EBR0" | "EBR_CMUX_UR" | "EBR_CMUX_LR" | "EBR_CMUX_LR_25K" => Some(0),
+        "MIB_EBR2" => Some(1),
+        "MIB_EBR4" => Some(2),
+        "MIB_EBR6" => Some(3),
+        _ => None,
+    }
+}
+
+/// The tiles holding the settings of block RAM `z` at `(x, y)` (as
+/// nextpnr's `get_bram_tiles`).
+pub(crate) fn ebr_tiles(arch: &Arch, x: usize, y: usize, z: usize) -> Result<Vec<String>, String> {
+    const EBR0: &[&str] = &["MIB_EBR0", "EBR_CMUX_UR", "EBR_CMUX_LR", "EBR_CMUX_LR_25K"];
+    const EBR8: &[&str] = &[
+        "MIB_EBR8",
+        "EBR_SPINE_UL1",
+        "EBR_SPINE_UR1",
+        "EBR_SPINE_LL1",
+        "EBR_CMUX_UL",
+        "EBR_SPINE_LL0",
+        "EBR_CMUX_LL",
+        "EBR_SPINE_LR0",
+        "EBR_SPINE_LR1",
+        "EBR_CMUX_LL_25K",
+        "EBR_SPINE_UL2",
+        "EBR_SPINE_UL0",
+        "EBR_SPINE_UR2",
+        "EBR_SPINE_LL2",
+        "EBR_SPINE_LR2",
+        "EBR_SPINE_UR0",
+    ];
+    let types: [&[&str]; 3] = match z {
+        0 => [EBR0, &["MIB_EBR1"], &[]],
+        1 => [&["MIB_EBR2"], &["MIB_EBR3"], &["MIB_EBR4"]],
+        2 => [&["MIB_EBR4"], &["MIB_EBR5"], &["MIB_EBR6"]],
+        _ => [&["MIB_EBR6"], &["MIB_EBR7"], EBR8],
+    };
+    let mut tiles = Vec::new();
+    for (dx, types) in types.iter().enumerate() {
+        if types.is_empty() {
+            continue;
+        }
+        let t = arch
+            .dev
+            .tile_of_type(y, x + dx, types)
+            .ok_or_else(|| format!("no {types:?} tile at R{y}C{}", x + dx))?;
+        tiles.push(t.name.clone());
+    }
+    Ok(tiles)
+}
+
 /// The bank voltage of an I/O standard.
 fn vccio(iotype: &str) -> Option<&'static str> {
     let t = iotype.trim_end_matches('D');

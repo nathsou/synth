@@ -11,15 +11,19 @@
 //! the joined wires, with their settings read back from the tile (the
 //! database's defaults where the configuration leaves them). The ports
 //! named in `pins` become the netlist's ports at their pads. Inputs on
-//! wires nothing drives are left unconnected (a slice reads them high).
-//! Distributed RAM, wide multiplexers, block RAM and I/O registers are not
-//! decoded.
+//! wires nothing drives are left unconnected (a slice reads them high),
+//! and routing inputs tied to a constant become LUTs driving it. Block
+//! RAMs in use become `DP16KD`s with their initial contents. Distributed
+//! RAM, wide multiplexers and I/O registers are not decoded.
+
+use std::collections::BTreeMap;
 
 use synth_core::FxHashMap;
-use synth_netlist::{CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
+use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, FF, LUT4};
+use crate::bits::Cram;
+use crate::cells::{CCU2C, DP16KD, FF, LUT4};
 use crate::config::{ChipConfig, TileConfig};
 use crate::db::TileInfo;
 use crate::graph::NO_TILE;
@@ -82,7 +86,10 @@ struct Cell {
 
 struct Decoder<'a> {
     arch: &'a Arch,
-    cc: &'a ChipConfig,
+    cram: &'a Cram,
+    /// The configuration read back tile by tile.
+    cc: ChipConfig,
+    bram_init: &'a BTreeMap<u16, Vec<u16>>,
     uf: Uf,
     warnings: Vec<String>,
 }
@@ -254,20 +261,180 @@ impl Decoder<'_> {
         }
         Ok(())
     }
+
+    /// Enum `name` of a group of tiles, which each hold some of its bits:
+    /// the value matching in the most tiles, then with the most bits.
+    /// (Read tile by tile, a tile's bits can match another value, or none:
+    /// the database lists some bits of other settings among them.)
+    fn group_enum(&self, tiles: &[&TileInfo], name: &str) -> Result<Option<String>, String> {
+        let mut score: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        let (mut holders, mut default) = (0, None::<String>);
+        for t in tiles {
+            let bits = self.arch.db.tile_bits(&t.ttype)?;
+            let Some(e) = bits.enums.get(name) else { continue };
+            holders += 1;
+            default = e.default.clone();
+            for (value, group) in &e.options {
+                if group.matches(self.cram, &t.window) {
+                    let s = score.entry(value.clone()).or_default();
+                    s.0 += 1;
+                    s.1 += group.0.len();
+                }
+            }
+        }
+        if holders == 0 {
+            return Ok(None);
+        }
+        let best = score.into_iter().max_by_key(|s| s.1);
+        Ok(Some(best.map(|s| s.0).or(default).unwrap_or_default()))
+    }
+
+    /// Word `name` of a group of tiles, least significant bit first: each
+    /// bit from the tile that holds it.
+    fn group_word(&self, tiles: &[&TileInfo], name: &str) -> Result<Option<u64>, String> {
+        let mut value = None;
+        for t in tiles {
+            let bits = self.arch.db.tile_bits(&t.ttype)?;
+            let Some(w) = bits.words.get(name) else { continue };
+            let v = value.get_or_insert(0u64);
+            for (i, g) in w.bits.iter().enumerate() {
+                if !g.0.is_empty() && g.matches(self.cram, &t.window) {
+                    *v |= 1 << i;
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    /// The block RAM of the tile at `(x, y)` holding bel `EBR<z>`, if in use.
+    fn ebr(&mut self, x: usize, y: usize, z: usize, cells: &mut Vec<Cell>) -> Result<(), String> {
+        let names = crate::bitgen::ebr_tiles(self.arch, x, y, z)?;
+        let tiles: Vec<&TileInfo> = names.iter().filter_map(|n| self.arch.dev.tile(n)).collect();
+        let ebr = format!("EBR{z}");
+        let mode = self.group_enum(&tiles, &format!("{ebr}.MODE"))?.unwrap_or_default();
+        if mode == "NONE" || mode == "_NONE_" {
+            return Ok(());
+        }
+        let name = format!("ebr_x{x}_y{y}_{z}");
+        if mode != "DP16KD" {
+            self.warnings.push(format!("{name}: block RAM mode {mode} is not decoded"));
+            return Ok(());
+        }
+        let mut params: Vec<(String, Param)> = Vec::new();
+        for p in ["A", "B"] {
+            for (key, setting) in [
+                (format!("DATA_WIDTH_{p}"), format!("DP16KD.DATA_WIDTH_{p}")),
+                (format!("WRITEMODE_{p}"), format!("DP16KD.WRITEMODE_{p}")),
+                (format!("REGMODE_{p}"), format!("REGMODE_{p}")),
+            ] {
+                if let Some(v) = self.group_enum(&tiles, &format!("{ebr}.{setting}"))? {
+                    params.push((key, Param::Str(v)));
+                }
+            }
+            // Stored most significant bit first.
+            let csd = self.group_word(&tiles, &format!("{ebr}.CSDECODE_{p}"))?.unwrap_or(0);
+            let csd = format!("0b{}{}{}", csd & 1, csd >> 1 & 1, csd >> 2 & 1);
+            params.push((format!("CSDECODE_{p}"), Param::Str(csd)));
+        }
+        if let Some(v) = self.group_enum(&tiles, &format!("{ebr}.RESETMODE"))? {
+            params.push(("RESETMODE".into(), Param::Str(v)));
+        }
+        let mut inputs = Vec::new();
+        let mut pins: Vec<String> = Vec::new();
+        for p in ["A", "B"] {
+            pins.extend((0..14).map(|i| format!("AD{p}{i}")));
+            pins.extend((0..18).map(|i| format!("DI{p}{i}")));
+            pins.extend((0..3).map(|i| format!("CS{p}{i}")));
+            pins.extend(["CLK", "CE", "OCE", "WE", "RST"].map(|s| format!("{s}{p}")));
+        }
+        for pin in pins {
+            // The block's own inversions of its inputs.
+            if let Some(v) = self.group_enum(&tiles, &format!("{ebr}.{pin}MUX"))? {
+                params.push((
+                    format!("{pin}MUX"),
+                    Param::Str(if v == "INV" { v } else { pin.clone() }),
+                ));
+            }
+            let w = self.arch.node(x, y, &format!("J{pin}_EBR"))?;
+            inputs.push((pin, w));
+        }
+        let wid = self.group_word(&tiles, &format!("{ebr}.WID"))?.unwrap_or(0);
+        let wid = (0..9).filter(|i| wid >> i & 1 == 1).map(|i| 1u16 << (8 - i)).sum::<u16>();
+        let units = self.bram_init.get(&wid).cloned().unwrap_or_else(|| vec![0; 2048]);
+        for k in 0..64 {
+            let mut bits = vec![Bit::Zero; 320];
+            for i in 0..16 {
+                let w = 16 * k + i;
+                let v = units[2 * w] as u32 | (units[2 * w + 1] as u32) << 9;
+                for t in 0..18 {
+                    if v >> t & 1 == 1 {
+                        bits[20 * i + t] = Bit::One;
+                    }
+                }
+            }
+            params.push((format!("INITVAL_{k:02X}"), Param::Bits(bits)));
+        }
+        let mut outputs = Vec::new();
+        for p in ["A", "B"] {
+            for i in 0..18 {
+                outputs
+                    .push((format!("DO{p}{i}"), self.arch.node(x, y, &format!("JDO{p}{i}_EBR"))?));
+            }
+        }
+        cells.push(Cell { kind: DP16KD, name, params, inputs, outputs });
+        Ok(())
+    }
+
+    /// The constants a routing tile's input multiplexers tie wires to
+    /// (`CIB.<wire>MUX` `0` or `1`). Clock and set/reset inputs only tie
+    /// with `0`, which nextpnr takes as high (inverting at the block where
+    /// it needs low), and so it is read here.
+    fn ties(&self, tile: &TileInfo, cells: &mut Vec<Cell>) -> Result<(), String> {
+        let Some(tc) = self.config(tile) else { return Ok(()) };
+        for (name, v) in &tc.enums {
+            let Some(wire) = name.strip_prefix("CIB.").and_then(|n| n.strip_suffix("MUX")) else {
+                continue;
+            };
+            let high = match v.as_str() {
+                "1" => true,
+                "0" => wire.starts_with("JCLK") || wire.starts_with("JLSR"),
+                _ => continue,
+            };
+            let w = self.wire(tile, wire)?;
+            cells.push(Cell {
+                kind: LUT4,
+                name: format!("tie_{}_{wire}", tile.name.replace(':', "_")),
+                params: vec![("INIT".into(), Param::Int(if high { 0xffff } else { 0 }))],
+                inputs: Vec::new(),
+                outputs: vec![("Z".into(), w)],
+            });
+        }
+        Ok(())
+    }
 }
 
-/// Decodes `cc` for `arch`, with port bits `pins` (name, pad `(x, y,
-/// PIO letter)`). Returns the netlist and warnings about what was not
-/// decoded.
+/// Decodes the configuration memory `cram` (with block RAM contents
+/// `bram_init`) for `arch`, with port bits `pins` (name, pad `(x, y, PIO
+/// letter)`). Returns the netlist and warnings about what was not decoded.
 pub fn decode(
     arch: &Arch,
-    cc: &ChipConfig,
+    cram: &Cram,
+    bram_init: &BTreeMap<u16, Vec<u16>>,
     pins: &[(String, (usize, usize, char))],
 ) -> Result<(Netlist, Vec<String>), String> {
     let g = &arch.graph;
     let n = g.num_nodes();
     let prefix = crate::graph::size_prefix(&arch.dev.info.name);
-    let mut d = Decoder { arch, cc, uf: Uf((0..n as u32).collect()), warnings: Vec::new() };
+    let cc = arch.dev.from_cram(&arch.db, cram)?;
+    let mut d = Decoder {
+        arch,
+        cram,
+        cc,
+        bram_init,
+        uf: Uf((0..n as u32).collect()),
+        warnings: Vec::new(),
+    };
+    let cc = &d.cc.clone();
     // Configured switches. In carry mode, a slice's output multiplexers
     // share their bits with the carry settings, and stay on the outputs.
     for (name, tc) in &cc.tiles {
@@ -351,10 +518,16 @@ pub fn decode(
     // Cells.
     let mut cells = Vec::new();
     for name in cc.tiles.keys() {
-        if let Some(tile) = arch.dev.tile(name)
-            && tile.ttype == "PLC2"
-        {
+        let Some(tile) = arch.dev.tile(name) else { continue };
+        if tile.ttype == "PLC2" {
             d.slices(tile, &mut cells)?;
+        } else if tile.ttype.starts_with("CIB") || tile.ttype.starts_with("VCIB") {
+            d.ties(tile, &mut cells)?;
+        }
+    }
+    for tile in &arch.dev.tiles {
+        if let Some(z) = crate::bitgen::ebr_z(&tile.ttype) {
+            d.ebr(tile.col, tile.row, z, &mut cells)?;
         }
     }
     let mut ports = Vec::new();

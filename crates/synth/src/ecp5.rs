@@ -115,8 +115,11 @@ pub fn decoded(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, 
             (imp.arch, bytes, pins)
         }
     };
-    let cc = arch_ecp5::unpack_bitstream(&arch.db, &bytes)?;
-    let (nl, warnings) = arch_ecp5::decode::decode(&arch, &cc, &pins)?;
+    let bits = arch_ecp5::read_bitstream(&arch.db, &bytes)?;
+    if bits.info.name != arch.dev.info.name {
+        return Err(format!("the bitstream is for {}, not {}", bits.info.name, arch.dev.info.name));
+    }
+    let (nl, warnings) = arch_ecp5::decode::decode(&arch, &bits.cram, &bits.bram, &pins)?;
     for w in warnings {
         eprintln!("warning: {w}");
     }

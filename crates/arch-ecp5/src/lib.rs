@@ -35,10 +35,15 @@ pub fn pack_config(db: &Database, cc: &ChipConfig, compress: bool) -> Result<Vec
     Ok(bitstream::write(&dev.info, &cram, &cc.bram_init, &opts))
 }
 
+/// The contents of a `.bit` file, for any device of the database.
+pub fn read_bitstream(db: &Database, bytes: &[u8]) -> Result<bitstream::Parsed, String> {
+    let infos: Vec<_> = db.device_names().iter().filter_map(|n| db.chip_info(n).ok()).collect();
+    bitstream::read(bytes, &|id| infos.iter().find(|i| i.idcode == id).cloned())
+}
+
 /// The textual configuration of a `.bit` file (as `ecpunpack`).
 pub fn unpack_bitstream(db: &Database, bytes: &[u8]) -> Result<ChipConfig, String> {
-    let infos: Vec<_> = db.device_names().iter().filter_map(|n| db.chip_info(n).ok()).collect();
-    let p = bitstream::read(bytes, &|id| infos.iter().find(|i| i.idcode == id).cloned())?;
+    let p = read_bitstream(db, bytes)?;
     let dev = db.device(&p.info.name)?;
     let mut cc = dev.from_cram(db, &p.cram)?;
     cc.comments = p.comments;
