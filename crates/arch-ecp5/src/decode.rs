@@ -13,8 +13,9 @@
 //! named in `pins` become the netlist's ports at their pads. Inputs on
 //! wires nothing drives are left unconnected (a slice reads them high),
 //! and routing inputs tied to a constant become LUTs driving it. Block
-//! RAMs in use become `DP16KD`s with their initial contents. Distributed
-//! RAM, wide multiplexers and I/O registers are not decoded.
+//! RAMs in use become `DP16KD`s with their initial contents, multipliers
+//! without registers `MULT18X18D`s. Distributed RAM, wide multiplexers
+//! and I/O registers are not decoded.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +24,7 @@ use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, P
 
 use crate::arch::Arch;
 use crate::bits::Cram;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
 use crate::config::{ChipConfig, TileConfig};
 use crate::db::TileInfo;
 use crate::graph::NO_TILE;
@@ -417,6 +418,46 @@ impl Decoder<'_> {
         Ok(())
     }
 
+    /// The multiplier `MULT18_<z>` of the tile at `(x, y)`, if in use.
+    fn mult18(
+        &mut self,
+        x: usize,
+        y: usize,
+        z: usize,
+        cells: &mut Vec<Cell>,
+    ) -> Result<(), String> {
+        let names = crate::bitgen::dsp_tiles(self.arch, x, y, z)?;
+        let tiles: Vec<&TileInfo> = names.iter().filter_map(|n| self.arch.dev.tile(n)).collect();
+        let dsp = format!("MULT18_{z}");
+        let mode = self.group_enum(&tiles, &format!("{dsp}.MODE"))?.unwrap_or_default();
+        if mode != "MULT18X18D" {
+            return Ok(());
+        }
+        let name = format!("mult18_x{x}_y{y}_{z}");
+        for reg in ["INPUTA", "INPUTB", "PIPELINE", "OUTPUT"] {
+            let clk = self.group_enum(&tiles, &format!("{dsp}.REG_{reg}_CLK"))?;
+            if clk.is_some_and(|c| c != "NONE") {
+                self.warnings.push(format!("{name}: registered multipliers are not decoded"));
+                return Ok(());
+            }
+        }
+        let mut inputs = Vec::new();
+        let pins = (0..18)
+            .flat_map(|i| [format!("A{i}"), format!("B{i}")])
+            .chain(["SIGNEDA".to_string(), "SIGNEDB".to_string()]);
+        for pin in pins {
+            let w = self.arch.node(x, y, &format!("J{pin}_MULT18"))?;
+            inputs.push((pin, w));
+        }
+        let mut outputs = Vec::new();
+        for i in 0..36 {
+            outputs.push((format!("P{i}"), self.arch.node(x, y, &format!("JP{i}_MULT18"))?));
+        }
+        let site = Some(Site { x, y, z });
+        cells.push(Cell { kind: MULT18X18D, name, params: Vec::new(), inputs, outputs, site });
+        Ok(())
+    }
+
     /// The constants a routing tile's input multiplexers tie wires to
     /// (`CIB.<wire>MUX` `0` or `1`). Clock and set/reset inputs only tie
     /// with `0`, which nextpnr takes as high (inverting at the block where
@@ -585,6 +626,9 @@ pub fn decode(
     for tile in &arch.dev.tiles {
         if let Some(z) = crate::bitgen::ebr_z(&tile.ttype) {
             d.ebr(tile.col, tile.row, z, &mut cells)?;
+        }
+        if let Some(z) = crate::bitgen::dsp_z(&tile.ttype) {
+            d.mult18(tile.col, tile.row, z, &mut cells)?;
         }
     }
     let mut ports = Vec::new();

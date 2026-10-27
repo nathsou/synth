@@ -15,7 +15,8 @@
 //! bits (see [`crate::bram`]), each reading on its clock edge when enabled
 //! and selected, its reset clearing the output; in the pseudo dual port
 //! mode (`PDPW16KD`, a 36-bit port A), port A writes pairs of words with
-//! byte enables and port B reads.
+//! byte enables and port B reads. A `MULT18X18D` (without registers)
+//! multiplies `A` by `B`, each signed where its `SIGNED` input is high.
 
 use synth_core::LogicVec;
 use synth_netlist::{CellId, Netlist, Param};
@@ -23,7 +24,7 @@ use synth_rtl::{
     BinaryOp, CellKind, Clock, Control, Dff, MemRead, MemWrite, Memory, Module, Sig, SigBit,
 };
 
-use crate::cells::{CCU2C, DP16KD, FF, L6MUX21, LUT4, PFUMX};
+use crate::cells::{CCU2C, DP16KD, FF, L6MUX21, LUT4, MULT18X18D, PFUMX};
 use crate::pack::lut_init;
 
 fn str_param<'a>(nl: &'a Netlist, c: CellId, name: &str, default: &'a str) -> &'a str {
@@ -152,6 +153,21 @@ pub fn add_cell(
             );
         }
         DP16KD => dp16kd(m, nl, c, pin, &name)?,
+        MULT18X18D => {
+            // P = A * B, each signed where its SIGNED input is high.
+            let operand = |m: &mut Module, p: &str| -> Sig {
+                let bits: Vec<SigBit> =
+                    (0..18).map(|i| pin(&format!("{p}{i}")).unwrap_or(SigBit::ZERO)).collect();
+                let signed = pin(&format!("SIGNED{p}")).unwrap_or(SigBit::ZERO);
+                let sign = m.and1(bits[17], signed);
+                Sig(bits.into_iter().chain(std::iter::repeat_n(sign, 18)).collect())
+            };
+            let (a, b) = (operand(m, "A"), operand(m, "B"));
+            let product = m.binary(BinaryOp::Mul, false, a, b);
+            for i in 0..36 {
+                drive(m, pin(&format!("P{i}")), product.0[i]);
+            }
+        }
         _ => return Ok(false),
     }
     Ok(true)

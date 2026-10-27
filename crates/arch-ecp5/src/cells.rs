@@ -11,6 +11,7 @@ pub const CCU2C: &str = "CCU2C";
 pub const FF: &str = "TRELLIS_FF";
 pub const IO: &str = "TRELLIS_IO";
 pub const DP16KD: &str = "DP16KD";
+pub const MULT18X18D: &str = "MULT18X18D";
 pub const DCCA: &str = "DCCA";
 pub const EHXPLLL: &str = "EHXPLLL";
 
@@ -100,6 +101,18 @@ pub fn port_dir(kind: &str, port: &str) -> Option<Dir> {
             {
                 Some(Input)
             } else if bus(port, &["DOA", "DOB"]) {
+                Some(Output)
+            } else {
+                None
+            }
+        }
+        MULT18X18D => {
+            if bus(port, &["A", "B", "C", "SRIA", "SRIB"])
+                || matches!(port, "SIGNEDA" | "SIGNEDB" | "SOURCEA" | "SOURCEB")
+                || bus(port, &["CLK", "CE", "RST"])
+            {
+                Some(Input)
+            } else if bus(port, &["P", "ROA", "ROB", "ROC", "SROA", "SROB"]) || port == "SIGNEDP" {
                 Some(Output)
             } else {
                 None

@@ -13,7 +13,7 @@ use synth_core::FxHashMap;
 use synth_netlist::{CellId, Dir, NetId, Netlist, Param};
 
 use crate::arch::Arch;
-use crate::cells::{CCU2C, DP16KD, FF, LUT4};
+use crate::cells::{CCU2C, DP16KD, FF, LUT4, MULT18X18D};
 use crate::pack::lut_init;
 use crate::place::Placement;
 use crate::route::Routing;
@@ -341,6 +341,23 @@ impl TimingGraph {
                             starts.push((node(c, i), d as f64, k, neg));
                         } else if pin.dir == Dir::Input {
                             ends.push((node(c, i), bram_setup(&bram, name, &clock), k, neg));
+                        }
+                    }
+                }
+                MULT18X18D => {
+                    // Without registers: every input to every output.
+                    let t = speed.cells.get("MULT18X18D:REGS=NONE").cloned().unwrap_or_default();
+                    let outs: Vec<usize> =
+                        (0..36).filter_map(|i| pin_of(c, &format!("P{i}"))).collect();
+                    for (i, pin) in nl.cells[c].pins.iter().enumerate() {
+                        let name = nl.str(pin.name);
+                        if pin.dir != Dir::Input || pin.net.is_none() {
+                            continue;
+                        }
+                        let from = if name.starts_with("SIGNED") { name } else { &name[..1] };
+                        let d = arc(&t, from, "P");
+                        for &o in &outs {
+                            cell_arc(Some(i), Some(o), d);
                         }
                     }
                 }

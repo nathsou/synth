@@ -301,6 +301,45 @@ fn bram_config(
     Ok((TileGroup { tiles, config: cfg }, units))
 }
 
+/// The multiplier (`MULT18_<z>`) whose bel a tile of type `ttype` holds.
+pub(crate) fn dsp_z(ttype: &str) -> Option<usize> {
+    match ttype {
+        "MIB_DSP0" => Some(0),
+        "MIB_DSP1" => Some(1),
+        "MIB_DSP4" => Some(4),
+        "MIB_DSP5" => Some(5),
+        _ => None,
+    }
+}
+
+/// The tiles holding the settings of multiplier `z` at `(x, y)` (as
+/// nextpnr's `get_dsp_tiles`): the DSP block's five columns.
+pub(crate) fn dsp_tiles(arch: &Arch, x: usize, y: usize, z: usize) -> Result<Vec<String>, String> {
+    const DSP8: &[&str] = &["MIB_DSP8", "DSP_SPINE_UL0", "DSP_SPINE_UR0", "DSP_SPINE_UR1"];
+    // The block's first column, and its first tile type.
+    let (x0, first) = match z {
+        0 => (x, 0),
+        1 => (x - 1, 0),
+        4 => (x, 4),
+        5 => (x - 1, 4),
+        _ => return Err(format!("no multiplier {z}")),
+    };
+    let mut tiles = Vec::new();
+    for i in 0..5 {
+        let n = first + i;
+        let mib = format!("MIB_DSP{n}");
+        let types: Vec<&str> = if n == 8 { DSP8.to_vec() } else { vec![&mib] };
+        for types in [types, vec![&*format!("MIB2_DSP{n}")]] {
+            let t = arch
+                .dev
+                .tile_of_type(y, x0 + i, &types)
+                .ok_or_else(|| format!("no {types:?} tile at R{y}C{}", x0 + i))?;
+            tiles.push(t.name.clone());
+        }
+    }
+    Ok(tiles)
+}
+
 /// The bank voltage of an I/O standard.
 fn vccio(iotype: &str) -> Option<&'static str> {
     let t = iotype.trim_end_matches('D');
