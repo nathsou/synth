@@ -29,7 +29,13 @@ pub struct FlowOptions {
     pub freq: Option<f64>,
     /// Weight of timing against wirelength in placement (0..1).
     pub timing_weight: f64,
+    /// Placement seeds to place and route (on threads of their own), the
+    /// best timed kept.
+    pub tries: usize,
 }
+
+/// Default placement seeds to try.
+pub const TRIES: usize = 4;
 
 impl Default for FlowOptions {
     fn default() -> Self {
@@ -42,6 +48,7 @@ impl Default for FlowOptions {
             effort: 1.0,
             freq: None,
             timing_weight: crate::place::TIMING_WEIGHT,
+            tries: TRIES,
         }
     }
 }
@@ -126,6 +133,32 @@ pub fn clock_constraints(
     }
 }
 
+/// Placement and routing from one seed.
+#[allow(clippy::too_many_arguments)]
+fn place_and_route(
+    arch: &Arch,
+    nl: &Netlist,
+    packed: &crate::pack::Packed,
+    fixed: &FxHashMap<CellId, (usize, usize)>,
+    pads: &PadSites,
+    graph: &crate::timing::TimingGraph,
+    clocks: &crate::timing::ClockConstraints,
+    opts: &FlowOptions,
+    seed: u64,
+    log: &mut Vec<String>,
+) -> Result<(Placement, Routing), String> {
+    let t = Instant::now();
+    let timing = crate::place::PlaceTiming { graph, grade: &arch.speed.grade };
+    let popts = PlaceOptions { seed, effort: opts.effort, timing_weight: opts.timing_weight };
+    let placement = crate::place::place(nl, packed, &arch.grid, fixed, Some(timing), &popts, log)?;
+    log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
+    let t = Instant::now();
+    let routing =
+        crate::route::route(arch, nl, &placement, pads, clocks, crate::route::TIMING_ROUNDS, log)?;
+    log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
+    Ok((placement, routing))
+}
+
 /// Places, routes and configures a synthesised netlist.
 pub fn implement(
     arch: Arch,
@@ -142,28 +175,55 @@ pub fn implement(
     let pads = assign_pads(&arch, &nl, cons, log)?;
     let packed = crate::pack::pack(&nl)?;
     log.push(format!("packed in {:.2}s", t.elapsed().as_secs_f64()));
-    let t = Instant::now();
     let fixed: FxHashMap<CellId, (usize, usize)> =
         pads.iter().map(|(&c, &(x, y, _))| (c, (x, y))).collect();
     let clocks = clock_constraints(cons, opts);
     let graph = crate::timing::TimingGraph::new(&arch, &nl, &clocks);
-    let timing = crate::place::PlaceTiming { graph: &graph, grade: &arch.speed.grade };
-    let popts =
-        PlaceOptions { seed: opts.seed, effort: opts.effort, timing_weight: opts.timing_weight };
-    let placement =
-        crate::place::place(&nl, &packed, &arch.grid, &fixed, Some(timing), &popts, log)?;
-    log.push(format!("placed in {:.2}s", t.elapsed().as_secs_f64()));
-    let t = Instant::now();
-    let routing = crate::route::route(
-        &arch,
-        &nl,
-        &placement,
-        &pads,
-        &clocks,
-        crate::route::TIMING_ROUNDS,
-        log,
-    )?;
-    log.push(format!("routed in {:.2}s", t.elapsed().as_secs_f64()));
+    // Each seed placed and routed on a thread of its own; the best timed
+    // kept. Seeds after the first are far from it.
+    let tries = opts.tries.max(1);
+    let seeds: Vec<u64> =
+        (0..tries as u64).map(|k| opts.seed.wrapping_add(k * 1_000_003)).collect();
+    let runs = synth_core::par::map(&seeds, tries, |&seed| {
+        let mut log = Vec::new();
+        let run = place_and_route(
+            &arch, &nl, &packed, &fixed, &pads, &graph, &clocks, opts, seed, &mut log,
+        );
+        // Each clock's period beyond its target (or its period, without
+        // one), worst first.
+        let score = run.as_ref().ok().map(|(placement, routing)| {
+            let delays = crate::timing::routed_delays(&arch, &nl, placement, routing, &graph);
+            let a = graph.analyse(&delays);
+            a.period
+                .iter()
+                .zip(&graph.clocks)
+                .map(|(p, c)| p - c.target_ps.unwrap_or(0.0))
+                .fold(f64::NEG_INFINITY, f64::max)
+        });
+        (run, log, score)
+    });
+    let best = (0..runs.len())
+        .filter(|&i| runs[i].2.is_some())
+        .min_by(|&a, &b| runs[a].2.unwrap().total_cmp(&runs[b].2.unwrap()))
+        .unwrap_or(0);
+    let scores: Vec<String> = runs
+        .iter()
+        .zip(&seeds)
+        .map(|((_, _, score), seed)| match score {
+            Some(s) => format!("seed {seed}: {:.2} ns", s / 1000.0),
+            None => format!("seed {seed}: failed"),
+        })
+        .collect();
+    let (run, kept, _) = runs.into_iter().nth(best).expect("a run per seed");
+    log.extend(kept);
+    if tries > 1 {
+        log.push(format!(
+            "kept seed {} of {tries} (worst period beyond its target: {})",
+            seeds[best],
+            scores.join(", ")
+        ));
+    }
+    let (placement, routing) = run?;
     let t = Instant::now();
     let timing = crate::timing::analyse(&arch, &nl, &placement, &routing, &clocks);
     for c in &timing.clocks {

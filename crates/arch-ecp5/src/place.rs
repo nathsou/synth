@@ -520,12 +520,7 @@ impl<'a> Annealer<'a> {
     /// Tries moving chain `ch` to start at `(row, start)`, the logic cells
     /// there taking the slots it leaves; if legal, applies it and returns
     /// the slots' previous contents and the cells moved.
-    fn move_chain(
-        &mut self,
-        ch: usize,
-        row: usize,
-        start: usize,
-    ) -> Option<(Saved, Vec<CellId>)> {
+    fn move_chain(&mut self, ch: usize, row: usize, start: usize) -> Option<(Saved, Vec<CellId>)> {
         let (orow, ostart) = self.chain_at[ch];
         if (orow, ostart) == (row, start) {
             return None;

@@ -33,6 +33,7 @@ jobs:
       pnr: ${{ steps.f.outputs.pnr }}
       playground: ${{ steps.f.outputs.playground }}
       artix7: ${{ steps.f.outputs.artix7 }}
+      ecp5: ${{ steps.f.outputs.ecp5 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,13 +132,14 @@ jobs:
   simulation:
     name: simulation
     needs: changes
-    if: (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pnr == 'true' || needs.changes.outputs.artix7 == 'true') && !github.event.pull_request.draft
+    if: (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pnr == 'true' || needs.changes.outputs.artix7 == 'true' || needs.changes.outputs.ecp5 == 'true') && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     env:
       SYNTH: ${{ github.workspace }}/target/ci/synth
       FRONTEND: ${{ needs.changes.outputs.frontend }}
       PNR: ${{ needs.changes.outputs.pnr }}
       ARTIX7: ${{ needs.changes.outputs.artix7 }}
+      ECP5: ${{ needs.changes.outputs.ecp5 }}
     steps:
       - uses: actions/checkout@v4
       # The runner context is not available to the job's env.
@@ -155,10 +157,11 @@ jobs:
       - name: Install reference tools (test oracles only)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm) $([ "$ARTIX7" = true ] && echo cmake g++ python3-venv)
+          sudo apt-get install -y --no-install-recommends yosys iverilog $([ "$PNR" = true ] && echo fpga-icestorm) $([ "$ARTIX7" = true ] && echo cmake g++ python3-venv) $([ "$ECP5" = true ] && echo fpga-trellis fpga-trellis-database)
       - name: Build
         run: cargo build --profile ci -p synth
       - name: In-process simulation (synth sim)
+        if: env.FRONTEND == 'true' || env.PNR == 'true'
         run: tools/ci_sim.sh
       - name: Bitstream-level simulation
         if: env.PNR == 'true'
@@ -175,6 +178,12 @@ jobs:
       - name: RTL and synthesised netlists give the answers
         if: env.FRONTEND == 'true'
         run: tools/ci_euler.sh
+      - name: ECP5 netlists, bitstreams and Euler answers vs RTL
+        if: env.ECP5 == 'true'
+        run: tools/ci_ecp5.sh
+      - name: ECP5 bitstreams against ecppack, ecpunpack and pytrellis' arcs
+        if: env.ECP5 == 'true'
+        run: cargo test --profile ci -p arch-ecp5 --test trellis
       - name: Fetch Artix-7 simulation models
         if: env.ARTIX7 == 'true'
         run: tools/fetch_xc7_models.sh "$XILINX_UNISIM"
