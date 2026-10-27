@@ -218,8 +218,10 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
 /// Elaborates and synthesises the design for the selected architecture.
 fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     let family = a.value("--family").unwrap_or_else(|| "ice40".into());
-    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7") {
-        return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
+    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7" | "ecp5") {
+        return Err(format!(
+            "unknown synthesis family `{family}` (expected ice40, ecp5, artix7 or xc7)"
+        ));
     }
     let t = std::time::Instant::now();
     synth_core::progress::step("elaborate", "");
@@ -237,6 +239,11 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
             synth_opts.lower.carry_min_width = Some(width);
         }
         arch_ice40::synth::synthesize(m, &synth_opts)?
+    } else if family == "ecp5" {
+        if a.value("--carry-min-width").is_some() {
+            return Err("--carry-min-width currently requires --family ice40".into());
+        }
+        arch_ecp5::synth::synthesize(m, &arch_ecp5::synth::SynthOptions::default())?
     } else {
         if a.value("--carry-min-width").is_some() {
             return Err("--carry-min-width currently requires --family ice40".into());
@@ -363,18 +370,30 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--freq",
             "--route-timing-rounds",
             "--incremental",
+            "--lpf",
+            "--speed",
+            "--textcfg",
         ],
-        &["--timing-allow-fail"],
+        &["--timing-allow-fail", "--compress"],
         &["--incremental"],
     )?;
     if let Some(f) = a.value("--family")
-        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7" | "ecp5")
     {
-        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+        return Err(format!("unknown family `{f}` (expected ice40, ecp5, artix7 or xc7)"));
     }
     if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
         let nl = synthesize(&mut a)?;
         return xc7::finish(nl, &mut a);
+    }
+    if a.value("--family").is_some_and(|f| f == "ecp5") {
+        let nl = synthesize(&mut a)?;
+        return ecp5::finish(nl, &mut a);
+    }
+    for option in ["--lpf", "--speed", "--textcfg"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family ecp5"));
+        }
     }
     for option in ["--db", "--xdc", "--fasm"] {
         if a.value(option).is_some() {

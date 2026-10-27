@@ -46,7 +46,7 @@ struct TemplateArc {
 }
 
 /// The size prefix of names that exist only on this device.
-fn size_prefix(device: &str) -> &'static str {
+pub fn size_prefix(device: &str) -> &'static str {
     if device.contains("25F") || device.contains("12F") {
         "25K_"
     } else if device.contains("45F") {
