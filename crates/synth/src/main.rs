@@ -8,6 +8,7 @@ macro_rules! info {
 }
 
 mod args;
+mod ecp5;
 mod progress;
 mod sim;
 mod xc7;
@@ -25,12 +26,14 @@ USAGE:
 COMMANDS:
     check      Check Verilog or Weft sources and report errors
     build      Synthesise, place and route a design into a bitstream
-    synth      Synthesise a design to iCE40 or Artix-7 primitives (--verilog <out.v>)
+    synth      Synthesise a design to iCE40, Artix-7 or ECP5 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
     sim        Simulate a design (or write it as a C model with --emit-c)
     pnr        Place and route a mapped netlist (RTLIL)
     pack-fasm  Assemble Artix-7 FASM into a bitstream
     unpack-xc7 Decode Artix-7 frames, checking ECC and CRC
+    pack-ecp5  Assemble an ECP5 textual configuration into a bitstream
+    unpack-ecp5 Decode an ECP5 bitstream to its textual configuration
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
     fmt        Format Weft sources in place (--check: only report)
@@ -68,7 +71,7 @@ BUILD OPTIONS:
               Put bare --incremental after input files or before another option.
 
 SYNTH OPTIONS:
-    synth synth <files.v|.weft...> [--family <ice40|artix7|xc7>] [--top <module>]
+    synth synth <files.v|.weft...> [--family <ice40|artix7|xc7|ecp5>] [--top <module>]
               [-I <dir>] [-D <NAME[=VAL]>] [-P <NAME=VALUE>]
               [--verilog <out.v>] [--rename <module>] [--pack-stats]
               --pack-stats reports native Artix-7 packing resource counts.
@@ -85,6 +88,25 @@ ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
               Timing closure is not certified; --timing-allow-fail is required.
     synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
     synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
+
+ECP5 OPTIONS (EXPERIMENTAL):
+    synth build <files.v|.weft...> --family ecp5 --device <LFE5U-25F|...>
+              [--package <CABGA381|...>] [--speed <6|7|8>] [--lpf <file>]
+              [--top <module>] [-o <out.bit>] [--seed <n>] [--effort <n>]
+              [--tries <n>] [--timing-weight <0..1>] [--freq <MHz>] [--db <dir>]
+              [--textcfg <out.config>] [--compress]
+              Clock targets: `FREQUENCY PORT|NET` in the LPF, --freq for the
+              other clocks; a PLL's output is timed at its frequency (timing
+              is reported, not enforced). Ports without a LOCATE go on free
+              pins (with a warning). --textcfg also writes Trellis' textual
+              configuration; --compress compresses the bitstream.
+    synth pack-ecp5 <in.config> -o <out.bit> [--compress] [--db <dir>]
+    synth unpack-ecp5 <in.bit> [-o <out.config>] [--timing [--speed <n>]
+              [--freq <MHz>]] [--db <dir>]
+              Byte for byte as Project Trellis' ecppack and ecpunpack;
+              --timing reports the Fmax of what the bitstream implements. The
+              database (prjtrellis-db) is --db, else SYNTH_TRELLIS_DB, else
+              /usr/share/trellis/database (Debian: fpga-trellis-database).
 
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -105,7 +127,8 @@ SIM OPTIONS:
               [--reset <name>] [--reset-low <name>] [--cycles <n>] [--hold <n>]
               [--seed <n>]
               (bitstream: --device <dev> --package <pkg> --pcf <file>
-              [--bitstream <file.bin>] [--freq <MHz>])
+              [--bitstream <file.bin>] [--freq <MHz>]; with --family ecp5,
+              --lpf <file> and --bitstream <file.bit>)
               Runs cycles of the clock (default `clk`): inputs set by --set
               and --at, then a rising and a falling edge. Stops after --cycles
               (default 1000) or once --until holds, then prints --print
@@ -118,10 +141,11 @@ SIM OPTIONS:
               optimizations first and merges bit-level multiplexers and
               flip-flops into words: faster, but internal signals may be
               gone or renamed. --stats prints what the program runs.
-              --level synth simulates the iCE40 netlist synthesis makes of
-              the design, --level bitstream what its bitstream implements
-              (built, or read from --bitstream), decoded back to cells; ports
-              are named after the PCF.
+              --level synth simulates the iCE40 (--family ecp5: ECP5)
+              netlist synthesis makes of the design, --level bitstream what
+              its bitstream implements (built, or read from --bitstream),
+              decoded back to cells; ports are named after the PCF (LPF).
+              synth_pll is a wire: its output is its input, locked.
               --compare runs the RTL and the netlist or bitstream under the
               same random inputs (held about --hold cycles; resets active for
               the first 4 cycles) and compares every output bit the RTL
@@ -160,6 +184,8 @@ fn main() -> ExitCode {
         Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
         Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),
         Some("unpack-xc7") => xc7::unpack(&argv[1..]),
+        Some("pack-ecp5") => ecp5::pack(&argv[1..]),
+        Some("unpack-ecp5") => ecp5::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),
@@ -206,8 +232,10 @@ impl synth_rtlil::PrimitiveLibrary for Ice40Lib {
 /// Elaborates and synthesises the design for the selected architecture.
 fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
     let family = a.value("--family").unwrap_or_else(|| "ice40".into());
-    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7") {
-        return Err(format!("unknown synthesis family `{family}` (expected ice40, artix7 or xc7)"));
+    if !matches!(family.as_str(), "ice40" | "artix7" | "xc7" | "ecp5") {
+        return Err(format!(
+            "unknown synthesis family `{family}` (expected ice40, ecp5, artix7 or xc7)"
+        ));
     }
     let t = std::time::Instant::now();
     synth_core::progress::step("elaborate", "");
@@ -225,6 +253,11 @@ fn synthesize(a: &mut Args) -> Result<synth_netlist::Netlist, String> {
             synth_opts.lower.carry_min_width = Some(width);
         }
         arch_ice40::synth::synthesize(m, &synth_opts)?
+    } else if family == "ecp5" {
+        if a.value("--carry-min-width").is_some() {
+            return Err("--carry-min-width currently requires --family ice40".into());
+        }
+        arch_ecp5::synth::synthesize(m, &arch_ecp5::synth::SynthOptions::default())?
     } else {
         if a.value("--carry-min-width").is_some() {
             return Err("--carry-min-width currently requires --family ice40".into());
@@ -351,18 +384,30 @@ fn cmd_build(argv: &[String]) -> Result<(), String> {
             "--freq",
             "--route-timing-rounds",
             "--incremental",
+            "--lpf",
+            "--speed",
+            "--textcfg",
         ],
-        &["--timing-allow-fail"],
+        &["--timing-allow-fail", "--compress"],
         &["--incremental"],
     )?;
     if let Some(f) = a.value("--family")
-        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7")
+        && !matches!(f.as_str(), "ice40" | "artix7" | "xc7" | "ecp5")
     {
-        return Err(format!("unknown family `{f}` (expected ice40, artix7 or xc7)"));
+        return Err(format!("unknown family `{f}` (expected ice40, ecp5, artix7 or xc7)"));
     }
     if a.value("--family").is_some_and(|f| matches!(f.as_str(), "artix7" | "xc7")) {
         let nl = synthesize(&mut a)?;
         return xc7::finish(nl, &mut a);
+    }
+    if a.value("--family").is_some_and(|f| f == "ecp5") {
+        let nl = synthesize(&mut a)?;
+        return ecp5::finish(nl, &mut a);
+    }
+    for option in ["--lpf", "--speed", "--textcfg"] {
+        if a.value(option).is_some() {
+            return Err(format!("{option} requires --family ecp5"));
+        }
     }
     for option in ["--db", "--xdc", "--fasm"] {
         if a.value(option).is_some() {

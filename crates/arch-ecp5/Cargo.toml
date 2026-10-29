@@ -1,0 +1,19 @@
+[package]
+name = "arch-ecp5"
+description = "Lattice ECP5 support: the Project Trellis database, routing graph, bitstreams and the native flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+synth-core.workspace = true
+synth-logic.workspace = true
+synth-netlist.workspace = true
+synth-rtl.workspace = true
+synth-route.workspace = true
+
+[lints]
+workspace = true

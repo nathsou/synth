@@ -25,11 +25,12 @@ use synth_core::{FxHashMap, FxHashSet};
 
 use crate::{Graph, NetRequest, QueueEntry};
 
+/// A lookahead table (see [`crate::lookahead`]).
 #[derive(Debug, Clone)]
-pub(crate) struct Lookahead {
+pub struct Lookahead {
     radius: i16,
-    /// The sinks of the kinds sampled, which the table bounds.
-    informed: FxHashSet<u32>,
+    /// The kinds of sink sampled, which the table bounds wherever they are.
+    kinds: FxHashSet<Vec<u16>>,
     /// Per class, then `|dy|`, then `|dx|`.
     cost: Vec<f32>,
     delay: Vec<f32>,
@@ -55,6 +56,24 @@ fn class_of(class: &[u16], node: usize) -> usize {
     class.get(node).map_or(0, |&c| c as usize)
 }
 
+/// A sink's kind: the classes of the nodes entering it.
+pub(crate) fn kind(
+    preds: &[u32],
+    pred_edges: &[u32],
+    edge_src: &[u32],
+    class: &[u16],
+    sink: u32,
+) -> Vec<u16> {
+    let k = sink as usize;
+    let mut entering: Vec<u16> = pred_edges[preds[k] as usize..preds[k + 1] as usize]
+        .iter()
+        .map(|&e| class_of(class, edge_src[e as usize] as usize) as u16)
+        .collect();
+    entering.sort_unstable();
+    entering.dedup();
+    entering
+}
+
 impl Lookahead {
     pub(crate) fn new(
         g: &Searched<'_>,
@@ -70,19 +89,13 @@ impl Lookahead {
         let mut kind_of: FxHashMap<Vec<u16>, usize> = FxHashMap::default();
         let mut sink_kind = Vec::with_capacity(sinks.len());
         for &k in &sinks {
-            let k = k as usize;
-            let mut entering: Vec<u16> = g.pred_edges[g.preds[k] as usize..g.preds[k + 1] as usize]
-                .iter()
-                .map(|&e| class_of(class, g.edge_src[e as usize] as usize) as u16)
-                .collect();
-            entering.sort_unstable();
-            entering.dedup();
+            let entering = kind(g.preds, g.pred_edges, g.edge_src, class, k);
             let next = kinds.len();
             let i = *kind_of.entry(entering).or_insert(next);
             if i == next {
                 kinds.push(Vec::new());
             }
-            kinds[i].push(k as u32);
+            kinds[i].push(k);
             sink_kind.push(i);
         }
         // Samples spread over all sinks, then the middle sink of each kind
@@ -99,12 +112,12 @@ impl Lookahead {
                 *sampled = true;
             }
         }
-        let informed: FxHashSet<u32> = kinds
-            .iter()
-            .zip(&sampled)
-            .filter(|&(_, &s)| s)
-            .flat_map(|(kind, _)| kind.iter().copied())
-            .collect();
+        let mut sampled_kinds: FxHashSet<Vec<u16>> = FxHashSet::default();
+        for (entering, &i) in &kind_of {
+            if sampled[i] {
+                sampled_kinds.insert(entering.clone());
+            }
+        }
         let side = radius as usize + 1;
         let cells = side * side;
         let classes = class.iter().map(|&c| c as usize + 1).max().unwrap_or(1);
@@ -177,13 +190,13 @@ impl Lookahead {
         };
         let cost_slope = fill(&mut cost);
         let delay_slope = fill(&mut delay);
-        Lookahead { radius, informed, cost, delay, cost_slope, delay_slope }
+        Lookahead { radius, kinds: sampled_kinds, cost, delay, cost_slope, delay_slope }
     }
 
-    /// Whether the table bounds the remaining cost to `sink` (one of the
-    /// sinks it was built for, of a kind it sampled).
-    pub(crate) fn informs(&self, sink: u32) -> bool {
-        self.informed.contains(&sink)
+    /// Whether the table bounds the remaining cost to sinks of `kind` (one
+    /// it sampled).
+    pub(crate) fn informs(&self, kind: &[u16]) -> bool {
+        self.kinds.contains(kind)
     }
 
     /// Lower bounds on the cost and delay of reaching a sink `(dx, dy)`

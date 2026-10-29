@@ -36,6 +36,30 @@ pub use compile::Options;
 use exec::State;
 use program::{Loc, Program, SlotKind};
 
+/// Makes every `synth_pll` of `m` a wire: its output is its input, locked
+/// from the start, as the backends' PLL models behave (a simulation's
+/// cycles are those of whichever clock a flip-flop reads).
+pub fn plls_as_wires(m: &mut Module) {
+    let mut wires = Vec::new();
+    for c in m.cells.iter_mut().filter(|c| c.alive) {
+        let synth_rtl::CellKind::Instance(i) = &c.kind else { continue };
+        if i.module != "synth_pll" {
+            continue;
+        }
+        let port =
+            |name: &str| i.conns.iter().find(|(n, _, _)| n == name).map(|(_, _, s)| s.clone());
+        if let (Some(input), Some(output)) = (port("clk_in"), port("clk_out")) {
+            wires.push((output, input));
+        }
+        if let Some(locked) = port("locked") {
+            let one = synth_core::LogicVec::from_u64(1, locked.width());
+            wires.push((locked, synth_rtl::Sig::from_const(&one)));
+        }
+        c.alive = false;
+    }
+    m.connections.extend(wires);
+}
+
 /// A named signal, resolved to its bits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signal {

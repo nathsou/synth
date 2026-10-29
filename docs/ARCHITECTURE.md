@@ -12,8 +12,8 @@ phased plan for getting there is in [ROADMAP.md](ROADMAP.md).
 1. **One self-contained tool** (`synth`) that goes from HDL to a programmable
    bitstream for:
    - Lattice **iCE40** (LP/HX/UltraPlus),
-   - Lattice **ECP5** (LFE5U / LFE5UM / LFE5UM5G), deferred: out of scope until
-     there is hardware to validate on (see the roadmap),
+   - Lattice **ECP5** (LFE5U / LFE5UM / LFE5UM5G), experimental: verified
+     without hardware until there is a board (ADR 0009, [ECP5.md](ECP5.md)),
    - Xilinx **Artix-7** (XC7A35T/50T/100T/200T; Spartan-7, Kintex-7 and Zynq-7 PL
      come almost for free later because they share the 7-series fabric and database).
 2. **No external tools at runtime.** No Yosys, ABC, nextpnr, Python, Tcl, or vendor
@@ -582,7 +582,8 @@ Correctness is the first QoR metric: a fast bitstream that is wrong is worthless
 
    Tests run firmware and check UART output (riscv-tests, Dhrystone/CoreMark,
    memory tests). There is no ECP5 board yet. Until one is added, ECP5 is verified
-   by bitstream round-trip only (item 5).
+   by bitstream round-trip only (item 5): `tools/ci_ecp5.sh` simulates decoded
+   bitstreams against their RTL.
 8. **QoR regression** (`bench/`): the benchmark suite runs on every merge. It
    records LUT/FF/BRAM/DSP counts, Fmax per clock, runtime and peak memory, and
    compares them with stored baselines from vendor tools and Yosys+nextpnr. CI

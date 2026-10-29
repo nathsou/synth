@@ -31,6 +31,9 @@ algorithms are described at the top of each file.
 - `euler_top.v`, `alchitry_cu.pcf`: the board shell for the Alchitry Cu. The
   solver runs on the 100 MHz oscillator (HDLean's shell uses the PLL), the
   reporter on 50 MHz.
+- `euler_board.v`: the board-neutral shell of the playground (a PLL's
+  clock, the reporter on the same clock); `p031_board.v` puts P31 in it on
+  a 25 MHz board clock, for the PLL checks of `tools/ci_ecp5.sh`.
 - `tb.v`, `designs.txt`: the testbench and the expected results.
 
 `tools/ci_euler.sh` checks every solver's RTL and its synthesised netlist in

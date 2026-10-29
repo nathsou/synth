@@ -14,6 +14,7 @@ GitHub Actions outputs:
               place and route): the frontend crates too, plus RTLIL, routing
               and the iCE40 backend
   artix7      the Artix-7 primitive and physical encoding suites
+  ecp5        the ECP5 suite (netlists and bitstreams against the RTL)
   playground  the WebAssembly build and the web app's checks
 
 Usage: git diff --name-only BASE...HEAD | tools/ci_changes.py
@@ -35,6 +36,9 @@ PNR_FILES = ('tools/ci_bitsim.sh', 'tools/ci_incremental.sh', 'tools/bitsim.py',
 
 ARTIX7_CRATES = FRONTEND_CRATES | {'synth-rtlil', 'synth-route', 'arch-xc7'}
 ARTIX7_FILES = ('tools/ci_artix7', 'tools/fetch_xc7', 'tools/prepare_xc7', 'tools/xc7-test-requirements.txt')
+
+ECP5_CRATES = FRONTEND_CRATES | {'synth-route', 'arch-ecp5'}
+ECP5_FILES = ('tools/ci_ecp5.sh', 'tests/designs/')
 
 PLAYGROUND_FILES = ('editors/', 'tools/build_playground.sh')
 
@@ -79,7 +83,9 @@ def decide(paths, crates):
     pnr = everything or bool(changed & PNR_CRATES) or any(p.startswith(PNR_FILES) for p in paths)
     playground = everything or 'synth-playground' in affected or any(p.startswith(PLAYGROUND_FILES) for p in paths)
     artix7 = everything or bool(changed & ARTIX7_CRATES) or any(p.startswith(ARTIX7_FILES) for p in paths)
-    return {'artix7': artix7, 'packages': packages, 'frontend': frontend, 'pnr': pnr, 'playground': playground}
+    ecp5 = everything or bool(changed & ECP5_CRATES) or any(p.startswith(ECP5_FILES) for p in paths)
+    return {'artix7': artix7, 'ecp5': ecp5, 'packages': packages, 'frontend': frontend, 'pnr': pnr,
+            'playground': playground}
 
 
 def main():

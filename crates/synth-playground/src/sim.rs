@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use synth_core::Json;
 use synth_core::time::Instant;
-use synth_rtl::{CellKind, Module, PortDir, Sig};
+use synth_rtl::{Module, PortDir};
 use synth_sim::{Options, Signal, Sim};
 
 /// The simulated clock: 8 cycles per bit at 115200 baud.
@@ -153,31 +153,9 @@ pub struct Session {
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
-/// `synth_pll` as a wire: its output is its input, locked from the start.
-fn plls_as_wires(m: &mut Module) {
-    let mut wires = Vec::new();
-    for c in m.cells.iter_mut().filter(|c| c.alive) {
-        let CellKind::Instance(i) = &c.kind else { continue };
-        if i.module != "synth_pll" {
-            continue;
-        }
-        let port =
-            |name: &str| i.conns.iter().find(|(n, _, _)| n == name).map(|(_, _, s)| s.clone());
-        if let (Some(input), Some(output)) = (port("clk_in"), port("clk_out")) {
-            wires.push((output, input));
-        }
-        if let Some(locked) = port("locked") {
-            let one = synth_core::LogicVec::from_u64(1, locked.width());
-            wires.push((locked, Sig::from_const(&one)));
-        }
-        c.alive = false;
-    }
-    m.connections.extend(wires);
-}
-
 /// Starts a simulation of an elaborated design, replacing any other.
 pub fn start(mut module: Module, hz: u64) -> Result<Json, String> {
-    plls_as_wires(&mut module);
+    synth_sim::plls_as_wires(&mut module);
     let mut ports: Vec<(u32, String, PortDir, usize)> = module
         .wires
         .iter()

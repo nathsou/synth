@@ -1,6 +1,6 @@
 # 0005: Target families and order
 
-Status: Accepted
+Status: Accepted (ECP5 superseded by 0009)
 
 ## Context
 

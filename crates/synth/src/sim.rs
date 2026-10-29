@@ -96,6 +96,20 @@ pub fn synthesized(m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
     synth_sim::netlist::from_netlist(&nl, &mut arch_ice40::sim::add_cell)
 }
 
+/// Whether `--family` names ECP5 (else iCE40).
+fn ecp5(a: &mut Args) -> Result<bool, String> {
+    match a.value("--family").as_deref() {
+        None | Some("ice40") => Ok(false),
+        Some("ecp5") => Ok(true),
+        Some(f) => Err(format!("sim supports --family ice40 or ecp5, not `{f}`")),
+    }
+}
+
+/// The design after synthesis for `--family`.
+fn synthesized_for(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    if ecp5(a)? { crate::ecp5::synthesized(m) } else { synthesized(m) }
+}
+
 pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(
         argv,
@@ -123,6 +137,10 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             "--device",
             "--package",
             "--pcf",
+            "--lpf",
+            "--family",
+            "--speed",
+            "--db",
             "--bitstream",
             "--freq",
             "--timing-weight",
@@ -137,8 +155,11 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
     }
     let level = a.value("--level").unwrap_or_else(|| "rtl".into());
     m = match level.as_str() {
-        "rtl" => m,
-        "synth" => synthesized(m)?,
+        "rtl" => {
+            synth_sim::plls_as_wires(&mut m);
+            m
+        }
+        "synth" => synthesized_for(&mut a, m)?,
         "bitstream" => bitstream(&mut a, m)?,
         _ => return Err(format!("--level expects rtl, synth or bitstream, got `{level}`")),
     };
@@ -392,13 +413,14 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
 }
 
 /// `--compare synth`: the RTL (two-state constants and initial values,
-/// four-state simulation) against its iCE40 netlist under random inputs,
+/// four-state simulation) against its netlist under random inputs,
 /// comparing every output bit the RTL defines after every rising edge.
 fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String> {
     let mut reference = m.clone();
+    synth_sim::plls_as_wires(&mut reference);
     synth_rtl::opt::two_state(&mut reference);
     let other = match what {
-        "synth" => synthesized(m)?,
+        "synth" => synthesized_for(a, m)?,
         "bitstream" => bitstream(a, m)?,
         _ => return Err(format!("--compare expects `synth` or `bitstream`, got `{what}`")),
     };
@@ -522,9 +544,12 @@ fn compare(a: &mut Args, m: synth_rtl::Module, what: &str) -> Result<(), String>
     Ok(())
 }
 
-/// What the iCE40 bitstream of the design (built, or read from
-/// --bitstream) implements, decoded back to cells, as RTL.
+/// What the bitstream of the design (built, or read from --bitstream)
+/// implements, decoded back to cells, as RTL.
 fn bitstream(a: &mut Args, m: synth_rtl::Module) -> Result<synth_rtl::Module, String> {
+    if ecp5(a)? {
+        return crate::ecp5::decoded(a, m);
+    }
     let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
     let package = a.required("--package")?;
     let pcf = arch_ice40::pcf::parse_pcf(&crate::read(&a.required("--pcf")?)?)?;
