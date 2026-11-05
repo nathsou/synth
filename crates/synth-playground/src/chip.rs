@@ -217,7 +217,7 @@ pub fn chip(imp: &Implementation, opts: &FlowOptions) -> (Json, Json) {
         let mut pips = Vec::new();
         for &e in &imp.routing.net_edges[n] {
             let pip = g.edge_pip[e as usize];
-            if Arch::permutation(pip).is_some() {
+            if Arch::is_virtual(pip) {
                 continue;
             }
             let (a, b) = (src_of(e), g.edge_dst[e as usize]);

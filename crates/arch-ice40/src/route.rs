@@ -42,7 +42,7 @@ impl Routing {
 /// Whether input `I<k>` of a logic cell may arrive on any free LUT input:
 /// not the carry's operands (`I1`, `I2` with the carry enabled) nor `I3` fed
 /// by the carry chain.
-fn permutable(nl: &Netlist, c: CellId, k: usize) -> bool {
+pub(crate) fn permutable(nl: &Netlist, c: CellId, k: usize) -> bool {
     let carry = nl.param(c, "CARRY_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0;
     match k {
         1 | 2 => !carry,
@@ -277,7 +277,13 @@ pub(crate) fn route_incremental(
     checkpoint: Option<&crate::checkpoint::Checkpoint>,
 ) -> Result<Routing, String> {
     let g = &arch.graph;
-    let costs: Vec<f32> = g.node_class.iter().map(|&c| node_cost(c)).collect();
+    let mut costs: Vec<f32> = g.node_class.iter().map(|&c| node_cost(c)).collect();
+    // A LUT cascade into the next cell takes no local track: cheaper.
+    for c in nl.live_cells() {
+        if let Some(n) = placement.cell_bel.get(&c).and_then(|&b| arch.cascade_node(b)) {
+            costs[n.index()] = 0.5;
+        }
+    }
     let graph = Graph {
         offsets: &g.offsets,
         edge_dst: &g.edge_dst,
@@ -316,6 +322,16 @@ pub(crate) fn route_incremental(
     // The carry reads the physical pins in1 and in2: no other signal may
     // arrive there through the LUT input permutation.
     let mut blocked = Vec::new();
+    // The cascade output of a cell with a flip-flop is the LUT's, not the
+    // cell's (registered) output.
+    for c in nl.live_cells() {
+        if nl.cell_kind(c) == LC
+            && nl.param(c, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0
+            && let Some(n) = placement.cell_bel.get(&c).and_then(|&b| arch.cascade_node(b))
+        {
+            blocked.push(n.raw());
+        }
+    }
     for c in nl.live_cells() {
         if nl.cell_kind(c) == LC && !permutable(nl, c, 1) {
             for p in ["I1", "I2"] {

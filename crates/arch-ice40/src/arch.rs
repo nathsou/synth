@@ -298,6 +298,14 @@ pub const SPAN12_V: u8 = 4;
 /// Graph edges marked with this tile are LUT input permutations, not pips.
 pub const PERMUTATION_TILE: u16 = u16::MAX;
 
+/// Graph edges marked with this tile lead from a logic cell's output to its
+/// LUT cascade output (`lutff_<z>/lout`), not pips: the LUT drives both, so
+/// a combinational cell's net can also take the cascade into input 2 of the
+/// next cell of the tile (the `lout` pip), bypassing the local tracks. The
+/// router keeps nets off the cascades of cells with a flip-flop, whose
+/// output is not the LUT's.
+pub const CASCADE_TILE: u16 = u16::MAX - 1;
+
 impl Arch {
     pub fn new(part: Part, package: &str) -> Result<Arch, String> {
         let db = ChipDb::get(part.die());
@@ -598,6 +606,18 @@ impl Arch {
                 }
             }
         }
+        for bel in &self.bels {
+            if bel.kind != BelKind::Lc || bel.z == 7 {
+                continue;
+            }
+            let lout =
+                db.node_by_name(bel.x as usize, bel.y as usize, &format!("lutff_{}/lout", bel.z));
+            if let (Some(out), Some(lout)) = (bel.pin("O"), lout) {
+                count[out.index()] += 1;
+                let pip = PipRef { tile: CASCADE_TILE, tpip: bel.z as u16 };
+                edges.push((out.raw(), lout.raw(), pip, (0.0, 0)));
+            }
+        }
         for y in 0..db.grid_height() {
             for x in 0..gw {
                 let t = db.tile_template[y * gw + x];
@@ -681,6 +701,22 @@ impl Arch {
     /// input it feeds.
     pub fn permutation(pip: PipRef) -> Option<(usize, usize)> {
         (pip.tile == PERMUTATION_TILE).then_some((pip.tpip as usize / 4, pip.tpip as usize % 4))
+    }
+
+    /// Whether a routing graph edge is a pseudo-pip with no configuration:
+    /// a LUT input permutation or the way into a LUT cascade output.
+    pub fn is_virtual(pip: PipRef) -> bool {
+        pip.tile == PERMUTATION_TILE || pip.tile == CASCADE_TILE
+    }
+
+    /// The LUT cascade output (`lutff_<z>/lout`) of each logic cell bel that
+    /// has one.
+    pub fn cascade_node(&self, bel: BelId) -> Option<NodeId> {
+        let b = self.bel(bel);
+        if b.kind != BelKind::Lc || b.z == 7 {
+            return None;
+        }
+        self.db.node_by_name(b.x as usize, b.y as usize, &format!("lutff_{}/lout", b.z))
     }
 
     /// Estimated delays of unrouted connections between logic cells.
@@ -865,6 +901,10 @@ fn template_pip_delays(db: &ChipDb, t: &TileTemplate) -> Vec<(f32, u8)> {
                 mux("LocalMux")
             } else if dst.starts_with("glb2local") {
                 mux("Glb2LocalMux")
+            } else if src.ends_with("/lout") {
+                // A LUT output cascaded into the next cell's input 2: the
+                // cell's `ltout` arc is all its delay (icetime adds none).
+                0.0
             } else if dst.starts_with("io_") && src.starts_with("local_") {
                 mux("IoInMux")
             } else if dst.contains("/in_") || dst.starts_with("ram/") {
