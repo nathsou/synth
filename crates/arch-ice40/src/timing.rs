@@ -113,6 +113,21 @@ pub fn routed_node_delays(arch: &Arch, source: Option<u32>, edges: &[u32]) -> Fx
     delay
 }
 
+/// How much slower each physical LUT input is than the fastest (`in3`), in
+/// picoseconds: through the LUT (`lcout`), and to the flip-flop (setup).
+/// The router weighs the LUT input permutation by these.
+pub fn lut_input_penalties(arch: &Arch) -> ([f32; 4], [f32; 4]) {
+    let arcs = Arcs { arch, cache: Default::default() };
+    const INS: [&str; 4] = ["in0", "in1", "in2", "in3"];
+    let comb = INS.map(|p| arcs.get("LogicCell40", ArcKind::IoPath, p, "lcout"));
+    let setup = INS.map(|p| arcs.get("LogicCell40", ArcKind::Setup, p, "clk"));
+    let rel = |v: [f64; 4]| {
+        let min = v.iter().copied().fold(f64::INFINITY, f64::min);
+        v.map(|d| (d - min).max(0.0) as f32)
+    };
+    (rel(comb), rel(setup))
+}
+
 /// Analyses a placed and routed design against the clock targets.
 pub fn analyse(
     arch: &Arch,

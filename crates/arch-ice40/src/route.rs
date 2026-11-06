@@ -284,10 +284,32 @@ pub(crate) fn route_incremental(
             costs[n.index()] = 0.5;
         }
     }
+    // The physical LUT inputs differ in speed (in3 the fastest, in0 up to
+    // 0.2 ns slower to a flip-flop): the permutation edges of each placed
+    // logic cell carry the difference, so critical inputs take fast pins.
+    // The timing analysis counts it through the cell's arcs instead.
+    let mut edge_delay = g.edge_delay.clone();
+    let (comb, setup) = crate::timing::lut_input_penalties(arch);
+    for c in nl.live_cells() {
+        if nl.cell_kind(c) != LC {
+            continue;
+        }
+        let Some(&bel) = placement.cell_bel.get(&c) else { continue };
+        let dff = nl.param(c, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0;
+        let pen = if dff { setup } else { comb };
+        for (j, pin) in ["I0", "I1", "I2", "I3"].into_iter().enumerate() {
+            let Some(p) = arch.bel(bel).pin(pin) else { continue };
+            for e in g.edges(p.raw()) {
+                if Arch::permutation(g.edge_pip[e]).is_some_and(|(phys, _)| phys == j) {
+                    edge_delay[e] += pen[j];
+                }
+            }
+        }
+    }
     let graph = Graph {
         offsets: &g.offsets,
         edge_dst: &g.edge_dst,
-        edge_delay: &g.edge_delay,
+        edge_delay: &edge_delay,
         node_x: &g.node_x,
         node_y: &g.node_y,
         node_cost: &costs,
