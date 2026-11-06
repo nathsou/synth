@@ -366,11 +366,18 @@ fn net_weight(pins: usize) -> f64 {
     if pins <= 10 { Q[pins] } else { 1.4974 + 0.0272 * (pins as f64 - 10.0) }
 }
 
+/// A connection that a LUT cascade could carry: driver, sink and weight.
+type CascadePair = (CellId, CellId, f64);
+
 /// A driver-to-sink connection, for the timing cost.
 #[derive(Clone, Copy, Debug)]
 struct Conn {
     drv: CellId,
     sink: CellId,
+    /// Whether the connection can take the LUT cascade from a slot into the
+    /// next: from the output of a combinational logic cell into a LUT input
+    /// that can be input 2.
+    cascade: bool,
 }
 
 /// Lists of `u32` by index, in compressed sparse row form.
@@ -746,7 +753,16 @@ impl<'a> Annealer<'a> {
                 if let Some(t) = sa.timing.conn_to(p.cell, p.pin as usize) {
                     sa.conn_of_timing[t] = id;
                 }
-                sa.conns.push(Conn { drv: d.cell, sink: p.cell });
+                let lc = |c: CellId| nl.cell_kind(c) == LC;
+                let cascade = lc(d.cell)
+                    && lc(p.cell)
+                    && dpin == "O"
+                    && nl.param(d.cell, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) == 0
+                    && ["I0", "I1", "I2", "I3"]
+                        .iter()
+                        .position(|&q| q == spin)
+                        .is_some_and(|k| k == 2 || crate::route::permutable(nl, p.cell, k));
+                sa.conns.push(Conn { drv: d.cell, sink: p.cell, cascade });
                 cell_conns[d.cell.index()].push(id);
                 cell_conns[p.cell.index()].push(id);
             }
@@ -777,9 +793,68 @@ impl<'a> Annealer<'a> {
 
     fn conn_delay(&self, k: usize) -> f64 {
         let c = self.conns[k];
+        if c.cascade
+            && let (Some(a), Some(b)) = (self.pos[c.drv.index()], self.pos[c.sink.index()])
+            && (a.0, a.1, a.2 + 1) == (b.0, b.1, b.2)
+        {
+            return 0.0;
+        }
         let (x0, y0) = self.cell_xy(c.drv);
         let (x1, y1) = self.cell_xy(c.sink);
         self.delays.at((x1 - x0) as i32, (y1 - y0) as i32)
+    }
+
+    /// Where the critical connections of cell `c` pull it: the centroid of
+    /// the cells at their other ends, weighted by timing weight (the
+    /// criticality to the eighth). None when none of them is critical.
+    fn timing_target(&self, c: CellId) -> Option<(usize, usize)> {
+        let (mut sx, mut sy, mut sw) = (0.0, 0.0, 0.0);
+        for &k in self.cell_conns.of(c.index()) {
+            let w = self.conn_weight[k as usize];
+            if w < 1e-3 {
+                continue;
+            }
+            let conn = self.conns[k as usize];
+            let other = if conn.drv == c { conn.sink } else { conn.drv };
+            let (x, y) = self.cell_xy(other);
+            sx += w * x as f64;
+            sy += w * y as f64;
+            sw += w;
+        }
+        (sw > 0.0).then(|| {
+            let x = (sx / sw).round().clamp(1.0, self.width as f64) as usize;
+            let y = (sy / sw).round().clamp(1.0, self.height as f64) as usize;
+            (x, y)
+        })
+    }
+
+    /// The slot next to the most critical cascadable connection of logic
+    /// cell `c` not yet in a cascade: above its driver, or below its sink.
+    fn cascade_target(&self, c: CellId) -> Option<(usize, usize, usize)> {
+        let mut best: Option<(f64, (usize, usize, usize))> = None;
+        for &k in self.cell_conns.of(c.index()) {
+            let conn = self.conns[k as usize];
+            let w = self.conn_weight[k as usize];
+            if !conn.cascade || w <= 0.0 || best.is_some_and(|(bw, _)| bw >= w) {
+                continue;
+            }
+            let (Some(a), Some(b)) = (self.pos[conn.drv.index()], self.pos[conn.sink.index()])
+            else {
+                continue;
+            };
+            if (a.0, a.1, a.2 + 1) == (b.0, b.1, b.2) {
+                continue;
+            }
+            let t = if conn.sink == c {
+                (a.2 < 7).then(|| (a.0 as usize, a.1 as usize, a.2 as usize + 1))
+            } else {
+                (b.2 > 0).then(|| (b.0 as usize, b.1 as usize, b.2 as usize - 1))
+            };
+            if let Some(t) = t {
+                best = Some((w, t));
+            }
+        }
+        best.map(|(_, t)| t)
     }
 
     /// Recomputes connection criticalities from the current placement and
@@ -788,10 +863,24 @@ impl<'a> Annealer<'a> {
         if self.opts.timing_weight <= 0.0 || self.conns.is_empty() {
             return;
         }
+        let delay = self.placed_delays();
+        let crit = self.timing.analyse(&delay).criticality;
+        for (t, &k) in self.conn_of_timing.iter().enumerate() {
+            if k != u32::MAX {
+                let k = k as usize;
+                self.conn_weight[k] = crit[t].powi(8);
+                self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
+            }
+        }
+        self.bb_norm = self.net_cost.iter().sum::<f64>().max(1.0);
+        self.t_norm = self.conn_cost.iter().sum::<f64>().max(1.0);
+    }
+
+    /// Estimated delay of every timing connection: placed connections by
+    /// distance; carry chains are free, globals a fixed delay.
+    fn placed_delays(&self) -> Vec<f64> {
         let nl = self.nl;
-        // Placed connections by distance; carry chains are free, globals a
-        // fixed delay.
-        let delay: Vec<f64> = (0..self.timing.conns.len())
+        (0..self.timing.conns.len())
             .map(|t| match self.conn_of_timing[t] {
                 u32::MAX => {
                     let c = self.timing.conns[t];
@@ -806,17 +895,168 @@ impl<'a> Annealer<'a> {
                 }
                 k => self.conn_delay(k as usize),
             })
-            .collect();
-        let crit = self.timing.analyse(&delay).criticality;
-        for (t, &k) in self.conn_of_timing.iter().enumerate() {
-            if k != u32::MAX {
-                let k = k as usize;
-                self.conn_weight[k] = crit[t].powi(8);
-                self.conn_cost[k] = self.conn_weight[k] * self.conn_delay(k);
+            .collect()
+    }
+
+    /// Orders the logic cells of each tile so that critical connections
+    /// from a combinational cell into the cell above it in the tile (slot
+    /// z to z + 1) can take the LUT cascade into input 2, which skips the
+    /// local track and input multiplexer (about 0.6 ns). Cells of carry
+    /// chains and pinned cells keep their slots; the others may take any
+    /// slot of their tile they leave the tile legal in. Returns the number
+    /// of connections so arranged.
+    fn cascade_slots(&mut self) -> usize {
+        let nl = self.nl;
+        if self.timing.conns.is_empty() {
+            return 0;
+        }
+        let crit = self.timing.analyse(&self.placed_delays()).criticality;
+        let param = |c: CellId, p: &str| nl.param(c, p).and_then(Param::as_u64).unwrap_or(0);
+        // Candidate connections by tile: driver, sink, weight.
+        let mut by_tile: FxHashMap<(i16, i16), Vec<CascadePair>> = FxHashMap::default();
+        for (t, c) in self.timing.conns.iter().enumerate() {
+            let (a, b) = (c.driver, c.sink);
+            if a == b
+                || nl.cell_kind(a) != LC
+                || nl.cell_kind(b) != LC
+                || param(a, "DFF_ENABLE") != 0
+                || nl.str(nl.cells[a].pins[c.driver_pin].name) != "O"
+            {
+                continue;
+            }
+            let pin = nl.str(nl.cells[b].pins[c.pin].name);
+            let Some(k) = ["I0", "I1", "I2", "I3"].iter().position(|&p| p == pin) else {
+                continue;
+            };
+            if k != 2 && !crate::route::permutable(nl, b, k) {
+                continue;
+            }
+            let (Some(pa), Some(pb)) = (self.pos[a.index()], self.pos[b.index()]) else {
+                continue;
+            };
+            if (pa.0, pa.1) != (pb.0, pb.1) {
+                continue;
+            }
+            // Critical connections first; the others still save a track.
+            let w = crit[t] * crit[t] + 1e-3;
+            let v = by_tile.entry((pa.0, pa.1)).or_default();
+            match v.iter_mut().find(|e| e.0 == a && e.1 == b) {
+                Some(e) => e.2 = e.2.max(w),
+                None => v.push((a, b, w)),
             }
         }
-        self.bb_norm = self.net_cost.iter().sum::<f64>().max(1.0);
-        self.t_norm = self.conn_cost.iter().sum::<f64>().max(1.0);
+        let mut tiles: Vec<_> = by_tile.into_iter().collect();
+        tiles.sort_by_key(|(t, _)| *t);
+        let mut arranged = 0;
+        for ((x, y), pairs) in tiles {
+            let base = self.slot(x as usize, y as usize, 0);
+            let before: [Option<CellId>; 8] = std::array::from_fn(|z| self.lc_occ[base + z]);
+            let movable = |c: CellId| matches!(self.units[self.unit_of(c)], Unit::Lc(_));
+            // Weight and number of the connections from a slot to the next.
+            let score = |occ: &[Option<CellId>; 8]| -> (f64, usize) {
+                let z_of = |c: CellId| occ.iter().position(|&o| o == Some(c));
+                let mut s = (0.0, 0);
+                for &(a, b, w) in &pairs {
+                    if let (Some(za), Some(zb)) = (z_of(a), z_of(b))
+                        && zb == za + 1
+                    {
+                        s.0 += w;
+                        s.1 += 1;
+                    }
+                }
+                s
+            };
+            let current = score(&before);
+            // Cells to arrange: the movable ones of the connections, those of
+            // the heaviest first and at most six (720 orders of 8 slots at
+            // most); the other movable cells fill what slots remain.
+            let mut by_weight: Vec<&CascadePair> = pairs.iter().collect();
+            by_weight.sort_by(|p, q| q.2.total_cmp(&p.2));
+            let mut cells: Vec<CellId> = Vec::new();
+            for &&(a, b, _) in &by_weight {
+                let new: Vec<CellId> =
+                    [a, b].into_iter().filter(|&c| movable(c) && !cells.contains(&c)).collect();
+                if cells.len() + new.len() <= 6 {
+                    cells.extend(new);
+                }
+            }
+            if cells.is_empty() {
+                continue;
+            }
+            let free: Vec<usize> = (0..8).filter(|&z| before[z].is_none_or(movable)).collect();
+            let fixed: [Option<CellId>; 8] =
+                std::array::from_fn(|z| before[z].filter(|&c| !movable(c)));
+            let others: Vec<CellId> = (0..8)
+                .filter_map(|z| before[z])
+                .filter(|&c| movable(c) && !cells.contains(&c))
+                .collect();
+            // Every assignment of the cells to free slots that does better.
+            let mut found: Vec<(f64, [Option<CellId>; 8])> = Vec::new();
+            let mut occ = fixed;
+            fn assign(
+                i: usize,
+                cells: &[CellId],
+                free: &[usize],
+                occ: &mut [Option<CellId>; 8],
+                out: &mut dyn FnMut(&[Option<CellId>; 8]),
+            ) {
+                if i == cells.len() {
+                    out(occ);
+                    return;
+                }
+                for &z in free {
+                    if occ[z].is_none() {
+                        occ[z] = Some(cells[i]);
+                        assign(i + 1, cells, free, occ, out);
+                        occ[z] = None;
+                    }
+                }
+            }
+            let mut better = Vec::new();
+            assign(0, &cells, &free, &mut occ, &mut |a| {
+                let s = score(a).0;
+                if s > current.0 + 1e-9 {
+                    better.push((s, *a));
+                }
+            });
+            for (s, mut a) in better {
+                // The other cells: their own slot if it is free, else any.
+                let mut rest = Vec::new();
+                for &c in &others {
+                    let z0 = (0..8).find(|&z| before[z] == Some(c)).unwrap();
+                    if a[z0].is_none() {
+                        a[z0] = Some(c);
+                    } else {
+                        rest.push(c);
+                    }
+                }
+                for c in rest {
+                    let z = free.iter().copied().find(|&z| a[z].is_none()).unwrap();
+                    a[z] = Some(c);
+                }
+                found.push((s, a));
+            }
+            found.sort_by(|p, q| q.0.total_cmp(&p.0));
+            let mut done = false;
+            for (_, a) in found.iter().take(32) {
+                self.lc_occ[base..base + 8].copy_from_slice(a);
+                if self.tile_ok(x as usize, y as usize) {
+                    for (z, c) in a.iter().enumerate() {
+                        if let Some(c) = c {
+                            self.set_pos(*c, (x, y, z as u8));
+                        }
+                    }
+                    arranged += score(a).1;
+                    done = true;
+                    break;
+                }
+            }
+            if !done {
+                self.lc_occ[base..base + 8].copy_from_slice(&before);
+                arranged += current.1;
+            }
+        }
+        arranged
     }
 
     /// Normalised cost (wirelength and timing terms weighted).
@@ -1324,7 +1564,14 @@ impl<'a> Annealer<'a> {
             Unit::Pinned(_) => None,
             Unit::Lc(c) => {
                 let (x, y, z) = self.pos_of(c);
-                let (nx, ny) = match self.median_target(&[c]) {
+                let pick = self.rng.below(8);
+                let cascade = if pick == 0 { self.cascade_target(c) } else { None };
+                let timing = if pick == 1 { self.timing_target(c) } else { None };
+                let (nx, ny) = match cascade
+                    .map(|t| (t.0, t.1))
+                    .or(timing)
+                    .or_else(|| self.median_target(&[c]))
+                {
                     Some(t) => t,
                     None => (
                         self.rng.range_inclusive(
@@ -1340,7 +1587,7 @@ impl<'a> Annealer<'a> {
                 if self.arch.db.die.tile_kind(nx, ny) != TileKind::Logic {
                     return None;
                 }
-                let nz = self.rng.below(8);
+                let nz = cascade.map_or_else(|| self.rng.below(8), |t| t.2);
                 let (ox, oy, oz) = (x as usize, y as usize, z as usize);
                 if (nx, ny, nz) == (ox, oy, oz) {
                     return None;
@@ -1700,6 +1947,8 @@ pub fn place_with_fixed(
     sa.set_fixed(placement);
     sa.initial_placement()?;
     sa.anneal(log);
+    let n = sa.cascade_slots();
+    log.push(format!("{n} connections placed for LUT cascades"));
     sa.finish(placement);
     Ok(())
 }

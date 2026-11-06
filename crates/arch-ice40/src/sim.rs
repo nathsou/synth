@@ -164,6 +164,8 @@ pub fn add_cell(
                 let co = m.or1(both, carried);
                 drive(m, pin("COUT"), co);
             }
+            // The LUT output cascaded into the next cell (decoded bitstreams).
+            drive(m, pin("LO"), lut);
             let Some(o) = pin("O") else { return Ok(true) };
             if param_u64(nl, c, "DFF_ENABLE") == 0 {
                 m.connect(Sig::bit(o), Sig::bit(lut));

@@ -708,6 +708,217 @@ pub fn balance_select_chains(m: &mut Module) -> usize {
     n
 }
 
+/// Rebuilds accumulation chains, steps `x = x + t` in series, conditional
+/// or not (`if (c) x = x + t`: the shape of loops that count or sum), as
+/// balanced trees of additions of their terms (`c ? t : 0`), each addition
+/// only as wide as its operands need. A chain of n steps is n carry chains
+/// in series; the tree is log2(n) deep, of narrower additions (a 16-bit
+/// population count: 4 levels of 1- to 4-bit adders, not 16 5-bit ones).
+/// Additions are modulo the chain's width, so their signedness does not
+/// matter. Chains of fewer than three steps are left alone. Returns the
+/// number of chains rebuilt.
+pub fn accumulations_to_trees(m: &mut Module) -> usize {
+    use crate::BinaryOp as B;
+    use synth_core::FxHashMap;
+    let uses = use_counts(m);
+    let used = |s: &Sig, n: u32| s.iter().all(|b| uses.get(b).copied().unwrap_or(0) == n);
+    let mut by_y: FxHashMap<Vec<SigBit>, CellId> = FxHashMap::default();
+    // Adders by the first bit of their result, to find those whose low bits
+    // alone are read.
+    let mut by_first: FxHashMap<SigBit, CellId> = FxHashMap::default();
+    for (ci, c) in m.cells.iter_enumerated() {
+        match &c.kind {
+            CellKind::Binary { op: B::Add, y, .. } | CellKind::Mux { y, .. } if c.alive => {
+                by_y.insert(y.0.clone(), ci);
+                if matches!(c.kind, CellKind::Binary { .. }) && !y.is_empty() {
+                    by_first.insert(y.0[0], ci);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// A step's term: a signal, or a signal selected by a bit (`when`: the
+    /// select value that adds it).
+    #[derive(Clone)]
+    enum Term {
+        Sig(Sig),
+        Cond(SigBit, bool, Sig),
+    }
+    struct Step {
+        x: Sig,
+        term: Term,
+        cells: Vec<CellId>,
+        /// Uses of `x` within the step.
+        x_uses: u32,
+    }
+    let add_operands = |ci: CellId| -> Option<(Sig, Sig, Sig)> {
+        match &m.cells[ci].kind {
+            CellKind::Binary { op: B::Add, a, b, y, .. }
+                if a.width() == y.width() && b.width() == y.width() =>
+            {
+                Some((a.clone(), b.clone(), y.clone()))
+            }
+            _ => None,
+        }
+    };
+    let step = |ci: CellId| -> Option<Step> {
+        if !m.cells[ci].alive {
+            return None;
+        }
+        if let Some((a, b, _)) = add_operands(ci) {
+            // The chained operand: the one another step drives.
+            let (x, t) =
+                if by_y.contains_key(&b.0) && !by_y.contains_key(&a.0) { (b, a) } else { (a, b) };
+            return Some(Step { x, term: Term::Sig(t), cells: vec![ci], x_uses: 1 });
+        }
+        let CellKind::Mux { a, b, s, y, .. } = &m.cells[ci].kind else { return None };
+        for (sum, other, when) in [(b, a, true), (a, b, false)] {
+            // An adder whose low bits are the sum (the others read by
+            // nothing): the low bits of its operands are all that matter.
+            let w = y.width();
+            let Some(&ca) = sum.0.first().and_then(|b| by_first.get(b)) else { continue };
+            let Some((p, q, ys)) = add_operands(ca) else { continue };
+            if ca == ci
+                || !m.cells[ca].alive
+                || ys.width() < w
+                || ys.0[..w] != sum.0[..]
+                || !used(sum, 1)
+                || !used(&Sig(ys.0[w..].to_vec()), 0)
+            {
+                continue;
+            }
+            let (p, q) = (Sig(p.0[..w].to_vec()), Sig(q.0[..w].to_vec()));
+            let t = if p == *other {
+                q
+            } else if q == *other {
+                p
+            } else {
+                continue;
+            };
+            return Some(Step {
+                x: other.clone(),
+                term: Term::Cond(*s, when, t),
+                cells: vec![ci, ca],
+                x_uses: 2,
+            });
+        }
+        None
+    };
+    let cells: Vec<CellId> = by_y.values().copied().collect();
+    let mut steps: FxHashMap<CellId, Step> = FxHashMap::default();
+    for &ci in &cells {
+        if let Some(st) = step(ci) {
+            steps.insert(ci, st);
+        }
+    }
+    // Each step's predecessor: the step driving its `x`, read by nothing
+    // else. A cell in two steps (an adder both a step and a mux's sum) is
+    // only the mux's.
+    let in_mux: synth_core::FxHashSet<CellId> =
+        steps.values().filter(|s| s.cells.len() == 2).map(|s| s.cells[1]).collect();
+    steps.retain(|ci, _| !in_mux.contains(ci));
+    let mut pred: FxHashMap<CellId, CellId> = FxHashMap::default();
+    let mut has_succ: synth_core::FxHashSet<CellId> = Default::default();
+    for (&ci, st) in &steps {
+        if let Some(&cp) = by_y.get(&st.x.0)
+            && cp != ci
+            && steps.contains_key(&cp)
+            && used(&st.x, st.x_uses)
+        {
+            pred.insert(ci, cp);
+            has_succ.insert(cp);
+        }
+    }
+    let mut ends: Vec<CellId> = steps.keys().copied().filter(|c| !has_succ.contains(c)).collect();
+    ends.sort();
+    let mut n = 0;
+    for end in ends {
+        let mut chain = vec![end];
+        while let Some(&p) = pred.get(chain.last().unwrap()) {
+            if chain.contains(&p) {
+                break;
+            }
+            chain.push(p);
+        }
+        if chain.len() < 3 {
+            continue;
+        }
+        let first = *chain.last().unwrap();
+        let y = match &m.cells[end].kind {
+            CellKind::Binary { y, .. } | CellKind::Mux { y, .. } => y.clone(),
+            _ => unreachable!(),
+        };
+        let w = y.width();
+        let mut terms: Vec<Term> = chain.iter().map(|c| steps[c].term.clone()).collect();
+        terms.push(Term::Sig(steps[&first].x.clone()));
+        let killed: Vec<CellId> = chain.iter().flat_map(|c| steps[c].cells.clone()).collect();
+        for c in killed {
+            m.cells[c].alive = false;
+        }
+        // Terms as signals, constants summed, constant zero high bits off.
+        let mut k: u64 = 0;
+        let mut k_wide = false;
+        let mut sigs: Vec<Sig> = Vec::new();
+        for t in terms {
+            let sig = match t {
+                Term::Sig(s) => s,
+                Term::Cond(s, when, t) => {
+                    let z = Sig::zeros(t.width());
+                    if when { m.mux(s, z, t) } else { m.mux(s, t, z) }
+                }
+            };
+            if let Some(c) = sig.as_const() {
+                match c.to_u64() {
+                    Some(v) if w <= 64 => k = k.wrapping_add(v),
+                    _ => k_wide = true,
+                }
+                if !k_wide {
+                    continue;
+                }
+            }
+            let top = sig.iter().rposition(|&b| b != SigBit::ZERO).map_or(0, |i| i + 1);
+            if top > 0 {
+                sigs.push(Sig(sig.0[..top].to_vec()));
+            }
+        }
+        if w < 64 {
+            k &= (1u64 << w) - 1;
+        }
+        if k != 0 {
+            sigs.push(Sig::from_u64(k, 64 - k.leading_zeros() as usize));
+        }
+        // Huffman: the two narrowest first, so wide additions come last.
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
+            Default::default();
+        let mut pool: Vec<Sig> = Vec::new();
+        for s in sigs {
+            heap.push(std::cmp::Reverse((s.width(), pool.len())));
+            pool.push(s);
+        }
+        let ext = |s: &Sig, width: usize| {
+            let mut v = s.0[..s.width().min(width)].to_vec();
+            v.resize(width, SigBit::ZERO);
+            Sig(v)
+        };
+        while heap.len() > 1 {
+            let std::cmp::Reverse((wa, ia)) = heap.pop().unwrap();
+            let std::cmp::Reverse((wb, ib)) = heap.pop().unwrap();
+            let width = (wa.max(wb) + 1).min(w);
+            let (a, b) = (ext(&pool[ia], width), ext(&pool[ib], width));
+            let sum = m.binary(B::Add, false, a, b);
+            heap.push(std::cmp::Reverse((width, pool.len())));
+            pool.push(sum);
+        }
+        let result = match heap.pop() {
+            Some(std::cmp::Reverse((_, i))) => ext(&pool[i], w),
+            None => Sig::zeros(w),
+        };
+        m.connect(y, result);
+        n += 1;
+    }
+    n
+}
+
 /// Shares arithmetic between the inputs of a multiplexer:
 /// `s ? x op z : x op w` becomes `x op (s ? w : z)` (for `+ - & | ^`), and
 /// `s ? x - z : x + z` one adder, `x + (z ^ s) + s`. Only when the operations
