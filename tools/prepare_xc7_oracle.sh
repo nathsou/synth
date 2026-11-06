@@ -20,7 +20,8 @@ git -C "$out/prjxray" submodule update --init --recursive --depth 1
 python3 -m venv "$out/venv"
 "$out/venv/bin/pip" install -r "$(dirname "$0")/xc7-test-requirements.txt"
 # The pinned X-Ray sources use uint8_t without <cstdint>, which GCC 15's
-# headers no longer include indirectly.
+# headers no longer include indirectly, and build with -Werror, which GCC
+# 15's free-nonheap-object warning (in its own allocator) trips.
 cmake -S "$out/prjxray" -B "$out/build" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_FLAGS="-include cstdint"
+  -DCMAKE_CXX_FLAGS="-include cstdint -Wno-error=free-nonheap-object"
 cmake --build "$out/build" --target xc7frames2bit bitread -j2
