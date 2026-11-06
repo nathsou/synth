@@ -291,9 +291,9 @@ Method, findings and what the comparison changed in synth:
 
 LCs are logic cells, MHz the fastest the clock port runs with every clock
 meeting timing (median of three seeds for synth; iCEcube2 has none), both
-by the same timer. iCEcube2's synthesis here is LSE: Synplify Pro, its
-default, did not get a license on this machine (see the doc). On the six
-designs iCEcube2 implements, synth is smaller on all and 2-29% faster.
+by the same timer. This table is with LSE; with Synplify Pro, iCEcube2's default synthesis,
+iCEcube2 implements 7 designs, and on the five whose bitstreams run synth is
+8-28% smaller and 9-35% faster (see the doc).
 
 ### Experimental native Artix-7 flow
 

@@ -332,9 +332,16 @@ def run_icecube(d, w, args):
                         re.findall(r"^Clock: (\S+)\s*\| Frequency: ([0-9.]+) MHz", text, re.M)}
     bitstream = w / f"outputs/bitmap/{top}_bitmap.bin"
     r["bitstream"] = str(bitstream)
-    # Pins as iCEcube2 placed them, for designs without constraints.
-    placed = w / f"outputs/placer/{top}_sbt.pcf"
-    r["pcf"] = str(pcf if d["pcf"] or not placed.exists() else placed)
+    # Pins as iCEcube2 placed them, for designs without constraints (from
+    # the packer's table: `INPUT  wb_clk  location (0, 17, 0)  G1`).
+    r["pcf"] = str(pcf)
+    table = w / f"outputs/packer/{top}_io_pcf.log"
+    if not d["pcf"] and table.exists():
+        pins = re.findall(r"^(?:INPUT|OUTPUT|INOUT)\s+(\S+)\s+location\s*\([^)]*\)\s+(\S+)",
+                          table.read_text(errors="replace"), re.M)
+        placed = w / "placed.pcf"
+        placed.write_text("".join(f"set_io {p} {pin}\n" for p, pin in pins))
+        r["pcf"] = str(placed)
     return r
 
 
@@ -436,8 +443,9 @@ def fmt(v, f="{:.1f}"):
     return "-" if v is None else f.format(v)
 
 
-def table(results):
-    print(f"{'':14} {'synth':>27}   {'iCEcube2 (' + 'LSE' + ')':>36}")
+def table(results, synthesis="lse"):
+    name = {"lse": "LSE", "synplify": "Synplify Pro"}[synthesis]
+    print(f"{'':14} {'synth':>27}   {'iCEcube2 (' + name + ')':>36}")
     print(f"{'design':14} {'LC':>6} {'RAM':>3} {'Fmax':>6} {'worst':>6} {'s':>4}   "
           f"{'LC':>6} {'RAM':>3} {'Fmax':>6} {'worst':>6} {'sbtime':>6} {'s':>5}")
     for r in results:
@@ -483,7 +491,8 @@ def main():
     TIMEOUT = args.timeout
     out = Path(args.out)
     if args.table:
-        table(json.loads((out / "results.json").read_text())["results"])
+        data = json.loads((out / "results.json").read_text())
+        table(data["results"], data["meta"].get("synthesis", "lse"))
         return
     out.mkdir(parents=True, exist_ok=True)
     ds = [d for d in designs() if not args.designs or d["name"] in args.designs]
@@ -495,7 +504,7 @@ def main():
                                     capture_output=True, text=True).stdout.strip()}
     (out / "results.json").write_text(json.dumps({"meta": meta, "results": results}, indent=1,
                                                  default=str))
-    table(results)
+    table(results, args.synthesis)
 
 
 if __name__ == "__main__":

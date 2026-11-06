@@ -82,13 +82,62 @@ running. Results: [ICE40_ICECUBE2.json](ICE40_ICECUBE2.json).
 
 ## iCEcube2's synthesis
 
-iCEcube2 synthesizes with Synplify Pro by default and also ships LSE. Here
-Synplify Pro could not run: its FlexNet license check reads the host ID of
-an interface named `eth0`, which this machine does not have (`lmutil
-lmhostid` prints `000000000000`; the license is node-locked to the MAC of
-the machine's Ethernet interface). With an `eth0` carrying that MAC, the
-script runs it with `--synthesis synplify`. Every iCEcube2 result here is
-LSE's.
+iCEcube2 synthesizes with Synplify Pro by default and also ships LSE. Both
+were run (`--synthesis lse`, `--synthesis synplify`) with the same back end
+and constraints: the table above is LSE's, the one below Synplify Pro's.
+Synplify Pro's FlexNet license check reads the host ID of an interface
+named `eth0` (`lmutil lmhostid` must print the MAC the license is locked
+to); where the Ethernet interface has another name, a dummy `eth0` with
+that MAC serves (`sudo ip link add eth0 type dummy && sudo ip link set eth0
+address <MAC>`; it does not survive a reboot).
+
+### With Synplify Pro
+
+| Design | synth LCs | Synplify LCs | synth MHz | Synplify MHz: `synth time` / sbtimer |
+|---|---:|---:|---:|---:|
+| PicoRV32 SoC | 1544 (-16%) | 1836 | 84.5 | 69.9 / 72.7 (does not run, below) |
+| SERV SoC | 547 | 526 | 112.6 | 129.5 / 129.4 (register file removed, below) |
+| Hazard3 SoC (Cu) | 2203 (-28%) | 3047 | 49.4 | 45.1 / 41.7 |
+| SERV, Go Board | 580 | – | 114.3 | placer: no site for a global buffer |
+| Euler 10 | 7099 | – | 68.0 | RAMs as 46,080 flip-flops |
+| Euler 14 | 6014 | – | 73.9 | does not fit (8,970 LUTs) |
+| Euler 25 | 1324 (-23%) | 1723 | 73.6 | 62.7 / 62.5 |
+| Euler 31 | 988 (-8%) | 1072 | 161.8 | 119.6 / 119.7 |
+| Euler 43 | 5959 | – | 55.4 | does not fit (15,217 LUTs) |
+| Euler 48 | 6503 | – | 75.2 | does not fit |
+| Euler 57 | 2628 (-23%) | 3421 | 67.0 | 54.3 / 54.5 |
+| Euler 58 | 7381 | – | 67.2 | does not fit (8,333 LUTs) |
+| Euler 92 | 3840 | – | 93.2 | RAMs as flip-flops |
+| Euler 97 | 1467 (-15%) | 1730 | 90.7 | 69.6 / 83.0 |
+
+Results: [ICE40_ICECUBE2_SYNPLIFY.json](ICE40_ICECUBE2_SYNPLIFY.json).
+
+- **Synplify Pro implements 7 of the 14 designs.** On the five that work
+  and run, synth uses 8-28% fewer logic cells and is faster by either
+  timer: by 9% (Euler 97, against sbtimer) to 35% (Euler 31).
+- **SERV SoC.** Synplify Pro's netlist is 4% smaller and 15% faster than
+  synth's because it is missing the CPU's register file: it removes the
+  block RAM that holds it ("does not drive other instances"), and synth's
+  critical path starts at that RAM. Decoded and simulated against its RTL,
+  its bitstream does not run.
+- **PicoRV32 SoC.** Decoded and simulated, Synplify Pro's bitstream does
+  not run the firmware either (the LEDs stay 0; the RTL ends at 152). Part
+  of it is that Synplify ignores register initial values and the UART line
+  idles high only by its initial value; why the CPU stops is not
+  established. The decoder reads every block RAM mode as iCEcube2 builds
+  it (one RAM per width, built by iCEcube2 and Synplify Pro, matches its
+  RTL), and Synplify Pro's Euler 25, 31, 57 and 97 bitstreams match their
+  RTL but for initial values. iCEcube2's simulation models
+  (`verilog/sb_ice_lc.v`) would settle it; synth's Verilog front end does
+  not read them (`pulldown`, user-defined primitives).
+- **Timers.** sbtimer times the clock network; `synth time`, like icetime,
+  takes ideal clocks. On LSE's netlists they agree within 2%, on Synplify
+  Pro's they differ by up to 19% (Euler 97), either way. synth is ahead by
+  both.
+- Synplify Pro, like LSE, drops non-zero register initial values (warning
+  FX1039), and initializes memories only by `$readmemh`, not in loops.
+
+### LSE
 
 LSE fails on half the benchmark:
 
