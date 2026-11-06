@@ -983,7 +983,7 @@ impl<'a> Annealer<'a> {
             if cells.is_empty() {
                 continue;
             }
-            let free: Vec<usize> = (0..8).filter(|&z| before[z].is_none_or(&movable)).collect();
+            let free: Vec<usize> = (0..8).filter(|&z| before[z].is_none_or(movable)).collect();
             let fixed: [Option<CellId>; 8] =
                 std::array::from_fn(|z| before[z].filter(|&c| !movable(c)));
             let others: Vec<CellId> = (0..8)
