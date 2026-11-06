@@ -804,6 +804,30 @@ impl<'a> Annealer<'a> {
         self.delays.at((x1 - x0) as i32, (y1 - y0) as i32)
     }
 
+    /// Where the critical connections of cell `c` pull it: the centroid of
+    /// the cells at their other ends, weighted by timing weight (the
+    /// criticality to the eighth). None when none of them is critical.
+    fn timing_target(&self, c: CellId) -> Option<(usize, usize)> {
+        let (mut sx, mut sy, mut sw) = (0.0, 0.0, 0.0);
+        for &k in self.cell_conns.of(c.index()) {
+            let w = self.conn_weight[k as usize];
+            if w < 1e-3 {
+                continue;
+            }
+            let conn = self.conns[k as usize];
+            let other = if conn.drv == c { conn.sink } else { conn.drv };
+            let (x, y) = self.cell_xy(other);
+            sx += w * x as f64;
+            sy += w * y as f64;
+            sw += w;
+        }
+        (sw > 0.0).then(|| {
+            let x = (sx / sw).round().clamp(1.0, self.width as f64) as usize;
+            let y = (sy / sw).round().clamp(1.0, self.height as f64) as usize;
+            (x, y)
+        })
+    }
+
     /// The slot next to the most critical cascadable connection of logic
     /// cell `c` not yet in a cascade: above its driver, or below its sink.
     fn cascade_target(&self, c: CellId) -> Option<(usize, usize, usize)> {
@@ -1540,21 +1564,26 @@ impl<'a> Annealer<'a> {
             Unit::Pinned(_) => None,
             Unit::Lc(c) => {
                 let (x, y, z) = self.pos_of(c);
-                let cascade = if self.rng.below(8) == 0 { self.cascade_target(c) } else { None };
-                let (nx, ny) =
-                    match cascade.map(|t| (t.0, t.1)).or_else(|| self.median_target(&[c])) {
-                        Some(t) => t,
-                        None => (
-                            self.rng.range_inclusive(
-                                (x as i64 - r).max(1),
-                                (x as i64 + r).min(self.width as i64),
-                            ) as usize,
-                            self.rng.range_inclusive(
-                                (y as i64 - r).max(1),
-                                (y as i64 + r).min(self.height as i64),
-                            ) as usize,
-                        ),
-                    };
+                let pick = self.rng.below(8);
+                let cascade = if pick == 0 { self.cascade_target(c) } else { None };
+                let timing = if pick == 1 { self.timing_target(c) } else { None };
+                let (nx, ny) = match cascade
+                    .map(|t| (t.0, t.1))
+                    .or(timing)
+                    .or_else(|| self.median_target(&[c]))
+                {
+                    Some(t) => t,
+                    None => (
+                        self.rng.range_inclusive(
+                            (x as i64 - r).max(1),
+                            (x as i64 + r).min(self.width as i64),
+                        ) as usize,
+                        self.rng.range_inclusive(
+                            (y as i64 - r).max(1),
+                            (y as i64 + r).min(self.height as i64),
+                        ) as usize,
+                    ),
+                };
                 if self.arch.db.die.tile_kind(nx, ny) != TileKind::Logic {
                     return None;
                 }

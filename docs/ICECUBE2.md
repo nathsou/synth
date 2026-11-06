@@ -184,6 +184,16 @@ and five seeds (synth's own analysis, median by design, geometric mean).
   the critical path's last LUT went to `in0` on some seeds and `in3` on
   others: its clock port reaches 160.0 or 161.8 MHz on every seed now
   (156.6 to 160.0 before), and the change alone gains 2.1% (geometric mean).
+- **Timing-driven centroid moves.** The placer's targeted moves aimed at
+  the median of a cell's nets' bounding boxes, a wirelength target; on the
+  larger designs the critical path then crossed the die in 1-2 ns hops
+  (Euler 14: 10.6 ns of its 13.8 ns in routing). One move in eight now
+  aims a logic cell at the centroid of its critical connections, weighted
+  by their timing weight. Measured alone over 14 designs and 5 seeds:
+  +1.1% (geometric mean); Euler 14, 48 and 58 and the Go Board SERV gain
+  2-4%, PicoRV32, Hazard3, Euler 43 and 57 lose 0.5-1%, within their
+  spread over seeds. (One move in four gained no more and cost PicoRV32
+  5%.) The tables in this document predate it.
 - **Clock targets by signal.** `set_frequency slow 100` also names a clock
   made by a register by its signal's name (`slow` for `slow$dff[3]`).
 
