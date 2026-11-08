@@ -32,6 +32,9 @@ pub struct FlowResult {
     pub placement: Placement,
     /// Estimated worst register-to-register periods.
     pub timing: Vec<crate::sta::Clock>,
+    /// Why the timing is not accepted: a clock missing its target, or
+    /// connections short of the hold margin. Empty when it is.
+    pub timing_failures: Vec<String>,
 }
 
 /// The device data every placement seed shares.
@@ -429,8 +432,20 @@ fn implement_seed(
             coverage.missing_pip_types.len()
         ));
     }
+    // Pips without delay data (the block RAMs' input multiplexers, missing
+    // upstream) count as zero delay: reported, not failed.
+    let mut timing_failures = Vec::new();
+    if failing > 0 {
+        timing_failures.push(format!("{failing} connections short of the hold margin"));
+    }
     for clock in &timing {
         let name = nl.str(nl.nets[clock.net].name);
+        if let Some(ns) = target_ns(&nl, xdc, clock.net).filter(|&ns| clock.period > ns * 1000.0) {
+            timing_failures.push(format!(
+                "clock {name}: {:.3} ns, beyond its {ns:.3} ns target",
+                clock.period / 1000.0
+            ));
+        }
         let target = target_ns(&nl, xdc, clock.net).map(|ns| {
             format!(
                 ", target {ns:.3} ns: {}",
@@ -463,13 +478,13 @@ fn implement_seed(
         }
     }
     log.push(
-        "timing is not certified: the estimate uses nextpnr-xilinx's routing model of X-Ray data, \
-         uncalibrated against vendor timing or hardware, without I/O paths"
+        "timing is an estimate: routing delays are calibrated against Vivado's timer; \
+         I/O paths are not timed"
             .into(),
     );
     drop(predicted);
     drop(clocks);
-    Ok(FlowResult { features, bitstream, log, placement, timing })
+    Ok(FlowResult { features, bitstream, log, placement, timing, timing_failures })
 }
 /// The target period (ns) of a clock net: its port's `create_clock`, or the
 /// frequency of the PLL driving it.

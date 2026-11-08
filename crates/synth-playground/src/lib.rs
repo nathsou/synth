@@ -45,6 +45,8 @@ pub struct Example {
 /// family's constraints format.
 #[derive(Debug)]
 pub struct Board {
+    /// The board's name on the command line (`synth init --board <id>`).
+    pub id: &'static str,
     pub name: &'static str,
     pub part: &'static str,
     pub package: &'static str,
@@ -52,6 +54,11 @@ pub struct Board {
     /// `CLK_HZ` parameter.
     pub clock_hz: u64,
     pub pins: &'static str,
+    /// The board's name for openFPGALoader (`-b`), which `synth prog` runs.
+    pub loader: &'static str,
+    /// Whether it programs the configuration flash only (iCE40 boards over
+    /// SPI), rather than the FPGA's SRAM by default.
+    pub flash_only: bool,
 }
 
 /// The FPGA families the playground implements designs for.
@@ -86,46 +93,64 @@ pub const XC7_PARTS: &[(&str, &[&str])] = &[("xc7a35t", &["ftg256"]), ("xc7a100t
 
 pub const BOARDS: &[Board] = &[
     Board {
+        id: "go-board",
         name: "Nandland Go Board",
         part: "hx1k",
         package: "vq100",
         clock_hz: 25_000_000,
         pins: "# Nandland Go Board (iCE40 HX1K VQ100, 25 MHz)\nset_io clk 15\nset_frequency clk 25\nset_io sw1 53\nset_io btn 53\nset_io led[0] 56\nset_io led[1] 57\nset_io led[2] 59\nset_io led[3] 60\n# The seven-segment display's segments, for 8-bit outputs.\nset_io led[4] 3\nset_io led[5] 4\nset_io led[6] 7\nset_io led[7] 8\nset_io rx 73\nset_io tx 74\n",
+        loader: "ice40_generic",
+        flash_only: true,
     },
     Board {
+        id: "icestick",
         name: "Lattice iCEstick",
         part: "hx1k",
         package: "tq144",
         clock_hz: 12_000_000,
         pins: "# Lattice iCEstick (iCE40 HX1K TQ144, 12 MHz)\nset_io clk 21\nset_frequency clk 12\nset_io led[0] 99\nset_io led[1] 98\nset_io led[2] 97\nset_io led[3] 96\nset_io led[4] 95\nset_io rx 9\nset_io tx 8\n",
+        loader: "ice40_generic",
+        flash_only: true,
     },
     Board {
+        id: "hx8k-breakout",
         name: "Lattice iCE40-HX8K Breakout Board",
         part: "hx8k",
         package: "ct256",
         clock_hz: 12_000_000,
         pins: "# Lattice iCE40-HX8K Breakout Board (iCE40 HX8K CT256, 12 MHz)\nset_io clk J3\nset_frequency clk 12\nset_io led[0] B5\nset_io led[1] B4\nset_io led[2] A2\nset_io led[3] A1\nset_io led[4] C5\nset_io led[5] C4\nset_io led[6] B3\nset_io led[7] C3\nset_io rx B10\nset_io tx B12\n",
+        loader: "ice40_generic",
+        flash_only: true,
     },
     Board {
+        id: "alchitry-cu",
         name: "Alchitry Cu",
         part: "hx8k",
         package: "cb132",
         clock_hz: 100_000_000,
         pins: "# Alchitry Cu (iCE40 HX8K CB132, 100 MHz)\nset_io clk P7\nset_frequency clk 100\nset_io sw1 P8\nset_io btn P8\nset_io led[0] J11\nset_io led[1] K11\nset_io led[2] K12\nset_io led[3] K14\nset_io led[4] L12\nset_io led[5] L14\nset_io led[6] M12\nset_io led[7] N14\nset_io rx P14\nset_io tx M9\n",
+        loader: "ice40_generic",
+        flash_only: true,
     },
     Board {
+        id: "alchitry-au",
         name: "Alchitry Au",
         part: "xc7a35t",
         package: "ftg256",
         clock_hz: 100_000_000,
         pins: include_str!("boards/alchitry_au.xdc"),
+        loader: "alchitry_au",
+        flash_only: false,
     },
     Board {
+        id: "nexys-a7",
         name: "Digilent Nexys A7-100T",
         part: "xc7a100t",
         package: "csg324",
         clock_hz: 100_000_000,
         pins: include_str!("boards/nexys_a7.xdc"),
+        loader: "nexys_a7_100",
+        flash_only: false,
     },
 ];
 

@@ -204,8 +204,15 @@ def main():
                 original = bit.read_bytes()
                 run(cmd + ["--timing-allow-fail"], prefix.with_suffix(".repeat.log"))
                 assert bit.read_bytes() == original, "same-seed build is not deterministic"
-                run(cmd, prefix.with_suffix(".timing-gate.log"), expected=1)
-                assert "timing acceptance failed" in prefix.with_suffix(".timing-gate.log").read_text()
+                # A counter meets its 10 ns target without the override...
+                run(cmd, prefix.with_suffix(".timing-met.log"))
+                # ...and an unreachable target fails the build.
+                tight = prefix.with_suffix(".tight.xdc")
+                tight.write_text(xdc.read_text().replace("-period 10 ", "-period 0.1 "))
+                gate = cmd.copy()
+                gate[gate.index("--xdc") + 1] = tight
+                run(gate, prefix.with_suffix(".timing-gate.log"), expected=1)
+                assert "timing targets not met" in prefix.with_suffix(".timing-gate.log").read_text()
             report["checks"].append(dict(part=part,design=name,frames=count,
                 sha256=hashlib.sha256(bit.read_bytes()).hexdigest(),
                 source_sha256=hashlib.sha256(v.read_bytes()).hexdigest(),

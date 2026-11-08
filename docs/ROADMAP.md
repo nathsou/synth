@@ -4,6 +4,20 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Phases have explicit **exit
 criteria**. A phase is done when its criteria pass in CI (and on hardware where
 stated), not when its features merely exist.
 
+## Where things stand (November 2026)
+
+| Phase | State |
+|---|---|
+| 0: Foundations | Done. |
+| 1: iCE40 (Milestone 1) | End to end, and ahead of Yosys + nextpnr on every design measured and of iCEcube2 on every design both implement (README, [ICECUBE2.md](ICECUBE2.md)). Runs on the Alchitry Cu and the Go Board. `synth init`, `synth build` and `synth prog` work. Open: riscv-tests and Dhrystone on the Cu. |
+| 2: Artix-7 | Synthesis, packing, analytical placement, routing, hold repair, timing calibrated against Vivado, and bitstreams. Runs on the Alchitry Au. Open: RAMB36, MMCM, DSP cascades, I/O registers and SERDES, the XDC Tcl subset, a LiteX SoC, the Nexys A7 on hardware, scale at 50k LUTs. |
+| 3: ECP5 | Done without hardware (ECP5.md). Open: wide muxes, LUT RAM, registered DSPs, I/O registers; a board. |
+| 4: QoR | Continuous: see README, ARTIX7.md and ECP5.md for the gaps measured. |
+| 5: Breadth | Done early: Weft (an HDL of synth's own), a compiled simulator with a C backend, the LSP, the playground (WebAssembly, with WebUSB programming), incremental PnR on iCE40, release binaries. Open: SystemVerilog, more parts, a native programmer in the CLI. |
+
+Amaranth (RTLIL as Amaranth writes it) is no longer a goal: `synth pnr`
+reads RTLIL only as a netlist mapped to the device's primitives.
+
 ## Guiding principles
 
 1. **Vertical slices first.** Get a bitstream running on real hardware as early as
@@ -113,17 +127,22 @@ RV32IM with an iterative multiply/divide unit, with firmware sized to fit in BRA
 
 ### Milestone 1 exit criteria
 
-- A pipelined RV32I(M) SoC, built **only with `synth`** (no Yosys, nextpnr or
+- [ ] A pipelined RV32I(M) SoC, built **only with `synth`** (no Yosys, nextpnr or
   IceStorm at runtime), passes riscv-tests and runs Dhrystone on the Alchitry Cu.
-  It also runs CoreMark if that fits in the 16 KB of BRAM.
-- SERV runs on the Go Board, and an Amaranth design read as RTLIL runs on the Cu.
-- The bitstream round-trip simulation (disassemble, simulate, compare to RTL)
-  passes for the whole integration ladder in CI.
-- Baseline QoR is recorded against iCEcube2 and Yosys+nextpnr (LCs, BRAM, Fmax,
+  It also runs CoreMark if that fits in the 16 KB of BRAM. (The Hazard3 SoC of
+  [examples/](../examples/README.md) builds for the Cu; the test suites have not
+  been run on it.)
+- [x] SERV runs on the Go Board. ~~An Amaranth design read as RTLIL runs on the
+  Cu~~: dropped.
+- [x] The bitstream round-trip simulation (disassemble, simulate, compare to RTL)
+  passes for the whole integration ladder in CI (`tools/ci_bitsim.sh`).
+- [x] Baseline QoR is recorded against iCEcube2 and Yosys+nextpnr (LCs, BRAM, Fmax,
   runtime). Target at M1: **within 20% LCs and 20% Fmax of Yosys+nextpnr**.
-  Closing the gap is Phase 4's job.
-- Full flow for the SoC takes under 10 s on a laptop.
-- `synth init --board alchitry-cu && synth build && synth prog` works for a new
+  Closing the gap is Phase 4's job. (Yosys+nextpnr: recorded, and ahead on
+  every design; iCEcube2: recorded in [ICECUBE2.md](ICECUBE2.md), smaller and
+  faster on every design both tools implement.)
+- [x] Full flow for the SoC takes under 10 s on a laptop (PicoRV32: 4 s).
+- [x] `synth init --board alchitry-cu && synth build && synth prog` works for a new
   user.
 
 ---
@@ -149,16 +168,21 @@ Primary board: **Nexys A7** (XC7A100T). Secondary: **Alchitry Au** (XC7A35T).
 - **Vivado calibration harness** (EDIF + LOC/BEL + `FIXED_ROUTE` export, timing
   diff, correction tables). The feasibility spike is done early in Phase 1.
 
+Status: bitstreams from the native flow run on the Alchitry Au, and builds
+are accepted on their timing as on iCE40 (no override needed). See
+[ARTIX7.md](ARTIX7.md) for what is implemented and the remaining work.
+
 **Exit criteria**
-- The Milestone 1 SoC (now RV32IM using DSPs) runs on both boards.
-- A LiteX SoC (VexRiscv, UART, SPI flash, Ethernet on the Nexys A7) runs on both
+- [ ] The Milestone 1 SoC (now RV32IM using DSPs) runs on both boards.
+- [ ] A LiteX SoC (VexRiscv, UART, SPI flash, Ethernet on the Nexys A7) runs on both
   boards. Stretch goal: LiteDRAM with the Nexys A7 DDR2, which exercises
   ISERDES/OSERDES/IDELAY and careful clocking.
-- A design of ≥ 50k LUTs on the XC7A100T stays within runtime and memory budgets.
-- QoR baseline is recorded against Vivado (default and performance strategies) and
-  openXC7.
-- Our STA agrees with Vivado `report_timing` within ±10% on the same placed and
-  routed design.
+- [ ] A design of ≥ 50k LUTs on the XC7A100T stays within runtime and memory budgets.
+- [x] QoR baseline is recorded against Vivado and nextpnr-xilinx (openXC7's
+  place and route), in [ARTIX7.md](ARTIX7.md#qor).
+- [ ] Our STA agrees with Vivado `report_timing` within ±10% on the same placed and
+  routed design. (Routing delays are calibrated against Vivado's timer; the
+  agreement is not yet checked as a criterion.)
 
 ---
 
@@ -221,8 +245,13 @@ roughly in order:
 - More parts: Spartan-7, Kintex-7 and Zynq-7 PL (same X-Ray infrastructure);
   iCE40 UltraPlus (`SB_MAC16`, SPRAM); ECP5-5G.
 - Native programmer: macOS and Linux backends (see Architecture §14), Windows later.
-- Incremental compilation; HTML reports; floorplan viewer; LSP for diagnostics.
-- WASM build: an in-browser iCE40 playground.
+  (The playground programs the FT2232H boards over WebUSB; `synth prog` runs
+  openFPGALoader.)
+- ~~Incremental compilation~~ (incremental PnR on iCE40); HTML reports;
+  ~~floorplan viewer; LSP for diagnostics~~ (the playground's die view; `synth lsp`).
+- ~~WASM build: an in-browser iCE40 playground~~ (done, with Artix-7 too).
+- Release binaries for Linux and macOS (`.github/workflows/release.yml`, on a
+  `v*` tag).
 - Possibly other families (Gowin via Apicula, MachXO2 via Trellis).
 
 ---

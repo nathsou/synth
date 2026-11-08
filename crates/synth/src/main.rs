@@ -10,6 +10,7 @@ macro_rules! info {
 mod args;
 mod ecp5;
 mod progress;
+mod project;
 mod sim;
 mod xc7;
 
@@ -24,8 +25,10 @@ USAGE:
     synth <COMMAND> [OPTIONS]
 
 COMMANDS:
-    check      Check Verilog or Weft sources and report errors
+    init       Start a project for a board (synth.toml, pins, a design)
     build      Synthesise, place and route a design into a bitstream
+    prog       Program a board with a bitstream (with openFPGALoader)
+    check      Check Verilog or Weft sources and report errors
     synth      Synthesise a design to iCE40, Artix-7 or ECP5 primitives (--verilog <out.v>)
     elab       Elaborate a design into RTL (--verilog <out.v> to write it back)
     sim        Simulate a design (or write it as a C model with --emit-c)
@@ -47,6 +50,21 @@ COMMANDS:
 INPUTS:
     Verilog-2005 (`.v`) or Weft (`.weft`, see docs/WEFT.md). Verilog files
     given with Weft sources define the Weft design's extern modules.
+
+PROJECTS:
+    synth init --board <id> [<dir>] [--force]   (synth init --list: the boards)
+              Writes synth.toml, the board's pins and a starter top.weft.
+    synth build [<options>...]
+              Without source files, in a directory with a synth.toml: builds
+              the project. Options given override the project's.
+    synth build <files...> --board <id> [<options>...]
+              The board's device (--family, --device, --package) and, unless
+              --pcf or --xdc is given, its pins.
+    synth prog [<bitstream>] [--board <id>] [--flash] [--cable <name>] [--dry-run]
+              Programs the bitstream (default: the project's output) with
+              openFPGALoader: the flash of iCE40 boards; the FPGA of Artix-7
+              boards, or their flash with --flash. --dry-run prints the command.
+    Boards: go-board, icestick, hx8k-breakout, alchitry-cu, alchitry-au, nexys-a7.
 
 BUILD OPTIONS:
     synth build <files.v|.weft...> --device <hx1k|hx8k|...> --package <pkg>
@@ -80,13 +98,16 @@ SYNTH OPTIONS:
 ARTIX-7 BUILD/PNR OPTIONS (EXPERIMENTAL):
     synth build <files.v...> --family artix7 --top <module>
               --device <xc7a35tftg256-1|xc7a100tcsg324-1|...>
-              --db <prjxray-db/artix7> --xdc <file> [-o <out.bit>]
+              [--db <prjxray-db/artix7>] --xdc <file> [-o <out.bit>]
               [--fasm <out.fasm>] [--seed <n>] [--effort <n>] [--tries <n>]
-              --timing-allow-fail
+              [--timing-allow-fail]
               pnr accepts the same physical options with a mapped RTLIL input;
               pnr --pack-stats reports its native packing (alone without --db).
               Native Rust packing, placement, routing and frame generation.
-              Timing closure is not certified; --timing-allow-fail is required.
+              --db defaults to $SYNTH_XC7_DB. A clock missing its XDC target
+              or a missed hold margin fails the build (the bitstream is still
+              written) unless --timing-allow-fail. The timing is an estimate
+              calibrated against Vivado's; it does not time I/O paths.
     synth pack-fasm <input.fasm> --db <db> --device <part> -o <out.bit>
     synth unpack-xc7 <input.bit> --db <db> --device <part> -o <out.frm>
 
@@ -189,7 +210,10 @@ fn main() -> ExitCode {
         Some("elab") => cmd_elab(&argv[1..]),
         Some("sim") => sim::cmd_sim(&argv[1..]),
         // The flows show their progress on a terminal.
-        Some("build") => progress::run(xc7_family(&argv), || cmd_build(&argv[1..])),
+        Some("build") => project::build_args(&argv[1..])
+            .and_then(|args| progress::run(xc7_family(&args), || cmd_build(&args))),
+        Some("init") => project::cmd_init(&argv[1..]),
+        Some("prog") => project::cmd_prog(&argv[1..]),
         Some("synth") => progress::run(xc7_family(&argv), || cmd_synth(&argv[1..])),
         Some("pnr") => progress::run(xc7_family(&argv), || cmd_pnr(&argv[1..])),
         Some("pack-fasm") => xc7::pack_fasm(&argv[1..]),

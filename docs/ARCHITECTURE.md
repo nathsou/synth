@@ -605,6 +605,12 @@ synth bram-patch out.bin --mem rom=fw.hex
 synth db list|info <device>
 ```
 
+Implemented so far: `synth init --board`, `synth build` from a `synth.toml`
+or with `--board`, and `synth prog` (see the README). The board catalog is
+built in (`BOARDS` in `crates/synth-playground/src/lib.rs`), shared with the
+playground. `synth.toml` holds the board, top, sources, constraints file,
+output, the Artix-7 database and extra build options.
+
 - **Project file** `synth.toml`: top module, sources, include dirs, defines,
   board or device, clocks, pins, options.
 - **Board catalog** (`boards/*.toml`): device, package, speed grade, oscillator
