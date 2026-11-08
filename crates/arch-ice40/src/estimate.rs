@@ -202,6 +202,12 @@ impl Search {
                 }
                 let (kind, (ex, ey)) = self.entry[u as usize];
                 for e in g.edges(u) {
+                    // A LUT cascade reaches one input of the next cell
+                    // only: not what a connection in a tile takes, unless
+                    // placed for it (the placer counts that itself).
+                    if g.edge_pip[e].tile == crate::arch::CASCADE_TILE {
+                        continue;
+                    }
                     let v = g.edge_dst[e] as usize;
                     let span = g.edge_span[e];
                     let mut nd = at_delay + delays.edge[e];

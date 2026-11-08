@@ -309,6 +309,39 @@ nextpnr on every design, from 3.7 times (Euler 48) to 13 (SERV on the Go
 Board), and every design ends up with a higher Fmax, by 3% (Euler 57) to
 55% (Euler 97). Yosys maps Euler 10 to 64,445 LUTs, which no iCE40 holds.
 
+### Against iCEcube2
+
+`tools/icecube2_ice40.py` builds the same designs with Lattice iCEcube2
+2020.12 (LSE synthesis and iCEcube2's back end, as its IDE runs them) on the
+same pins and clock targets, and times both bitstreams with `synth time`,
+which decodes any iCE40 bitstream and times it with synth's analysis; on
+iCEcube2's bitstreams it agrees with iCEcube2's own timer to within 2%.
+Method, findings and what the comparison changed in synth:
+[docs/ICECUBE2.md](docs/ICECUBE2.md).
+
+| Design | synth LCs | iCEcube2 LCs | synth MHz | iCEcube2 MHz | synth time | iCEcube2 time |
+|---|---:|---:|---:|---:|---:|---:|
+| PicoRV32 SoC | 1544 | – | 84.5 | LSE: no result in 2 h | 5 s | – |
+| SERV SoC | 547 | – | 112.6 | LSE: cells not mapped | 1 s | – |
+| Hazard3 SoC (Cu) | 2203 | – | 49.4 | LSE: cells not mapped | 10 s | – |
+| SERV, Go Board | 580 | – | 114.3 | LSE: no result in 2 h | 1 s | – |
+| Euler 10 | 7099 | – | 68.0 | does not fit | 33 s | – |
+| Euler 14 | 6014 (-6%) | 6401 | 73.9 (+11%) | 66.8 | 18 s | 692 s |
+| Euler 25 | 1324 (-37%) | 2100 | 73.6 (+27%) | 57.8 | 5 s | 413 s |
+| Euler 31 | 988 (-8%) | 1078 | 161.8 (+2%) | 157.9 | 2 s | 314 s |
+| Euler 43 | 5959 | – | 55.4 | does not fit (14,567 LUTs) | 22 s | – |
+| Euler 48 | 6503 | – | 75.2 | does not fit | 20 s | – |
+| Euler 57 | 2628 (-21%) | 3318 | 67.0 (+27%) | 52.7 | 4 s | 218 s |
+| Euler 58 | 7381 | – | 67.2 | does not fit | 16 s | – |
+| Euler 92 | 3840 (-1%) | 3878 | 93.2 (+29%) | 72.3 | 7 s | 227 s |
+| Euler 97 | 1467 (-8%) | 1596 | 90.7 (+23%) | 73.9 | 3 s | 142 s |
+
+LCs are logic cells, MHz the fastest the clock port runs with every clock
+meeting timing (median of three seeds for synth; iCEcube2 has none), both
+by the same timer. This table is with LSE; with Synplify Pro, iCEcube2's default synthesis,
+iCEcube2 implements 7 designs, and on the five whose bitstreams run synth is
+8-28% smaller and 9-35% faster (see the doc).
+
 ### Native Artix-7 flow
 
 The Rust backend supports synthesis, slice/carry/RAM/DSP packing, placement,

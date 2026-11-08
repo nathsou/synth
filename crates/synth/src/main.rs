@@ -39,6 +39,7 @@ COMMANDS:
     unpack-ecp5 Decode an ECP5 bitstream to its textual configuration
     pack-asc   Convert an IceStorm .asc file to a binary bitstream
     unpack     Convert a binary bitstream to an IceStorm .asc file
+    time       Time an iCE40 bitstream (from any tool), as icetime does
     fmt        Format Weft sources in place (--check: only report)
     lsp        Run the Weft language server on stdin/stdout
     playground Serve the playground web app (--port <n>, default 8080;
@@ -132,7 +133,7 @@ ECP5 OPTIONS (EXPERIMENTAL):
 ELAB OPTIONS:
     synth elab <files.v...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
               [-P <NAME=VALUE>] [--verilog <out.v>] [--rename <module>]
-              [--pass <clean|merge|share|trees|fsm|wreduce|shiftmul|dff|memff|memtrans|memregs|two-state>]...
+              [--pass <clean|merge|sums|share|trees|fsm|wreduce|shiftmul|dff|memff|memtrans|memregs|two-state>]...
 
 SIM OPTIONS:
     synth sim <files.v|.weft...> [--top <module>] [-I <dir>] [-D <NAME[=VAL]>]
@@ -171,6 +172,15 @@ SIM OPTIONS:
               same random inputs (held about --hold cycles; resets active for
               the first 4 cycles) and compares every output bit the RTL
               defines after every rising edge.
+
+TIME OPTIONS:
+    synth time <bitstream.bin|.asc> --device <hx1k|hx8k|...> --package <pkg>
+              [--pcf <file>] [--freq <MHz>]
+              Decodes the bitstream and times its register-to-register paths
+              per clock with synth's timing model (IceStorm's worst-case
+              models, as `synth build` reports them). Clocks from pads need
+              the pads in the PCF. LUT cascades and RAM address cascades,
+              which other tools use, are decoded.
 
 PNR OPTIONS:
     synth pnr <netlist.il> --device <hx1k|hx8k|...> --package <pkg>
@@ -212,6 +222,7 @@ fn main() -> ExitCode {
         Some("unpack-ecp5") => ecp5::unpack(&argv[1..]),
         Some("pack-asc") => cmd_pack_asc(&argv[1..]),
         Some("unpack") => cmd_unpack(&argv[1..]),
+        Some("time") => cmd_time(&argv[1..]),
         Some("playground") => cmd_playground(&argv[1..]),
         Some("fmt") => cmd_fmt(&argv[1..]),
         Some("lsp") => {
@@ -667,6 +678,48 @@ fn cmd_pack_asc(argv: &[String]) -> Result<(), String> {
     write(&output, &cfg.to_bin())
 }
 
+fn cmd_time(argv: &[String]) -> Result<(), String> {
+    let mut a = Args::parse(argv, &["--device", "--package", "--pcf", "--freq"], &[])?;
+    let input = a.positional(0, "input bitstream")?;
+    let part: arch_ice40::arch::Part = a.required("--device")?.parse()?;
+    let package = a.required("--package")?;
+    let pcf = match a.value("--pcf") {
+        Some(p) => arch_ice40::pcf::parse_pcf(&read(&p)?)?,
+        None => Default::default(),
+    };
+    let cfg = if input.ends_with(".asc") {
+        arch_ice40::asc::read_asc(&read(&input)?).map_err(|e| format!("{input}: {e}"))?
+    } else {
+        let data = std::fs::read(&input).map_err(|e| format!("{input}: {e}"))?;
+        arch_ice40::Config::from_bin(&data).map_err(|e| format!("{input}: {}", e.0))?
+    };
+    let clocks = clocks(&mut a, &pcf)?;
+    a.finish()?;
+    let arch = arch_ice40::arch::Arch::new(part, &package)?;
+    let d = arch_ice40::decode::decode_full(&cfg, &arch, &pcf.pins)?;
+    for w in &d.warnings {
+        eprintln!("warning: {w}");
+    }
+    let stats = d.netlist.stats();
+    println!(
+        "cells: {}",
+        stats.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
+    );
+    let report = arch_ice40::timing::analyse_decoded(&arch, &d, &clocks);
+    for c in &report.clocks {
+        let target = match c.target_mhz {
+            Some(t) if c.fmax_mhz >= t => format!(" (target {t:.1} MHz met)"),
+            Some(t) => {
+                format!(" (target {t:.1} MHz FAILED, slack {:.2} ns)", 1000.0 / t - c.period_ns)
+            }
+            None => String::new(),
+        };
+        println!("clock {}: {:.2} ns, {:.1} MHz{target}", c.clock, c.period_ns, c.fmax_mhz);
+        println!("  critical path: {}", c.path.join(" -> "));
+    }
+    Ok(())
+}
+
 fn cmd_unpack(argv: &[String]) -> Result<(), String> {
     let a = Args::parse(argv, &[], &[])?;
     let input = a.positional(0, "input .bin")?;
@@ -801,6 +854,10 @@ fn run_rtl_pass(m: &mut synth_rtl::Module, name: &str) -> Result<(), String> {
         "fsm" => {
             let n = synth_rtl::fsm::simplify_state_compares(m);
             info!("fsm: {n} state comparisons simplified");
+        }
+        "sums" => {
+            let n = opt::accumulations_to_trees(m);
+            info!("sums: {n} accumulation chains as adder trees");
         }
         "trees" => {
             let n = opt::chains_to_trees(m);

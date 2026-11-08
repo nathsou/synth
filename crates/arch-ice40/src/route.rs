@@ -42,7 +42,7 @@ impl Routing {
 /// Whether input `I<k>` of a logic cell may arrive on any free LUT input:
 /// not the carry's operands (`I1`, `I2` with the carry enabled) nor `I3` fed
 /// by the carry chain.
-fn permutable(nl: &Netlist, c: CellId, k: usize) -> bool {
+pub(crate) fn permutable(nl: &Netlist, c: CellId, k: usize) -> bool {
     let carry = nl.param(c, "CARRY_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0;
     match k {
         1 | 2 => !carry,
@@ -277,11 +277,39 @@ pub(crate) fn route_incremental(
     checkpoint: Option<&crate::checkpoint::Checkpoint>,
 ) -> Result<Routing, String> {
     let g = &arch.graph;
-    let costs: Vec<f32> = g.node_class.iter().map(|&c| node_cost(c)).collect();
+    let mut costs: Vec<f32> = g.node_class.iter().map(|&c| node_cost(c)).collect();
+    // A LUT cascade into the next cell takes no local track: cheaper.
+    for c in nl.live_cells() {
+        if let Some(n) = placement.cell_bel.get(&c).and_then(|&b| arch.cascade_node(b)) {
+            costs[n.index()] = 0.5;
+        }
+    }
+    // The physical LUT inputs differ in speed (in3 the fastest, in0 up to
+    // 0.2 ns slower to a flip-flop): the permutation edges of each placed
+    // logic cell carry the difference, so critical inputs take fast pins.
+    // The timing analysis counts it through the cell's arcs instead.
+    let mut edge_delay = g.edge_delay.clone();
+    let (comb, setup) = crate::timing::lut_input_penalties(arch);
+    for c in nl.live_cells() {
+        if nl.cell_kind(c) != LC {
+            continue;
+        }
+        let Some(&bel) = placement.cell_bel.get(&c) else { continue };
+        let dff = nl.param(c, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0;
+        let pen = if dff { setup } else { comb };
+        for (j, pin) in ["I0", "I1", "I2", "I3"].into_iter().enumerate() {
+            let Some(p) = arch.bel(bel).pin(pin) else { continue };
+            for e in g.edges(p.raw()) {
+                if Arch::permutation(g.edge_pip[e]).is_some_and(|(phys, _)| phys == j) {
+                    edge_delay[e] += pen[j];
+                }
+            }
+        }
+    }
     let graph = Graph {
         offsets: &g.offsets,
         edge_dst: &g.edge_dst,
-        edge_delay: &g.edge_delay,
+        edge_delay: &edge_delay,
         node_x: &g.node_x,
         node_y: &g.node_y,
         node_cost: &costs,
@@ -316,6 +344,16 @@ pub(crate) fn route_incremental(
     // The carry reads the physical pins in1 and in2: no other signal may
     // arrive there through the LUT input permutation.
     let mut blocked = Vec::new();
+    // The cascade output of a cell with a flip-flop is the LUT's, not the
+    // cell's (registered) output.
+    for c in nl.live_cells() {
+        if nl.cell_kind(c) == LC
+            && nl.param(c, "DFF_ENABLE").and_then(Param::as_u64).unwrap_or(0) != 0
+            && let Some(n) = placement.cell_bel.get(&c).and_then(|&b| arch.cascade_node(b))
+        {
+            blocked.push(n.raw());
+        }
+    }
     for c in nl.live_cells() {
         if nl.cell_kind(c) == LC && !permutable(nl, c, 1) {
             for p in ["I1", "I2"] {

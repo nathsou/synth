@@ -74,7 +74,7 @@ pub fn generate(
     for edges in routing.net_edges.values() {
         for &e in edges {
             let pip = arch.graph.edge_pip[e as usize];
-            if Arch::permutation(pip).is_some() {
+            if Arch::is_virtual(pip) {
                 continue;
             }
             let (x, y, t, tp) = arch.pip_info(pip);

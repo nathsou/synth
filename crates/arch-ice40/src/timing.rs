@@ -113,6 +113,21 @@ pub fn routed_node_delays(arch: &Arch, source: Option<u32>, edges: &[u32]) -> Fx
     delay
 }
 
+/// How much slower each physical LUT input is than the fastest (`in3`), in
+/// picoseconds: through the LUT (`lcout`), and to the flip-flop (setup).
+/// The router weighs the LUT input permutation by these.
+pub fn lut_input_penalties(arch: &Arch) -> ([f32; 4], [f32; 4]) {
+    let arcs = Arcs { arch, cache: Default::default() };
+    const INS: [&str; 4] = ["in0", "in1", "in2", "in3"];
+    let comb = INS.map(|p| arcs.get("LogicCell40", ArcKind::IoPath, p, "lcout"));
+    let setup = INS.map(|p| arcs.get("LogicCell40", ArcKind::Setup, p, "clk"));
+    let rel = |v: [f64; 4]| {
+        let min = v.iter().copied().fold(f64::INFINITY, f64::min);
+        v.map(|d| (d - min).max(0.0) as f32)
+    };
+    (rel(comb), rel(setup))
+}
+
 /// Analyses a placed and routed design against the clock targets.
 pub fn analyse(
     arch: &Arch,
@@ -160,6 +175,85 @@ pub fn analyse_full(
         });
     }
     (report, graph, a)
+}
+
+/// Analyses a decoded bitstream ([`crate::decode::decode_full`]) against the
+/// clock targets, as [`analyse`] does a design placed and routed here: each
+/// net's route is the tree of active switches reachable from its driver.
+/// Block RAM address inputs shared through a RAM cascade take the delay to
+/// the block they share them with (the cascade buffer is not counted).
+pub fn analyse_decoded(
+    arch: &Arch,
+    d: &crate::decode::Decoded,
+    clocks: &ClockConstraints,
+) -> TimingReport {
+    use synth_netlist::PinRef;
+    let nl = &d.netlist;
+    let g = &arch.graph;
+    let mut out: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for &e in &d.edges {
+        let src = (g.offsets.partition_point(|&o| o as usize <= e as usize) - 1) as u32;
+        out.entry(src).or_default().push(e);
+    }
+    let graph = TimingGraph::new(arch, nl, clocks);
+    let mut by_net: FxHashMap<NetId, Vec<usize>> = FxHashMap::default();
+    for (k, c) in graph.conns.iter().enumerate() {
+        if let Some(n) = nl.cells[c.sink].pins[c.pin].net {
+            by_net.entry(n).or_default().push(k);
+        }
+    }
+    let node_of = |cell: CellId, pin: usize| d.pin_node.get(&PinRef { cell, pin: pin as u32 });
+    let mut delays = vec![0.0; graph.conns.len()];
+    let mut nets: Vec<_> = by_net.into_iter().collect();
+    nets.sort_by_key(|(n, _)| *n);
+    for (net, ks) in nets {
+        let Some(drv) = nl.nets[net].driver else { continue };
+        let Some(&src) = node_of(drv.cell, drv.pin as usize) else { continue };
+        // Breadth first from the driver: tree order.
+        let mut edges = Vec::new();
+        let mut seen = synth_core::FxHashSet::default();
+        let mut queue = std::collections::VecDeque::from([src.raw()]);
+        seen.insert(src.raw());
+        while let Some(v) = queue.pop_front() {
+            for &e in out.get(&v).map_or(&[][..], |v| v.as_slice()) {
+                let w = g.edge_dst[e as usize];
+                if seen.insert(w) {
+                    edges.push(e);
+                    queue.push_back(w);
+                }
+            }
+        }
+        let nd = routed_node_delays(arch, Some(src.raw()), &edges);
+        for k in ks {
+            let c = graph.conns[k];
+            if let Some(node) = node_of(c.sink, c.pin) {
+                delays[k] = nd.get(&node.raw()).copied().unwrap_or(0.0);
+            }
+        }
+    }
+    let a = graph.analyse(&delays);
+    let mut report = TimingReport::default();
+    for (ci, clk) in graph.clocks.iter().enumerate() {
+        let Some(path) = a.paths[ci].as_ref() else { continue };
+        let ns = a.period[ci] / 1000.0;
+        report.clocks.push(ClockTiming {
+            clock: clk.name.clone(),
+            period_ns: ns,
+            fmax_mhz: 1000.0 / ns,
+            target_mhz: clk.target_ps.map(|t| 1e6 / t),
+            path: path
+                .iter()
+                .map(|&(c, i, t)| {
+                    let pin = nl.str(nl.cells[c].pins[i].name);
+                    let node = node_of(c, i)
+                        .map(|n| format!(" ({} net_{})", arch.node_name(*n), n.raw()))
+                        .unwrap_or_default();
+                    format!("{}.{pin} @{:.2}{node}", nl.str(nl.cells[c].name), t / 1000.0)
+                })
+                .collect(),
+        });
+    }
+    report
 }
 
 /// The routed delay of every connection of `graph`.
@@ -274,6 +368,7 @@ fn clock_name(nl: &Netlist, net: NetId) -> String {
                 None => break,
             },
             LC => return nl.str(nl.cells[d.cell].name).trim_end_matches("$lc").to_string(),
+            synth_netlist::INPUT_PORT => return nl.str(nl.cells[d.cell].name).to_string(),
             crate::pll::CORE => return nl.str(nl.cells[d.cell].name).to_string(),
             _ => break,
         }
@@ -386,7 +481,10 @@ impl TimingGraph {
                 return k as u16;
             }
             let name = clock_name(nl, net);
-            let target_ps = constraints.target_ps(&[&name, nl.str(nl.nets[net].name)]);
+            // A clock from a register is also known by its signal's name
+            // (`slow` for `slow$dff[3]`).
+            let signal = name.split('$').next().unwrap_or(&name).to_string();
+            let target_ps = constraints.target_ps(&[&name, &signal, nl.str(nl.nets[net].name)]);
             clocks.push(Clock { net, name, target_ps });
             (clocks.len() - 1) as u16
         };
@@ -443,6 +541,18 @@ impl TimingGraph {
                     }
                     for (p, a) in [("I1", "in1"), ("I2", "in2"), ("CIN", "carryin")] {
                         arc(pin_of(c, p), cout, lc_arc(a, "carryout"));
+                    }
+                    // The LUT output cascaded into the next cell, whether or
+                    // not the flip-flop is used (decoded bitstreams).
+                    if let Some(lo) = pin_of(c, "LO") {
+                        const INS: [&str; 4] = ["in0", "in1", "in2", "in3"];
+                        let perm = lut_pins.get(&c).copied().unwrap_or([0, 1, 2, 3]);
+                        for (k, p) in ["I0", "I1", "I2", "I3"].into_iter().enumerate() {
+                            arc(pin_of(c, p), Some(lo), lc_arc(INS[perm[k] as usize], "ltout"));
+                        }
+                        if i3_is_cin {
+                            arc(cin, Some(lo), lc_arc("in3", "ltout"));
+                        }
                     }
                 }
                 RAM => {

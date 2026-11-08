@@ -1,0 +1,653 @@
+{
+ "meta": {
+  "freq": 200.0,
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "synthesis": "lse",
+  "goal": "Timing",
+  "effort": "std",
+  "lut_permutation": false,
+  "icecube2": "iCEcube2 2020.12.27943, LSE synthesis",
+  "timer": "synth time (IceStorm worst-case models)"
+ },
+ "results": [
+  {
+   "design": "picosoc",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 1544,
+    "ram": 12,
+    "fmax": 84.5,
+    "worst": 84.5,
+    "seconds": 5.1,
+    "seeds": {
+     "1": [
+      84.9,
+      84.9
+     ],
+     "2": [
+      84.5,
+      84.5
+     ],
+     "3": [
+      80.9,
+      80.9
+     ]
+    },
+    "clocks": {
+     "clk": 84.5
+    },
+    "seed": 2
+   },
+   "icecube2": {
+    "failed": "lse (timeout)",
+    "steps": {
+     "lse": 7200
+    }
+   }
+  },
+  {
+   "design": "serv",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 547,
+    "ram": 17,
+    "fmax": 112.6,
+    "worst": 112.6,
+    "seconds": 1.1,
+    "seeds": {
+     "1": [
+      112.6,
+      112.6
+     ],
+     "2": [
+      110.0,
+      110.0
+     ],
+     "3": [
+      116.8,
+      116.8
+     ]
+    },
+    "clocks": {
+     "wb_clk": 112.6
+    },
+    "seed": 1
+   },
+   "icecube2": {
+    "failed": "edifparser",
+    "steps": null
+   }
+  },
+  {
+   "design": "cu_hazard3",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 2203,
+    "ram": 20,
+    "fmax": 613.9,
+    "worst": 49.4,
+    "seconds": 9.8,
+    "seeds": {
+     "1": [
+      613.9,
+      49.7
+     ],
+     "2": [
+      613.9,
+      49.4
+     ],
+     "3": [
+      613.9,
+      48.6
+     ]
+    },
+    "clocks": {
+     "lc_x31_y17_z0": 49.4,
+     "clk": 613.9
+    },
+    "seed": 2
+   },
+   "icecube2": {
+    "failed": "edifparser",
+    "steps": {
+     "lse": 35.1,
+     "edifparser": 1.0
+    }
+   }
+  },
+  {
+   "design": "go_serv",
+   "device": "hx1k",
+   "package": "vq100",
+   "synth": {
+    "lc": 580,
+    "ram": 9,
+    "fmax": 114.3,
+    "worst": 114.3,
+    "seconds": 0.8,
+    "seeds": {
+     "1": [
+      114.3,
+      114.3
+     ],
+     "2": [
+      108.0,
+      108.0
+     ],
+     "3": [
+      115.2,
+      115.2
+     ]
+    },
+    "clocks": {
+     "clk": 114.3
+    },
+    "seed": 1
+   },
+   "icecube2": {
+    "failed": "lse (timeout)",
+    "steps": {
+     "lse": 7200
+    }
+   }
+  },
+  {
+   "design": "euler10",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 7099,
+    "ram": 32,
+    "fmax": 68.0,
+    "worst": 68.0,
+    "seconds": 32.7,
+    "seeds": {
+     "1": [
+      71.6,
+      71.6
+     ],
+     "2": [
+      64.8,
+      64.8
+     ],
+     "3": [
+      68.0,
+      68.0
+     ]
+    },
+    "clocks": {
+     "clk": 68.0,
+     "lc_x32_y15_z7": 124.2
+    },
+    "seed": 3
+   },
+   "icecube2": {
+    "failed": "placer",
+    "steps": {
+     "lse": 142.5,
+     "edifparser": 2.8,
+     "placer": 85.8
+    }
+   }
+  },
+  {
+   "design": "euler14",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 6014,
+    "ram": 16,
+    "fmax": 73.9,
+    "worst": 73.9,
+    "seconds": 17.9,
+    "seeds": {
+     "1": [
+      74.2,
+      74.2
+     ],
+     "2": [
+      72.1,
+      72.1
+     ],
+     "3": [
+      73.9,
+      73.9
+     ]
+    },
+    "clocks": {
+     "lc_x16_y32_z3": 112.0,
+     "clk": 73.9
+    },
+    "seed": 3
+   },
+   "icecube2": {
+    "lc": 6401,
+    "ram": 16,
+    "fmax": 66.8,
+    "worst": 66.8,
+    "seconds": 691.9,
+    "sbtimer": {
+     "clk": 67.61,
+     "euler_top|slow": 119.52
+    },
+    "clocks": {
+     "clk": 66.8,
+     "lc_x13_y17_z5": 119.2
+    },
+    "steps": {
+     "lse": 124.0,
+     "edifparser": 9.8,
+     "placer": 458.5,
+     "packer": 3.1,
+     "router": 32.7,
+     "netlister": 23.0,
+     "sbtimer": 36.7,
+     "bitmap": 4.1
+    }
+   }
+  },
+  {
+   "design": "euler25",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 1324,
+    "ram": 0,
+    "fmax": 73.6,
+    "worst": 73.6,
+    "seconds": 4.6,
+    "seeds": {
+     "1": [
+      72.6,
+      72.6
+     ],
+     "2": [
+      74.9,
+      74.9
+     ],
+     "3": [
+      73.6,
+      73.6
+     ]
+    },
+    "clocks": {
+     "lc_x16_y32_z3": 117.7,
+     "clk": 73.6
+    },
+    "seed": 3
+   },
+   "icecube2": {
+    "lc": 2100,
+    "ram": 0,
+    "fmax": 57.8,
+    "worst": 57.8,
+    "seconds": 413.4,
+    "sbtimer": {
+     "clk": 57.82,
+     "euler_top|slow": 148.52
+    },
+    "clocks": {
+     "clk": 57.8,
+     "lc_x11_y4_z7": 146.7
+    },
+    "steps": {
+     "lse": 34.7,
+     "edifparser": 4.4,
+     "placer": 331.7,
+     "packer": 0.9,
+     "router": 20.0,
+     "netlister": 9.2,
+     "sbtimer": 10.7,
+     "bitmap": 1.8
+    }
+   }
+  },
+  {
+   "design": "euler31",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 988,
+    "ram": 12,
+    "fmax": 161.8,
+    "worst": 161.8,
+    "seconds": 2.0,
+    "seeds": {
+     "1": [
+      160.0,
+      160.0
+     ],
+     "2": [
+      161.8,
+      161.8
+     ],
+     "3": [
+      161.8,
+      161.8
+     ]
+    },
+    "clocks": {
+     "clk": 161.8,
+     "lc_x16_y32_z1": 132.1
+    },
+    "seed": 2
+   },
+   "icecube2": {
+    "lc": 1078,
+    "ram": 12,
+    "fmax": 157.9,
+    "worst": 157.9,
+    "seconds": 313.7,
+    "sbtimer": {
+     "clk": 160.39,
+     "euler_top|slow": 129.5
+    },
+    "clocks": {
+     "clk": 157.9,
+     "lc_x3_y15_z3": 128.4
+    },
+    "steps": {
+     "lse": 9.3,
+     "edifparser": 1.4,
+     "placer": 249.5,
+     "packer": 1.2,
+     "router": 30.1,
+     "netlister": 12.9,
+     "sbtimer": 8.1,
+     "bitmap": 1.2
+    }
+   }
+  },
+  {
+   "design": "euler43",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 5959,
+    "ram": 0,
+    "fmax": 55.4,
+    "worst": 55.4,
+    "seconds": 21.6,
+    "seeds": {
+     "1": [
+      55.7,
+      55.7
+     ],
+     "2": [
+      55.4,
+      55.4
+     ],
+     "3": [
+      55.1,
+      55.1
+     ]
+    },
+    "clocks": {
+     "clk": 55.4,
+     "lc_x16_y32_z4": 76.5
+    },
+    "seed": 2
+   },
+   "icecube2": {
+    "failed": "edifparser (14567 LUTs > 7680)",
+    "steps": {
+     "lse": 235.8,
+     "edifparser": 1.4
+    }
+   }
+  },
+  {
+   "design": "euler48",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 6503,
+    "ram": 0,
+    "fmax": 75.2,
+    "worst": 75.2,
+    "seconds": 19.7,
+    "seeds": {
+     "1": [
+      75.2,
+      75.2
+     ],
+     "2": [
+      77.2,
+      77.2
+     ],
+     "3": [
+      71.7,
+      71.7
+     ]
+    },
+    "clocks": {
+     "clk": 75.2,
+     "lc_x16_y32_z5": 133.2
+    },
+    "seed": 1
+   },
+   "icecube2": {
+    "failed": "placer",
+    "steps": {
+     "lse": 101.4,
+     "edifparser": 13.7,
+     "placer": 137.6
+    }
+   }
+  },
+  {
+   "design": "euler57",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 2628,
+    "ram": 16,
+    "fmax": 67.0,
+    "worst": 67.0,
+    "seconds": 4.1,
+    "seeds": {
+     "1": [
+      67.1,
+      67.1
+     ],
+     "2": [
+      66.4,
+      66.4
+     ],
+     "3": [
+      67.0,
+      67.0
+     ]
+    },
+    "clocks": {
+     "lc_x16_y32_z4": 123.5,
+     "clk": 67.0
+    },
+    "seed": 3
+   },
+   "icecube2": {
+    "lc": 3318,
+    "ram": 16,
+    "fmax": 52.7,
+    "worst": 52.7,
+    "seconds": 217.7,
+    "sbtimer": {
+     "clk": 52.91,
+     "euler_top|slow": 146.84
+    },
+    "clocks": {
+     "lc_x12_y17_z7": 147.1,
+     "clk": 52.7
+    },
+    "steps": {
+     "lse": 8.2,
+     "edifparser": 0.8,
+     "placer": 149.0,
+     "packer": 1.5,
+     "router": 22.2,
+     "netlister": 11.5,
+     "sbtimer": 21.4,
+     "bitmap": 3.1
+    }
+   }
+  },
+  {
+   "design": "euler58",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 7381,
+    "ram": 0,
+    "fmax": 67.2,
+    "worst": 67.2,
+    "seconds": 16.4,
+    "seeds": {
+     "1": [
+      67.2,
+      67.2
+     ],
+     "2": [
+      67.8,
+      67.8
+     ],
+     "3": [
+      65.4,
+      65.4
+     ]
+    },
+    "clocks": {
+     "clk": 67.2,
+     "lc_x16_y1_z4": 121.8
+    },
+    "seed": 1
+   },
+   "icecube2": {
+    "failed": "placer",
+    "steps": {
+     "lse": 35.8,
+     "edifparser": 3.3,
+     "placer": 0.8
+    }
+   }
+  },
+  {
+   "design": "euler92",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 3840,
+    "ram": 18,
+    "fmax": 93.2,
+    "worst": 93.2,
+    "seconds": 6.8,
+    "seeds": {
+     "1": [
+      91.9,
+      91.9
+     ],
+     "2": [
+      93.2,
+      93.2
+     ],
+     "3": [
+      93.8,
+      93.8
+     ]
+    },
+    "clocks": {
+     "clk": 93.2,
+     "lc_x16_y32_z3": 112.0
+    },
+    "seed": 2
+   },
+   "icecube2": {
+    "lc": 3878,
+    "ram": 18,
+    "fmax": 72.3,
+    "worst": 72.3,
+    "seconds": 227.2,
+    "sbtimer": {
+     "clk": 71.9,
+     "euler_top|slow": 137.5
+    },
+    "clocks": {
+     "clk": 72.3,
+     "lc_x12_y15_z4": 138.4
+    },
+    "steps": {
+     "lse": 18.7,
+     "edifparser": 0.9,
+     "placer": 133.9,
+     "packer": 1.9,
+     "router": 19.0,
+     "netlister": 13.1,
+     "sbtimer": 37.2,
+     "bitmap": 2.5
+    }
+   }
+  },
+  {
+   "design": "euler97",
+   "device": "hx8k",
+   "package": "cb132",
+   "synth": {
+    "lc": 1467,
+    "ram": 0,
+    "fmax": 90.7,
+    "worst": 90.7,
+    "seconds": 3.2,
+    "seeds": {
+     "1": [
+      90.7,
+      90.7
+     ],
+     "2": [
+      91.2,
+      91.2
+     ],
+     "3": [
+      89.4,
+      89.4
+     ]
+    },
+    "clocks": {
+     "clk": 90.7,
+     "lc_x16_y32_z5": 136.9
+    },
+    "seed": 1
+   },
+   "icecube2": {
+    "lc": 1596,
+    "ram": 0,
+    "fmax": 73.9,
+    "worst": 73.9,
+    "seconds": 142.1,
+    "sbtimer": {
+     "clk": 74.22,
+     "euler_top|slow": 150.72
+    },
+    "clocks": {
+     "clk": 73.9,
+     "lc_x2_y13_z2": 156.1
+    },
+    "steps": {
+     "lse": 5.5,
+     "edifparser": 0.8,
+     "placer": 110.1,
+     "packer": 0.7,
+     "router": 12.7,
+     "netlister": 5.6,
+     "sbtimer": 5.2,
+     "bitmap": 1.5
+    }
+   }
+  }
+ ]
+}

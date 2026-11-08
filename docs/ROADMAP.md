@@ -9,7 +9,7 @@ stated), not when its features merely exist.
 | Phase | State |
 |---|---|
 | 0: Foundations | Done. |
-| 1: iCE40 (Milestone 1) | End to end and ahead of Yosys + nextpnr on every design measured (README). Runs on the Alchitry Cu and the Go Board. `synth init`, `synth build` and `synth prog` work. Open: riscv-tests and Dhrystone on the Cu; the iCEcube2 baseline. |
+| 1: iCE40 (Milestone 1) | End to end, and ahead of Yosys + nextpnr on every design measured and of iCEcube2 on every design both implement (README, [ICECUBE2.md](ICECUBE2.md)). Runs on the Alchitry Cu and the Go Board. `synth init`, `synth build` and `synth prog` work. Open: riscv-tests and Dhrystone on the Cu. |
 | 2: Artix-7 | Synthesis, packing, analytical placement, routing, hold repair, timing calibrated against Vivado, and bitstreams. Runs on the Alchitry Au. Open: RAMB36, MMCM, DSP cascades, I/O registers and SERDES, the XDC Tcl subset, a LiteX SoC, the Nexys A7 on hardware, scale at 50k LUTs. |
 | 3: ECP5 | Done without hardware (ECP5.md). Open: wide muxes, LUT RAM, registered DSPs, I/O registers; a board. |
 | 4: QoR | Continuous: see README, ARTIX7.md and ECP5.md for the gaps measured. |
@@ -136,10 +136,11 @@ RV32IM with an iterative multiply/divide unit, with firmware sized to fit in BRA
   Cu~~: dropped.
 - [x] The bitstream round-trip simulation (disassemble, simulate, compare to RTL)
   passes for the whole integration ladder in CI (`tools/ci_bitsim.sh`).
-- [ ] Baseline QoR is recorded against iCEcube2 and Yosys+nextpnr (LCs, BRAM, Fmax,
+- [x] Baseline QoR is recorded against iCEcube2 and Yosys+nextpnr (LCs, BRAM, Fmax,
   runtime). Target at M1: **within 20% LCs and 20% Fmax of Yosys+nextpnr**.
   Closing the gap is Phase 4's job. (Yosys+nextpnr: recorded, and ahead on
-  every design; iCEcube2: not recorded.)
+  every design; iCEcube2: recorded in [ICECUBE2.md](ICECUBE2.md), smaller and
+  faster on every design both tools implement.)
 - [x] Full flow for the SoC takes under 10 s on a laptop (PicoRV32: 4 s).
 - [x] `synth init --board alchitry-cu && synth build && synth prog` works for a new
   user.
