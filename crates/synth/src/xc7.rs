@@ -1,6 +1,14 @@
 //! Native Artix-7 command adapters.
 use crate::{args::Args, read, write};
 use std::path::Path;
+/// The Project X-Ray database (`prjxray-db/artix7`): `--db`, else the
+/// `SYNTH_XC7_DB` environment variable.
+pub(crate) fn db(a: &mut Args) -> Result<String, String> {
+    a.value("--db").or_else(|| std::env::var("SYNTH_XC7_DB").ok().filter(|v| !v.is_empty())).ok_or_else(|| {
+        "missing the Artix-7 database: --db <prjxray-db/artix7> or SYNTH_XC7_DB (tools/fetch_xc7_db.sh fetches it)".into()
+    })
+}
+
 pub struct Library;
 impl synth_rtlil::PrimitiveLibrary for Library {
     fn port_dir(&self, kind: &str, port: &str) -> Option<synth_netlist::Dir> {
@@ -98,7 +106,7 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
             return Err(format!("{opt} is not supported by the Artix-7 physical flow"));
         }
     }
-    let db = a.required("--db")?;
+    let db = db(a)?;
     let part = a.required("--device")?;
     let xdc = arch_xc7::xdc::Constraints::parse(&read(&a.required("--xdc")?)?)?;
     let opts = arch_xc7::flow::FlowOptions {
@@ -138,15 +146,18 @@ pub fn finish(nl: synth_netlist::Netlist, a: &mut Args) -> Result<(), String> {
         result.bitstream
     };
     write(&out, &bytes)?;
-    if !a.flag("--timing-allow-fail") {
-        return Err("Artix-7 timing is not certified yet; bitstream written, but timing acceptance failed (use --timing-allow-fail for bring-up)".into());
+    if !result.timing_failures.is_empty() && !a.flag("--timing-allow-fail") {
+        return Err(format!(
+            "timing targets not met ({}); the bitstream was written (--timing-allow-fail accepts this)",
+            result.timing_failures.join("; ")
+        ));
     }
     Ok(())
 }
 pub fn pack_fasm(argv: &[String]) -> Result<(), String> {
     let mut a = Args::parse(argv, &["--db", "--device", "-o"], &[])?;
     let input = a.positional(0, "FASM input")?;
-    let db = a.required("--db")?;
+    let db = db(&mut a)?;
     let part = a.required("--device")?;
     let out = a.required("-o")?;
     let dev = arch_xc7::device::Device::geometry(Path::new(&db), &part)?;
@@ -166,7 +177,7 @@ pub fn unpack(argv: &[String]) -> Result<(), String> {
     use std::fmt::Write;
     let mut a = Args::parse(argv, &["--db", "--device", "-o"], &[])?;
     let input = a.positional(0, "bitstream")?;
-    let db = a.required("--db")?;
+    let db = db(&mut a)?;
     let part = a.required("--device")?;
     let out = a.required("-o")?;
     let part = arch_xc7::device::Part::load(Path::new(&db), &part)?;
