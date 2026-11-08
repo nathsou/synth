@@ -1,9 +1,10 @@
 # synth
 
-A unified, self-contained FPGA toolchain written in Rust. It takes Verilog-2005,
-[Weft](docs/WEFT.md) (its own HDL) or RTLIL (for example from Amaranth) to a
-programmable bitstream in one tool, with no Yosys, nextpnr, Python or vendor
-tools at runtime.
+A unified, self-contained FPGA toolchain written in Rust. It takes Verilog-2005
+or [Weft](docs/WEFT.md) (its own HDL) to a programmable bitstream in one tool,
+with no Yosys, nextpnr, Python or vendor tools at runtime. `synth pnr` also
+places and routes netlists already mapped to the device's primitives, as
+RTLIL.
 
 Initial targets, in order:
 
@@ -16,9 +17,55 @@ Initial targets, in order:
 The goal is to match or beat vendor tools (iCEcube2/Radiant, Diamond, Vivado) on
 resource use and Fmax, with deterministic, reproducible results.
 
+## Getting started
+
+Download `synth` for Linux or macOS from the
+[releases](https://github.com/nathsou/synth/releases), or build it:
+
 ```sh
 cargo build --release
-target/release/synth build design.v --top top \
+export PATH=$PWD/target/release:$PATH
+```
+
+Start a project for your board, build it, and program the board:
+
+```sh
+synth init --board alchitry-cu blinky && cd blinky
+synth build
+synth prog
+```
+
+`synth init` writes `synth.toml`, the board's pin constraints and a starter
+Weft design that counts on the LEDs. Without source files, `synth build` builds
+the project in the current directory. Options given on the command line
+override the project's. `synth prog` runs
+[openFPGALoader](https://github.com/trabucayre/openFPGALoader). It programs the
+flash of iCE40 boards and the FPGA of Artix-7 boards; `--flash` writes their
+flash instead. `synth init --list` lists the boards:
+
+| Board | Id | FPGA |
+|---|---|---|
+| Nandland Go Board | `go-board` | iCE40 HX1K VQ100 |
+| Lattice iCEstick | `icestick` | iCE40 HX1K TQ144 |
+| Lattice iCE40-HX8K Breakout Board | `hx8k-breakout` | iCE40 HX8K CT256 |
+| Alchitry Cu | `alchitry-cu` | iCE40 HX8K CB132 |
+| Alchitry Au | `alchitry-au` | Artix-7 XC7A35T FTG256 |
+| Digilent Nexys A7-100T | `nexys-a7` | Artix-7 XC7A100T CSG324 |
+
+The Artix-7 boards need the Project X-Ray database
+(`tools/fetch_xc7_db.sh <dir>`), given by `SYNTH_XC7_DB`, `--db` or `db` in
+`synth.toml`.
+
+Outside a project, `--board` picks a board's device and pins:
+
+```sh
+synth build design.v --top top --board alchitry-cu -o design.bin
+```
+
+Or give the device and constraints yourself:
+
+```sh
+synth build design.v --top top \
   --device hx8k --package cb132 --pcf pins.pcf -o design.bin
 ```
 
@@ -262,7 +309,7 @@ nextpnr on every design, from 3.7 times (Euler 48) to 13 (SERV on the Go
 Board), and every design ends up with a higher Fmax, by 3% (Euler 57) to
 55% (Euler 97). Yosys maps Euler 10 to 64,445 LUTs, which no iCE40 holds.
 
-### Experimental native Artix-7 flow
+### Native Artix-7 flow
 
 The Rust backend supports synthesis, slice/carry/RAM/DSP packing, placement,
 routing and configuration-frame generation:
@@ -271,21 +318,24 @@ routing and configuration-frame generation:
 tools/fetch_xc7_db.sh /tmp/prjxray-db
 target/release/synth build design.v --top top --family artix7 \
   --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
-  --xdc design.xdc -o design.bit --timing-allow-fail
+  --xdc design.xdc -o design.bit
 ```
 
 `--family xc7` is an alias; omitting `--family` keeps iCE40. `synth` can emit
 mapped Verilog, and `pnr` accepts mapped RTLIL. External tools are used only
 for independent tests; the runtime reads the pinned CC0 device database.
 
-**Artix-7 has not reached iCE40 maturity.** Against Vivado 2025.2 on the Euler
-solvers, with Vivado's timer judging both, synth uses fewer slices on six of
-ten and its synthesis is on par, but its placement and routing are 1–12%
-slower under a tight clock (3% on average), in less time on average. Physical tests compare native frames/packets
-against Project X-Ray on 35T and 100T, and netlists rebuilt from the
-bitstreams simulate correctly, but hardware behavior remains unvalidated.
-Builds require the explicit timing override. Advanced clocks/I/O, RAMB36, DSP
-cascades and incremental checkpoints remain unsupported. See [the detailed
+**Artix-7 bitstreams run on the Alchitry Au**, but the flow is less mature
+than iCE40's. Against Vivado 2025.2 on the Euler solvers, with Vivado's timer
+judging both, synth uses fewer slices on six of ten and its synthesis is on
+par. Its placement and routing are 1–12% slower under a tight clock (3% on
+average), and take less time on average. Physical tests compare native
+frames and packets against Project X-Ray on the 35T and the 100T, and
+netlists rebuilt from the bitstreams simulate correctly. As on iCE40, a
+missed clock target fails the build unless `--timing-allow-fail`; the timing
+is an estimate calibrated against Vivado's, without I/O paths. Advanced
+clocks and I/O, RAMB36, DSP cascades and incremental checkpoints are not
+supported yet. See [the detailed
 status and validation report](docs/ARTIX7.md) for the supported XDC subset and
 remaining criteria.
 

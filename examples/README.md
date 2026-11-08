@@ -53,8 +53,16 @@ About 590 of 1280 logic cells and 9 of 16 block RAMs.
 
 ## Programming
 
-Both boards program the SPI flash through their FTDI chip. With
-[openFPGALoader](https://github.com/trabucayre/openFPGALoader):
+Both boards program the SPI flash through their FTDI chip.
+`synth prog` runs [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
+for you:
+
+```sh
+synth prog hazard3.bin --board alchitry-cu
+synth prog serv.bin --board go-board
+```
+
+or directly:
 
 ```sh
 openFPGALoader -b ice40_generic -f hazard3.bin   # or serv.bin

@@ -2,13 +2,18 @@
 
 synth has a native Rust path from Verilog through synthesis, packing,
 placement, routing, static timing estimation, FASM and an uncompressed
-Artix-7 bitstream. It is **experimental, not at the iCE40 flow's maturity**:
-bitstreams have been checked against independent encoders and by simulating
-the netlist reconstructed from them, but never run on hardware. The timing
-estimate's routing delays are calibrated against Vivado 2025.2's timing of
-the same routed designs (see below); it is still an estimate, with clock
-skew between clock regions and hold repair, but without I/O timing. Missing timing characterization is reported and
-fails timing acceptance by default.
+Artix-7 bitstream. It is **less mature than the iCE40 flow**, but its
+bitstreams run on hardware: on the Alchitry Au (XC7A35T). They are also
+checked against independent encoders and by simulating the netlist
+reconstructed from them. The Nexys A7 (XC7A100T) is checked the same way
+but has not been tried on a board yet. The timing estimate's routing delays
+are calibrated against Vivado 2025.2's timing of the same routed designs
+(see below); it is still an estimate, with clock skew between clock regions
+and hold repair, but without I/O timing. As on iCE40, a clock that misses
+its target fails the build, as does a connection short of the hold margin
+(the bitstream is still written; `--timing-allow-fail` accepts it). Pips
+without delay data, the block RAMs' input multiplexers among them, are
+reported and counted as zero delay.
 
 [Against Vivado](#against-vivado), with Vivado's own timer judging both
 tools' placed and routed results, synth uses fewer slices on six of the ten
@@ -94,10 +99,14 @@ carry chains are shared.
 
 ```sh
 tools/fetch_xc7_db.sh /tmp/prjxray-db
+export SYNTH_XC7_DB=/tmp/prjxray-db/artix7     # or --db on each command
 target/release/synth build design.v --top top --family artix7 \
-  --db /tmp/prjxray-db/artix7 --device xc7a35tftg256-1 \
-  --xdc design.xdc --fasm design.fasm -o design.bit --timing-allow-fail
+  --device xc7a35tftg256-1 --xdc design.xdc --fasm design.fasm -o design.bit
 # Also tested with --device xc7a100tcsg324-1.
+# For the Alchitry Au or the Nexys A7, --board alchitry-au (or nexys-a7)
+# gives the device and the board's pins:
+target/release/synth build design.v --top top --board alchitry-au -o design.bit
+target/release/synth prog design.bit --board alchitry-au   # openFPGALoader
 ```
 
 The database is CC0 Project X-Ray data pinned to
@@ -325,9 +334,9 @@ implemented.
   800 MHz and CLKOUT0 divides it (100, 80, 66.7, 57.1, 50, 40, 33.3, 25 MHz,
   ...). The PLL's output frequency is its clock's timing target. Its
   features match nextpnr-xilinx's for the same design bit for bit, apart
-  from the BUFG chosen; it has not run on hardware yet. `--timing-allow-fail` is an explicit bring-up override: without
-it a build writes its bitstream and exits unsuccessfully, never reporting
-uncertified timing as passing.
+  from the BUFG chosen; it has not run on hardware yet. A build that misses
+a timing target writes its bitstream and exits unsuccessfully unless
+`--timing-allow-fail` is given.
 
 ## Validation
 
@@ -410,7 +419,8 @@ O5 setting, so the flip-flops were enabled by their own data (Euler 58,
 which `ci_artix7_bitsim.py` does not cover). `vivado_artix7.py` is the QoR
 comparison below; Vivado's design rule checks found that the harnesses had
 put single-ended clocks on the N side of clock-capable pairs, now the P
-side. No hardware execution has been possible.
+side. These checks predate hardware: bitstreams have since run on the
+Alchitry Au.
 
 ## QoR
 
@@ -584,9 +594,9 @@ How to read the timing columns:
   takes 6 s longer than before.
 - Close the remaining synthesis gaps: Euler 43's wide multiplexing, and
   carry-lane LUT replication that costs 2–5% slices on Euler 43, 48 and 97.
-- Validate on hardware with a SoC and realistic clock and I/O constraints;
-  extend primitive coverage (RAMB36, DSP cascades, clocking) and verify
-  legality at device capacity.
+- Run a SoC on the Alchitry Au and the Nexys A7, with realistic clock and
+  I/O constraints; extend primitive coverage (RAMB36, DSP cascades,
+  clocking) and verify legality at device capacity.
 
 The [Phase 2 roadmap](ROADMAP.md#phase-2-artix-7) specifies the remaining
 scaling, SoC and hardware exit criteria.

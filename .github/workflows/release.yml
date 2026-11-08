@@ -1,0 +1,87 @@
+name: Release
+
+# Pushing a tag `v<version>` builds `synth` for Linux (x86-64 and ARM64) and
+# macOS (Apple Silicon) and publishes them as a GitHub release, with
+# checksums. A manual run builds the archives only, as workflow artifacts.
+# The binary is self-contained: the iCE40 databases and the playground are
+# built in; Artix-7 and ECP5 read their open databases at run time.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Check the tag against the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked -p synth --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/synth
+          $bin version
+          mkdir smoke && cd smoke
+          ../$bin init --board alchitry-cu
+          ../$bin build
+          ../$bin prog --dry-run
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name=synth-${GITHUB_REF_NAME#v}-${{ matrix.target }}
+          [ "$GITHUB_REF_TYPE" = tag ] || name=synth-${GITHUB_SHA::8}-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/synth README.md LICENSE THIRD_PARTY.md "$name"/
+          tar -czf "$name.tar.gz" "$name"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "synth $GITHUB_REF_NAME" --generate-notes --verify-tag
