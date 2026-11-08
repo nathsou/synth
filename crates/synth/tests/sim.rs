@@ -176,6 +176,37 @@ fn synthesized_netlists_match_their_rtl() {
 }
 
 #[test]
+fn accumulation_trees_match_their_rtl() {
+    // Loops that count and sum (rebuilt as adder trees), a sum of words,
+    // and a chain whose partial sum is read elsewhere (kept as is).
+    let dir = std::env::temp_dir().join(format!("synth-sim-acc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let v = "module acc(input clk, input [15:0] z, input [7:0] a, b, c, d,\n\
+             output reg [4:0] cnt_q, output reg [6:0] pos_q, output reg [9:0] sum_q,\n\
+             output reg [7:0] part_q, output reg [7:0] tot_q);\n\
+             reg [4:0] cnt; reg [6:0] pos; reg [7:0] part, tot; integer t;\n\
+             always @* begin\n\
+               cnt = 0; pos = 0;\n\
+               for (t = 0; t < 16; t = t + 1) if (z[t]) begin cnt = cnt + 5'd1; pos = pos + t; end\n\
+               part = a + b; tot = part + c + d + 8'd3;\n\
+             end\n\
+             always @(posedge clk) begin\n\
+               cnt_q <= cnt; pos_q <= pos; sum_q <= a + b + c + d; part_q <= part; tot_q <= tot;\n\
+             end\nendmodule\n";
+    std::fs::write(dir.join("acc.v"), v).unwrap();
+    let (out, _) = sim(&dir, &["acc.v", "--compare", "synth", "--cycles", "3000"]);
+    assert!(out.contains("PASS"), "{out}");
+    let synth = Command::new(env!("CARGO_BIN_EXE_synth"))
+        .current_dir(&dir)
+        .args(["synth", "acc.v"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8(synth.stderr).unwrap();
+    assert!(log.contains("3 accumulations as adder trees"), "{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bitstreams_match_their_rtl() {
     let d = root().join("tests/designs/euler");
     let (out, _) = sim(

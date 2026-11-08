@@ -8,9 +8,15 @@
 //! the netlist's ports. Unconnected inputs are left unconnected (their
 //! default value applies). Registered or tristate pads and PLLs are not
 //! decoded.
+//!
+//! Two features of the fabric that synth's own flow leaves unused are
+//! decoded too, as vendor bitstreams use them: a logic cell's LUT output
+//! cascaded into input 2 of the next cell of its tile (`lutff_<z>/lout`, the
+//! cell's `LO` output, before its flip-flop), and the address inputs of a
+//! block RAM shared with the block above it (`RamCascade` bits).
 
 use synth_core::FxHashMap;
-use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param};
+use synth_netlist::{Bit, CellId, Dir, INPUT_PORT, NetId, Netlist, OUTPUT_PORT, Param, PinRef};
 
 use crate::arch::{Arch, BelKind};
 use crate::bitstream::Config;
@@ -51,6 +57,8 @@ struct Decoder<'a> {
     /// Joined nodes with a driver.
     driven: Vec<bool>,
     warnings: Vec<String>,
+    /// Routing node of each connected cell pin.
+    pin_node: FxHashMap<PinRef, NodeId>,
 }
 
 impl Decoder<'_> {
@@ -89,8 +97,26 @@ impl Decoder<'_> {
             (_, Some(n)) if self.is_driven(n) => Some(self.net(n)),
             _ => None,
         };
-        self.nl.add_pin(c, name, dir, net).map(|_| ()).map_err(|e| e.0)
+        let pin = self.nl.add_pin(c, name, dir, net).map_err(|e| e.0)?;
+        if let (Some(_), Some(n)) = (net, node) {
+            self.pin_node.insert(PinRef { cell: c, pin }, n);
+        }
+        Ok(())
     }
+}
+
+/// A decoded bitstream: [`decode`]'s netlist and warnings, and where its
+/// cells' pins meet the routing.
+#[derive(Debug)]
+pub struct Decoded {
+    pub netlist: Netlist,
+    pub warnings: Vec<String>,
+    /// Routing node of each connected cell pin. The address inputs of a
+    /// block RAM that shares the addresses of the block above it are at that
+    /// block's pins.
+    pub pin_node: FxHashMap<PinRef, NodeId>,
+    /// Active switches, as routing graph edges.
+    pub edges: Vec<u32>,
 }
 
 /// Decodes `cfg` for `arch`, naming the ports after `pins` (port → package
@@ -100,15 +126,22 @@ pub fn decode(
     arch: &Arch,
     pins: &PinConstraints,
 ) -> Result<(Netlist, Vec<String>), String> {
+    decode_full(cfg, arch, pins).map(|d| (d.netlist, d.warnings))
+}
+
+/// [`decode`], also returning where pins meet the routing and the active
+/// switches, to time the bitstream.
+pub fn decode_full(cfg: &Config, arch: &Arch, pins: &PinConstraints) -> Result<Decoded, String> {
     let db = arch.db;
     let n = db.nodes.len();
     let mut uf = Uf((0..n as u32).collect());
     // Routing: join both sides of every active switch.
     let gw = db.grid_width();
+    let mut active = std::collections::HashSet::new();
     for y in 0..db.grid_height() {
         for x in 0..gw {
             let Some(t) = db.template_at(x, y) else { continue };
-            for p in &t.pips {
+            for (i, p) in t.pips.iter().enumerate() {
                 if p.pattern == 0 {
                     continue;
                 }
@@ -123,10 +156,17 @@ pub fn decode(
                     (db.tile_wire_node(x, y, p.src), db.tile_wire_node(x, y, sw.dst))
                 {
                     uf.union(a.raw(), b.raw());
+                    active.insert(((y * gw + x) as u16, i as u16));
                 }
             }
         }
     }
+    let edges: Vec<u32> = (0..arch.graph.edge_pip.len() as u32)
+        .filter(|&e| {
+            let p = arch.graph.edge_pip[e as usize];
+            active.contains(&(p.tile, p.tpip))
+        })
+        .collect();
     let mut d = Decoder {
         arch,
         cfg,
@@ -135,6 +175,7 @@ pub fn decode(
         nets: FxHashMap::default(),
         driven: vec![false; n],
         warnings: Vec::new(),
+        pin_node: FxHashMap::default(),
     };
     d.nl.top = Some(d.nl.sym("top"));
     let is_1k = db.die == Die::D1k;
@@ -143,6 +184,8 @@ pub fn decode(
     struct LcInfo {
         bel: usize,
         bits: [bool; 20],
+        /// The LUT output cascaded into the next cell, if it is.
+        lout: Option<NodeId>,
     }
     let mut size = vec![0u32; n];
     for i in 0..n as u32 {
@@ -157,8 +200,11 @@ pub fn decode(
             BelKind::Lc => {
                 let name = format!("LC_{z}");
                 let bits: [bool; 20] = std::array::from_fn(|i| d.entry(x, y, &name, Some(i)));
-                if bits.iter().any(|&b| b) {
-                    lcs.push(LcInfo { bel: bi, bits });
+                let lout = db
+                    .node_by_name(x, y, &format!("lutff_{z}/lout"))
+                    .filter(|l| size[d.uf.find(l.raw()) as usize] > 1);
+                if bits.iter().any(|&b| b) || lout.is_some() {
+                    lcs.push(LcInfo { bel: bi, bits, lout });
                 }
             }
             BelKind::Ram => {
@@ -185,6 +231,9 @@ pub fn decode(
             if p.name == "O" || p.name == "COUT" && lc.bits[8] {
                 mark(&mut d, p.node);
             }
+        }
+        if let Some(l) = lc.lout {
+            mark(&mut d, l);
         }
     }
     for &bi in &rams {
@@ -286,6 +335,9 @@ pub fn decode(
                 _ => {}
             }
         }
+        if let Some(l) = lc.lout {
+            d.pin(c, "LO", Dir::Output, Some(l))?;
+        }
     }
     for &bi in &rams {
         let bel = &arch.bels[bi];
@@ -307,9 +359,30 @@ pub fn decode(
                 .collect();
             d.nl.set_param(c, &format!("INIT_{word:X}"), Param::Bits(bits));
         }
+        // Address inputs shared with the block above (RamCascade.CBIT_4
+        // for the write address, CBIT_6 for the read address), which may
+        // share them with the block above it in turn.
+        let source = |d: &Decoder, bit: &str| {
+            let mut y = bel.y;
+            while d.entry(x, y as usize + 1, bit, None)
+                && arch.bel_at(bel.x, y + 2, 0, BelKind::Ram).is_some()
+            {
+                y += 2;
+            }
+            arch.bel_at(bel.x, y, 0, BelKind::Ram).filter(|_| y != bel.y)
+        };
+        let (wsrc, rsrc) = (source(&d, "RamCascade.CBIT_4"), source(&d, "RamCascade.CBIT_6"));
         for p in bel.pins.clone() {
             let dir = if p.name.starts_with("RDATA") { Dir::Output } else { Dir::Input };
-            d.pin(c, p.name, dir, Some(p.node))?;
+            let src = if p.name.starts_with("WADDR") {
+                wsrc
+            } else if p.name.starts_with("RADDR") {
+                rsrc
+            } else {
+                None
+            };
+            let shared = src.and_then(|b| arch.bels[b.index()].pin(p.name));
+            d.pin(c, p.name, dir, Some(shared.unwrap_or(p.node)))?;
         }
     }
     for &(g, src, out) in &globals {
@@ -336,5 +409,5 @@ pub fn decode(
             ));
         }
     }
-    Ok((d.nl, d.warnings))
+    Ok(Decoded { netlist: d.nl, warnings: d.warnings, pin_node: d.pin_node, edges })
 }

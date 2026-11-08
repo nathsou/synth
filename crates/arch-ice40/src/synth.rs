@@ -78,6 +78,7 @@ pub fn synthesize_observed(
         opt::clean(&mut m)?;
     }
     let merged = opt::merge_identical(&mut m);
+    let sums = opt::accumulations_to_trees(&mut m);
     let shared = opt::share_arith(&mut m);
     let trees = opt::chains_to_trees(&mut m);
     let fsm = synth_rtl::fsm::simplify_state_compares(&mut m);
@@ -85,7 +86,7 @@ pub fn synthesize_observed(
     opt::merge_identical(&mut m);
     opt::clean(&mut m)?;
     log.push(format!(
-        "{merged} duplicate cells merged, {shared} arithmetic operations shared, {trees} mux chains as trees, {fsm} state comparisons simplified"
+        "{merged} duplicate cells merged, {sums} accumulations as adder trees, {shared} arithmetic operations shared, {trees} mux chains as trees, {fsm} state comparisons simplified"
     ));
     observe(SynthStage::Rtl("optimised", &m));
     let n = dff::extract_controls(&mut m);
