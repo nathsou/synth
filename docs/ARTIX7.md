@@ -53,9 +53,21 @@ The `arch-xc7` crate emits:
 - LUT1–LUT6, and MUXF7/MUXF8 for seven- and eight-input functions. After
   the LUT6 mapping is selected, it is remapped once with cuts of up to eight
   inputs, each costing its LUT6s plus the dedicated muxes, and kept only if
-  it needs fewer LUTs at no greater depth. Unused inputs never use the muxes.
+  it needs fewer LUTs at no greater depth. Unused inputs never use the muxes,
+  and a carry's operands stay LUTs: a multiplexer's output takes a LUT more
+  to enter the carry's lane, and a route to it (1.2 ns on Euler 10's
+  critical path, when one landed there).
 - CARRY4 chains for add/subtract/compare, with operand logic folded into
   the propagate LUTs; short additions may stay in LUTs (see QoR below).
+  A stage's DI is either operand (they are equal wherever the stage does
+  not propagate): the one behind fewer LUTs, since DI is a routed
+  connection into the slice's bypass input, while the other operand's logic
+  folds into the propagate LUT. With DI always the first operand, a LUT
+  stayed (or was copied onto the lane's O5) only to feed it: the choice
+  takes 15% of the LUT sites of Euler 48 and 14% of Euler 97's and 4% of
+  Euler 43's slices (`--pack-stats`), and 3-4% of the placed critical path
+  of Euler 31 and 43 (eight seeds each). The first stage of a chain with a dynamic carry-in
+  keeps the first operand, which packing puts on O5 beside the carry-in.
   Before mapping, constants added in sequence fold (`i + 3 - C` takes one
   chain, not two in series), and chains of running maxima or minima of six
   bits or more (`if (best < x[k]) best = x[k], arg = n[k]`) become balanced
@@ -94,6 +106,13 @@ does not increase, and something improves. The candidates are mapped on
 threads of their own and compared in a fixed order, so the selection does
 not depend on the number of threads. Exact duplicate LUTs and identical
 carry chains are shared.
+
+Each mapping is made with both delay tie-breaks, at once where there are
+threads, and a merged cut's truth table is re-expressed over its leaves by
+exchanging variables a word at a time rather than bit by bit (eight-input
+cuts had made the wide remapping half of synthesis). The same netlists take
+a third of the time: Euler 10 26 s rather than 72, Euler 14 5 s rather
+than 20, Euler 43 24 s rather than 66 (4 cores).
 
 ## Native physical flow
 
@@ -171,6 +190,15 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   0.6 s), within 2% of routed connections' mean in a tile, where the
   piecewise linear fit of distance it replaced was 30% under nearby and
   two to three times over tens of rows away.
+  A net of more than 100 readers (a state or an enable shared by a whole
+  design) has no wirelength to minimize, and a move would measure all of
+  it; but each of its connections is timed like any other, as a net of two
+  pins, in the analytical pull and in annealing, at the price per
+  picosecond of the other nets' connections. Left out of both, as they
+  were, a path of two LUTs through two such nets took 5 ns a connection in
+  one placement seed of Euler 10 in eight (80 MHz routed, where the others
+  reach 110), and the placed estimates of eight seeds varied by 12% within
+  a design (geometric mean over the ten Euler designs) rather than 8%.
   A carry chain moving onto single slices displaces them into the sites it
   leaves, chains of one length may swap, and a move tries several targets
   before giving up (most offsets land on a chain). Clock nets use BUFGs
@@ -232,6 +260,19 @@ RAM32M/RAM64M and registered or post-adding DSP48E1s.
   The router also picks each LUT input pin, so a
   critical connection takes a fast one. Address cascades between block RAM
   tiles and buffer pass-throughs are not general routing.
+  A wire that is the only way into a sink (the `BYP_ALT` wire into a
+  slice's bypass input, say) carries that sink's net in any legal routing,
+  so it is reserved for it, like the sink itself, and so on up the chain.
+  Before, nets of many sinks passed through such wires on their way
+  elsewhere (a bypass wire also bounces into its neighbours' inputs) and
+  negotiated for them with their owners, which could only end one way:
+  Euler 31, of 54 LUTs, spent 17 of its 19 iterations on a dozen such
+  wires (6 s of one seed's 25), each searching again from the whole tree
+  of a net of a hundred sinks; it now routes in three. What routing derives from the device alone (the
+  edges entering each node, the nodes that lead nowhere else) is made once
+  for all placement seeds, beside the delay model, and the lookahead once,
+  by the first seed for its placement: the others wait for it, as its
+  searches used every core four times over.
 - **LUT input pins.** A lane's six pins differ by up to 515 ps into the
   LUT (A1 slowest, A6 fastest), but with criticality capped the router
   cannot tell the connections at the worst slack apart, and on Euler 14 and
@@ -492,6 +533,52 @@ Results: [ARTIX7_VIVADO.json](ARTIX7_VIVADO.json).
   Euler 10 takes 169 s against 86 (four placement seeds and three timing
   rounds of routing), 58 121 s against 86, and 48 88 s against 96.
 
+### Runtime and the estimate since `24714ca`
+
+The tables of this section were measured at the revisions they name. Since
+revision `24714ca`, synthesis, placement and routing changed as described
+above (the mapper's cut tables and tie-breaks; the carries' DI and wide
+functions; nets of many readers in placement; reserved wires, the shared
+graph preparation and lookahead in routing). Vivado was not at hand for
+these: the figures are synth's own estimate, on the XC7A100T-CSG324 with
+the pins and the 100 MHz clock of `tools/pnr_artix7.py`, on 4 cores.
+
+| Design | Seconds: before / now | MHz, mean of eight seeds: before / now | Slowest seed: before / now | Fastest seed: before / now |
+|---|---:|---:|---:|---:|
+| Euler 10 | 193 / 79 | 103.9 / 117.2 | 80.2 / 115.1 | 112.5 / 120.4 |
+| Euler 14 | 78 / 37 | 140.5 / 142.7 | 129.2 / 135.7 | 154.0 / 147.9 |
+| Euler 25 | 33 / 15 | 135.3 / 135.5 | 126.4 / 125.8 | 142.1 / 141.2 |
+| Euler 31 | 24 / 11 | 280.2 / 279.6 | 267.2 / 255.9 | 292.6 / 300.5 |
+| Euler 43 | 141 / 69 | 90.7 / 95.0 | 78.0 / 91.1 | 95.6 / 96.9 |
+| Euler 48 | 80 / 35 | 127.2 / 125.9 | 117.5 / 121.6 | 130.9 / 129.9 |
+| Euler 57 | 31 / 18 | 120.7 / 116.8 | 114.2 / 110.6 | 123.2 / 122.0 |
+| Euler 58 | 105 / 62 | 133.1 / 132.8 | 127.4 / 121.4 | 141.0 / 137.9 |
+| Euler 92 | 56 / 24 | 143.2 / 145.1 | 139.0 / 142.6 | 150.3 / 148.4 |
+| Euler 97 | 24 / 11 | 80.5 / 80.8 | 79.9 / 79.1 | 81.1 / 81.9 |
+
+Seconds are `synth build` from source to bitstream with its four placement
+seeds, the two revisions one after the other on the same machine: 764 s for
+the ten designs before, 361 s now. The estimates are of single seeds
+(`--tries 1 --seed 1` to `8`), since one build keeps the best of four and
+two builds' seeds differ by more than the revisions do.
+
+- **Runtime.** A build takes 2.1 times less time: 1.7 times less on Euler
+  57 and 58, 2.5 on Euler 10. Synthesis is three times faster (it was more
+  than a third of Euler 10's time), and each seed's routing no longer prepares the
+  graph and the lookahead for itself, nor negotiates for wires only one
+  net can use.
+- **Estimate.** The mean of the eighty runs rises 1.5% (128.0 to 130.0 MHz,
+  geometric), all of it on Euler 10 and 43; the other eight designs are
+  level (-0.2%), within what eight seeds resolve: a design's mean
+  moves by 1-3% when anything reorders its placement's moves (Euler 57's
+  3% here among them: none of its connections of nets of many readers is
+  critical).
+- **Seeds.** The slowest seed of each design is 5.0% faster (geometric
+  mean), and a design's seeds span 8.7% rather than 13.9%: Euler 10's
+  seeds at 80 and 100 MHz and Euler 43's at 78 are gone. The fastest of
+  eight is unchanged (+0.2%), as is the best of a build's four on one set
+  of seeds (-0.1%; +1.8% on another).
+
 ### Synthesis
 
 `tools/qor_artix7.py` synthesizes the Euler corpus with identical sources
@@ -586,14 +673,17 @@ How to read the timing columns:
   and 97 have only synth's estimate.
 - Extend timing to I/O, and characterize the BRAM pips
   missing from the upstream data.
-- Reduce routing time further. With a lookahead sample for each kind of
-  sink, Euler 48 routes in 69 s rather than 113 s and Euler 10 in 99 s
-  rather than 234 s (four seeds at once; the whole suite's flow takes a
-  third less time at the same Fmax), but the lookahead's thirty-odd
-  backward searches cost seconds on any design: Euler 31, of 54 LUTs,
-  takes 6 s longer than before.
-- Close the remaining synthesis gaps: Euler 43's wide multiplexing, and
-  carry-lane LUT replication that costs 2–5% slices on Euler 43, 48 and 97.
+- Reduce routing time further. The lookahead's thirty-odd backward
+  searches, now made once for all seeds, still cost 3 s on any design, and
+  loading the device and its delay model 3 s more: most of the 10 s one
+  seed of Euler 31 takes. A search starts from every node of its net's tree within reach,
+  thousands for a net of a thousand sinks.
+- Placement seeds still differ by 8% after placement, and the routed
+  result follows the placed estimate closely enough to tell the worst seed
+  from the best, though not the best two apart.
+- Close the remaining synthesis gaps: Euler 43's wide multiplexing, and the
+  propagate LUTs still copied into carry lanes (see Synthesis: the choice
+  of DI removed most of the copies on Euler 48 and 97).
 - Run a SoC on the Alchitry Au and the Nexys A7, with realistic clock and
   I/O constraints; extend primitive coverage (RAMB36, DSP cascades,
   clocking) and verify legality at device capacity.
