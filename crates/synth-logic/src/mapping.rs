@@ -12,7 +12,7 @@ pub fn optimize(
     opts: &MapOptions,
     remap_rounds: usize,
     timing: impl Fn(&LogicNet) -> lutmap::Timing,
-    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String> + Sync,
     log: &mut Vec<String>,
 ) -> Result<lutmap::Mapping, String> {
     optimize_observed(net, opts, remap_rounds, timing, cost, log, |_| {})
@@ -24,7 +24,7 @@ pub fn optimize_observed(
     opts: &MapOptions,
     remap_rounds: usize,
     timing: impl Fn(&LogicNet) -> lutmap::Timing,
-    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String> + Sync,
     log: &mut Vec<String>,
     mut observe: impl FnMut(&LogicNet),
 ) -> Result<lutmap::Mapping, String> {
@@ -163,7 +163,7 @@ pub fn widen(
     mapping: &lutmap::Mapping,
     opts: &MapOptions,
     timing: impl Fn(&LogicNet) -> lutmap::Timing,
-    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+    cost: impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String> + Sync,
 ) -> Result<Option<(crate::Aig, lutmap::Mapping)>, String> {
     assert!(opts.wide.is_some());
     let luts = cost(net, &net.aig, mapping)?;
@@ -190,13 +190,18 @@ fn map_best(
     c: ChoiceAig,
     opts: &MapOptions,
     timing: &lutmap::Timing,
-    cost: &impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String>,
+    cost: &(impl Fn(&LogicNet, &crate::Aig, &lutmap::Mapping) -> Result<usize, String> + Sync),
 ) -> Result<Candidate, String> {
-    let mut best: Option<(lutmap::Mapping, usize)> = None;
-    for delay_tiebreak in [Tiebreak::Size, Tiebreak::AreaFlow] {
+    // Both at once where there are threads, compared in this order.
+    let both = [Tiebreak::Size, Tiebreak::AreaFlow];
+    let mapped = synth_core::par::map(&both, synth_core::par::threads(2), |&delay_tiebreak| {
         let m =
             lutmap::map_choices_timed(&c, &MapOptions { delay_tiebreak, ..opts.clone() }, timing);
-        let luts = cost(net, &c.aig, &m)?;
+        cost(net, &c.aig, &m).map(|luts| (m, luts))
+    });
+    let mut best: Option<(lutmap::Mapping, usize)> = None;
+    for r in mapped {
+        let (m, luts) = r?;
         if best.as_ref().is_none_or(|(b, l)| (m.depth, luts) < (b.depth, *l)) {
             best = Some((m, luts));
         }

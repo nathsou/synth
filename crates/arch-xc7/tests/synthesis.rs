@@ -397,6 +397,38 @@ fn subtraction_and_comparison_share_carry_hardware() {
 }
 
 #[test]
+fn carry_data_inputs_take_the_operand_behind_less_logic() {
+    // Either operand serves as DI (they are equal wherever a stage does not
+    // propagate). With `a` behind a LUT and `b` a port, DI is `b`, and the
+    // LUT of `a` folds into the propagate LUT instead of staying for DI.
+    for (operands, cin) in
+        [("(p & q | r) + b", ""), ("b + (p & q | r)", ""), ("(p & q | r) + b", "+ c")]
+    {
+        let nl = synth(&format!(
+            "module top(input [7:0] p,q,r,b, input c, output [8:0] s); assign s = {operands} {cin}; endmodule"
+        ));
+        assert_eq!(count(&nl, "CARRY4"), 3, "{operands} {cin}");
+        let mut from_ports = 0;
+        for c in nl.live_cells().filter(|&c| nl.cell_kind(c) == "CARRY4") {
+            for lane in 0..4 {
+                let n = nl.pin_net(c, &format!("DI[{lane}]")).unwrap();
+                let Some(d) = nl.nets[n].driver else { continue };
+                // The first stage of a chain with a carry-in keeps `a`.
+                from_ports += usize::from(nl.cell_kind(d.cell) == synth_netlist::INPUT_PORT);
+            }
+        }
+        assert!(from_ports >= if cin.is_empty() { 8 } else { 7 }, "{operands} {cin}: {from_ports}");
+        for i in 0..2048u64 {
+            let v = |k: u64| (i.wrapping_mul(k) ^ (i >> 3)) & 255;
+            let (p, q, r, b, c) = (v(193), v(73), v(151), v(29), i & 1);
+            let out = evaluate(&nl, &[("p", p), ("q", q), ("r", r), ("b", b), ("c", c)]);
+            let carry = if cin.is_empty() { 0 } else { c };
+            assert_eq!(out["s"], (p & q | r) + b + carry, "{operands} {cin}, input {i}");
+        }
+    }
+}
+
+#[test]
 fn shared_propagate_luts_are_replicated_without_an_extra_logic_level() {
     let mut nl = synth(
         "module top(input [7:0] a,b,output [7:0] x,y); assign x=a+b; assign y=(~a)+(~b); endmodule",

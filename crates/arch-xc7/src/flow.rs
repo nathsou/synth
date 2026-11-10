@@ -44,6 +44,53 @@ struct Shared {
     clocked: Vec<bool>,
     model: crate::sta::DelayModel,
     tree: crate::sta::ClockTree,
+    /// What routing derives from the graph alone.
+    prepared: synth_route::Prepared,
+    /// The router's lookahead, built by the first seed for its placement:
+    /// it bounds the same kinds of sink wherever the other seeds place
+    /// them, and its backward searches cost seconds on any design.
+    lookahead: Pending<synth_route::Lookahead>,
+    /// The routing nodes by tile, for hold repair.
+    tiles: std::sync::OnceLock<crate::hold::Index>,
+}
+
+/// A value one thread makes for the others, which wait for it (or for
+/// word that it will not come).
+struct Pending<T> {
+    value: std::sync::Mutex<Option<Option<T>>>,
+    ready: std::sync::Condvar,
+}
+
+impl<T: Clone> Pending<T> {
+    fn new() -> Self {
+        Pending { value: std::sync::Mutex::new(None), ready: std::sync::Condvar::new() }
+    }
+    fn set(&self, v: Option<T>) {
+        let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        if value.is_none() {
+            *value = Some(v);
+        }
+        self.ready.notify_all();
+    }
+    fn wait(&self) -> Option<T> {
+        let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(v) = &*value {
+                return v.clone();
+            }
+            value = self.ready.wait(value).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Tells the seeds waiting for the first seed's lookahead that none will
+/// come, if it stops before making one.
+struct Abandon<'a, T: Clone>(&'a Pending<T>);
+
+impl<T: Clone> Drop for Abandon<'_, T> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
 }
 
 pub fn implement(
@@ -57,10 +104,30 @@ pub fn implement(
     let db = Device::load(root, &opts.part)?;
     progress::advance(0.6, || "building the routing graph".into());
     let graph = RoutingGraph::new(&db)?;
-    let clocked = graph.clocked(&db)?;
-    let model = graph.slice_delays(&db)?;
+    // The router's view of the graph is prepared beside the delay model
+    // (a second each on the 100T).
+    let (prepared, clocked, model) = if cfg!(target_arch = "wasm32") {
+        (synth_route::prepare(graph.graph()), graph.clocked(&db), graph.slice_delays(&db))
+    } else {
+        std::thread::scope(|scope| {
+            let prepared = scope.spawn(|| synth_route::prepare(graph.graph()));
+            let clocked = graph.clocked(&db);
+            let model = graph.slice_delays(&db);
+            (prepared.join().expect("preparing the routing graph panicked"), clocked, model)
+        })
+    };
+    let (clocked, model) = (clocked?, model?);
     let tree = crate::sta::ClockTree::new(&db);
-    let shared = Shared { db, graph, clocked, model, tree };
+    let shared = Shared {
+        db,
+        graph,
+        clocked,
+        model,
+        tree,
+        prepared,
+        lookahead: Pending::new(),
+        tiles: std::sync::OnceLock::new(),
+    };
     // Seeds run on threads of their own (one where there are none, as in
     // WebAssembly), where progress reports are dropped.
     let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
@@ -70,16 +137,17 @@ pub fn implement(
     let seeds: Vec<u64> =
         (0..tries as u64).map(|k| opts.seed.wrapping_add(k * 1_000_003)).collect();
     let mut results: Vec<Result<FlowResult, String>> = if tries == 1 {
-        vec![implement_seed(nl, root, xdc, opts, seeds[0], &shared, start, true)]
+        vec![implement_seed(nl, root, xdc, opts, seeds[0], &shared, start, true, true)]
     } else {
         progress::step("place", &format!("{tries} placement seeds"));
         std::thread::scope(|scope| {
             let handles: Vec<_> = seeds
                 .iter()
-                .map(|&seed| {
+                .enumerate()
+                .map(|(k, &seed)| {
                     let (nl, shared) = (nl.clone(), &shared);
                     scope.spawn(move || {
-                        implement_seed(nl, root, xdc, opts, seed, shared, start, false)
+                        implement_seed(nl, root, xdc, opts, seed, shared, start, false, k == 0)
                     })
                 })
                 .collect();
@@ -124,8 +192,10 @@ fn implement_seed(
     shared: &Shared,
     start: Instant,
     verbose: bool,
+    first: bool,
 ) -> Result<FlowResult, String> {
-    let Shared { db, graph, clocked, model, tree } = shared;
+    let Shared { db, graph, clocked, model, tree, prepared, .. } = shared;
+    let _abandon = first.then(|| Abandon(&shared.lookahead));
     let mut log = Vec::new();
     // As in Vivado, constraints of ports the design does not have are
     // dropped, so one board's file serves every design on it.
@@ -337,11 +407,28 @@ fn implement_seed(
         }
         synth_route::Retimed { criticality, score }
     };
+    // The first seed's lookahead serves the others, which wait for it (or
+    // make their own if it failed before routing).
+    let lookahead = if first {
+        let l = synth_route::lookahead_prepared(
+            graph.graph(),
+            prepared,
+            &graph.class,
+            &requests,
+            route_opts.lookahead_radius,
+        );
+        shared.lookahead.set(Some(l.clone()));
+        Some(l)
+    } else {
+        shared.lookahead.wait()
+    };
     let hooks = synth_route::RouteHooks {
         progress: Some(&mut iterations),
         retime: Some(&mut retime),
         node_class: &graph.class,
         blocked_edges: &blocked_edges,
+        lookahead: lookahead.as_ref(),
+        prepared: Some(prepared),
         ..Default::default()
     };
     let (mut routes, stats) = synth_route::route_with(graph.graph(), &requests, &route_opts, hooks)
@@ -394,6 +481,7 @@ fn implement_seed(
         &owners,
         &blocked_edges,
         &mut routes,
+        &shared.tiles,
     );
     if rerouted + failing > 0 {
         log.push(format!(
@@ -567,6 +655,7 @@ fn repair_hold(
     owners: &Owners,
     blocked_edges: &[u32],
     routes: &mut [synth_route::NetRoute],
+    tiles: &std::sync::OnceLock<crate::hold::Index>,
 ) -> (usize, usize) {
     // Margin over the estimate, in fast-corner ps: Vivado timed some
     // connections 40 ps faster than the estimate.
@@ -580,7 +669,6 @@ fn repair_hold(
     }
     let blocked: FxHashSet<u32> = blocked_edges.iter().copied().collect();
     let (mut rerouted, mut failing) = (0, 0);
-    let mut index = None;
     for _ in 0..3 {
         let sinks = crate::sta::routed_sinks(db, nl, graph, requests, request_nets, routes, owners);
         // Hold is checked on the fastest connection into each pin.
@@ -603,7 +691,7 @@ fn repair_hold(
                 if d >= target || !done.insert((net, sink)) {
                     continue;
                 }
-                let index = index.get_or_insert_with(|| crate::hold::Index::new(graph));
+                let index = tiles.get_or_init(|| crate::hold::Index::new(graph));
                 let ok = crate::hold::detour(
                     graph,
                     index,
