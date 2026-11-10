@@ -335,6 +335,11 @@ fn chain_timing(net: &LogicNet) -> lutmap::Timing {
     let mut t = lutmap::Timing::default();
     for c in &net.carries {
         let w = c.a.len();
+        // A wide function into a carry takes a LUT more to enter the
+        // carry's lane, and a route to it: its LUTs stay LUTs. (On Euler
+        // 10 one such multiplexer sat on the critical path, 1.2 ns for the
+        // hop.)
+        t.narrow.extend(c.a.iter().chain(&c.b).copied());
         for j in 0..w {
             for &from in &[c.a[j], c.b[j]] {
                 for (i, &to) in c.sum.iter().enumerate().skip(j) {
@@ -539,10 +544,21 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
         e.nl.set_param(c, "IS_C_INVERTED", lut_init((!ff.posedge) as u64, 0));
     }
     // A CARRY4 stage computes S ? carry : DI, and O = S xor carry.
-    // Set S = a xor b and DI = a. Pad partial groups with S=1, DI=0
-    // so CO[3] is the real carry-out even when the width is not a multiple of four.
+    // Set S = a xor b and DI = a or b: where the stage does not propagate
+    // they are equal, so DI is the one behind fewer LUTs (a when they are
+    // level). It reaches the carry through the slice's bypass input, a
+    // routed connection, while the other operand's logic folds into the
+    // propagate LUT. The first stage of a chain with a dynamic carry-in
+    // keeps a: the carry-in takes that bypass input, and packing then
+    // needs DI on the lane's O5, where a's LUT goes more often than a
+    // pass-through of b (else a carry below the chain supplies the
+    // carry-in: 5% more CARRY4s on Euler 48). Pad partial groups with
+    // S=1, DI=0 so CO[3] is the real carry-out even when the width is not
+    // a multiple of four.
+    let mut depths: FxHashMap<NetId, u32> = FxHashMap::default();
     for (ci, ch) in net.carries.iter().enumerate() {
         let mut carry = e.sink(ch.cin)?;
+        let dynamic = e.nl.nets[carry].constant.is_none();
         for base in (0..ch.a.len()).step_by(4) {
             let c = e.nl.add_cell(&format!("$alu{ci}_carry{}", base / 4), "CARRY4");
             let zero = e.konst(false);
@@ -554,7 +570,14 @@ fn emit(net: &LogicNet, mapping: &lutmap::Mapping) -> Result<Netlist, String> {
                     let a = e.sink(ch.a[i])?;
                     let b = e.sink(ch.b[i])?;
                     let s = e.xor(a, b, &format!("$alu{ci}_p{i}"))?;
-                    (a, s)
+                    let di = if !(dynamic && i == 0)
+                        && lut_depth(&e.nl, b, &mut depths) < lut_depth(&e.nl, a, &mut depths)
+                    {
+                        b
+                    } else {
+                        a
+                    };
+                    (di, s)
                 } else {
                     (zero, e.konst(true))
                 };
@@ -837,6 +860,32 @@ impl Emitter<'_> {
         self.inverted.insert(l.node(), out);
         Ok(out)
     }
+}
+
+/// LUTs and wide-function multiplexers on the longest path into `net` from
+/// a register, port, carry or other primitive.
+fn lut_depth(nl: &Netlist, net: NetId, depths: &mut FxHashMap<NetId, u32>) -> u32 {
+    if let Some(&d) = depths.get(&net) {
+        return d;
+    }
+    let mut depth = 0;
+    if let Some(d) = nl.nets[net].driver {
+        let kind = nl.cell_kind(d.cell);
+        if crate::pack::is_lut(kind) || matches!(kind, "MUXF7" | "MUXF8") {
+            // Marked first: netlists are acyclic through LUTs, and a cycle
+            // must not recurse forever.
+            depths.insert(net, 0);
+            let inputs: Vec<NetId> = nl.cells[d.cell]
+                .pins
+                .iter()
+                .filter(|p| p.dir == Dir::Input)
+                .filter_map(|p| p.net)
+                .collect();
+            depth = 1 + inputs.iter().map(|&n| lut_depth(nl, n, depths)).max().unwrap_or(0);
+        }
+    }
+    depths.insert(net, depth);
+    depth
 }
 
 // Propagate-LUT folding can leave operand LUTs unreferenced.
