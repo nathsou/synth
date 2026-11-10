@@ -84,6 +84,8 @@ const RETIME_TEMPERATURES: usize = 4;
 /// Target sites tried per move before giving up: most offsets near a slice
 /// land on a carry chain's sites, which a single slice cannot take.
 const TARGET_RETRIES: usize = 8;
+/// The most readers of a net whose wirelength placement minimizes.
+const MAX_WIRE_READERS: usize = 100;
 
 /// Analytical placement's timing pull: the weight of a connection of
 /// criticality 1 against a two-pin net, and the criticality exponent.
@@ -322,6 +324,9 @@ pub fn place(
         /// Readers with their timing weights: criticality raised to the
         /// exponent.
         sinks: Vec<(End, (CellId, NetId), Cell<f64>)>,
+        /// Whether the net's wirelength counts: not for the connections
+        /// of a net of many readers, each a net of its own for timing.
+        wire: bool,
     }
     let end = |c: CellId| {
         if let Some(&(s, _)) = p.slots.get(&c) {
@@ -336,7 +341,7 @@ pub fn place(
     let nets: Vec<PlacedNet> = nl
         .live_nets()
         .filter(|n| !clock_nets.contains(n) && nl.nets[*n].constant.is_none())
-        .filter_map(|n| {
+        .flat_map(|n| {
             let net = &nl.nets[n];
             let mut clusters = BTreeSet::new();
             let mut blocks = BTreeSet::new();
@@ -351,28 +356,62 @@ pub fn place(
                     fixed.push((f64::from(tile.x), f64::from(tile.y)));
                 }
             }
-            if clusters.len() + blocks.len() + fixed.len() < 2 || net.users.len() > 100 {
-                return None;
+            if clusters.len() + blocks.len() + fixed.len() < 2 {
+                return Vec::new();
             }
             let driver = net.driver.and_then(|d| end(d.cell));
             let mut sinks: Vec<(End, (CellId, NetId), Cell<f64>)> = Vec::new();
+            let mut readers = BTreeSet::new();
             for u in &net.users {
                 if let Some(e) = end(u.cell)
                     && Some(e) != driver
-                    && !sinks.iter().any(|(_, (c, _), _)| *c == u.cell)
+                    && readers.insert(u.cell)
                 {
                     sinks.push((e, (u.cell, n), Cell::new(0.0)));
                 }
             }
-            Some(PlacedNet {
-                slices: clusters.into_iter().collect(),
-                hard: blocks.into_iter().collect(),
-                fixed,
-                driver,
-                sinks,
-            })
+            if net.users.len() <= MAX_WIRE_READERS {
+                return vec![PlacedNet {
+                    slices: clusters.into_iter().collect(),
+                    hard: blocks.into_iter().collect(),
+                    fixed,
+                    driver,
+                    sinks,
+                    wire: true,
+                }];
+            }
+            // A net of many readers (a state shared by a whole design, an
+            // enable) has no wirelength to speak of, and a move would
+            // measure it all; but its connections are timed like any
+            // other, each as a net of two pins. Left out altogether, a
+            // path of two LUTs through two such nets took 5 ns a
+            // connection in one placement seed of Euler 10 in eight.
+            let Some(d) = driver else { return Vec::new() };
+            let movable = |e: End| match e {
+                End::Slice(s) => (vec![s], Vec::new()),
+                End::Hard(h) => (Vec::new(), vec![h]),
+                End::Fixed(..) => (Vec::new(), Vec::new()),
+            };
+            sinks
+                .into_iter()
+                .filter_map(|sink| {
+                    let ((mut slices, mut hard), (s, h)) = (movable(d), movable(sink.0));
+                    slices.extend(s);
+                    hard.extend(h);
+                    slices.dedup();
+                    (!slices.is_empty() || !hard.is_empty()).then(|| PlacedNet {
+                        slices,
+                        hard,
+                        fixed: Vec::new(),
+                        driver,
+                        sinks: vec![sink],
+                        wire: false,
+                    })
+                })
+                .collect()
         })
         .collect();
+    let wires = nets.iter().filter(|n| n.wire).count();
     let mut affected = vec![BTreeSet::new(); p.slices.len()];
     let mut hard_affected = vec![BTreeSet::new(); hard.len()];
     for (i, net) in nets.iter().enumerate() {
@@ -396,6 +435,9 @@ pub fn place(
     };
     let hpwl = |i: usize| {
         let net = &nets[i];
+        if !net.wire {
+            return 0.0;
+        }
         let mut bounds = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         let slices = net.slices.iter().map(|&s| tile_at(End::Slice(s)));
         let blocks = net.hard.iter().map(|&h| tile_at(End::Hard(h)));
@@ -523,6 +565,7 @@ pub fn place(
                 .collect(),
             nets: nets
                 .iter()
+                .filter(|net| net.wire)
                 .map(|net| {
                     let slices = net.slices.iter().map(|&s| slice_pin(s));
                     let blocks = net.hard.iter().map(|&h| Pin::Object(macros.len() + h, 0.0, 0.0));
@@ -823,7 +866,12 @@ pub fn place(
             }
         }
         let wl: f64 = (0..nets.len()).map(hpwl).sum();
-        let td: f64 = (0..nets.len()).map(timing).sum();
+        // Against the timing cost of the nets with a wirelength: the
+        // connections of a net of many readers then add to the cost, each
+        // at the price of any other connection, rather than dilute it
+        // (the placed estimates of eight seeds of the ten Euler designs
+        // then varied by 8% within a design rather than 10.5%).
+        let td: f64 = (0..nets.len()).filter(|&i| nets[i].wire).map(timing).sum();
         wl_weight.set((1.0 - TIMING_TRADEOFF) / wl.max(1.0));
         td_weight.set(if td > 0.0 { TIMING_TRADEOFF / td } else { 0.0 });
     };
@@ -885,7 +933,7 @@ pub fn place(
                     "trace: round {round} T {temperature:.3e} rate {rate:.3} window {window} tried {tried} hpwl {wl:.0} cost {total:.4}"
                 );
             }
-            let end = 0.005 * total / nets.len() as f64;
+            let end = 0.005 * total / wires.max(1) as f64;
             if temperature < end {
                 break;
             }
