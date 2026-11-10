@@ -88,6 +88,11 @@ pub struct Timing {
     /// Paths through boxes outside the graph (carry chains): from an output
     /// of the graph to an input, with a delay.
     pub arcs: Vec<BoxArc>,
+    /// Outputs whose nodes take a LUT and never a wide function
+    /// ([`MapOptions::wide`]): what reads them takes a LUT of its own to
+    /// read a multiplexer, where it would absorb a LUT or read it directly
+    /// (a carry's propagate input, fed by the LUT of its own lane).
+    pub narrow: Vec<usize>,
 }
 
 /// A path through a box outside the graph: input `to` (an index into the
@@ -164,25 +169,78 @@ fn xor(a: Truth, b: Truth) -> Truth {
     std::array::from_fn(|w| a[w] ^ b[w])
 }
 
+/// Where each of the first six variables is one, in a word of a truth table.
+const VAR: [u64; 6] = [
+    0xAAAA_AAAA_AAAA_AAAA,
+    0xCCCC_CCCC_CCCC_CCCC,
+    0xF0F0_F0F0_F0F0_F0F0,
+    0xFF00_FF00_FF00_FF00,
+    0xFFFF_0000_FFFF_0000,
+    0xFFFF_FFFF_0000_0000,
+];
+
+/// Truth table `t` with variables `i < j` exchanged.
+fn swap_vars(t: &mut Truth, i: usize, j: usize) {
+    debug_assert!(i < j && j < MAX_LEAVES);
+    if j < 6 {
+        // Within a word: the bits where `i` is one and `j` zero trade
+        // places with those where `i` is zero and `j` one.
+        let shift = (1 << j) - (1 << i);
+        let low = VAR[i] & !VAR[j];
+        for w in t.iter_mut() {
+            *w = (*w & !(low | low << shift)) | (*w & low) << shift | (*w >> shift & low);
+        }
+    } else if i < 6 {
+        // Across words: the half of a word where `i` is one, of the words
+        // where `j` is zero, with the other half of the words where it is one.
+        let (step, shift) = (1 << (j - 6), 1 << i);
+        for w in 0..4 {
+            if w & step == 0 {
+                let (a, b) = (t[w], t[w + step]);
+                t[w] = (a & !VAR[i]) | (b & !VAR[i]) << shift;
+                t[w + step] = (b & VAR[i]) | (a & VAR[i]) >> shift;
+            }
+        }
+    } else {
+        t.swap(1, 2);
+    }
+}
+
 /// Re-expresses truth table `t` over leaves `from` as a table over `to`
-/// (a superset, both sorted).
-fn expand(t: Truth, from: &[u32], to: &[u32]) -> Truth {
-    if from == to {
+/// (a superset, both sorted). Bits beyond the table of `to` are not
+/// defined.
+fn expand(mut t: Truth, from: &[u32], to: &[u32]) -> Truth {
+    if from.len() == to.len() {
         return t;
     }
-    let mut pos = [0usize; MAX_LEAVES];
-    for (j, l) in from.iter().enumerate() {
-        pos[j] = to.iter().position(|x| x == l).expect("leaf in merged cut");
-    }
-    let mut out = [0u64; 4];
-    for idx in 0..(1usize << to.len()) {
-        let mut src = 0;
-        for (j, &p) in pos[..from.len()].iter().enumerate() {
-            src |= ((idx >> p) & 1) << j;
+    // The table repeated over the variables it does not have yet, then
+    // each variable moved up to its place among `to`, the last first (the
+    // places above it are then final, and those between are free).
+    if from.len() < 6 {
+        let mut w = t[0];
+        for v in from.len()..6 {
+            w |= w << (1 << v);
         }
-        out[idx / 64] |= u64::from(truth_bit(&t, src)) << (idx % 64);
+        t = [w; 4];
+    } else if from.len() == 6 {
+        t = [t[0]; 4];
+    } else {
+        (t[2], t[3]) = (t[0], t[1]);
     }
-    out
+    let mut k = from.len();
+    for i in (0..to.len()).rev() {
+        if k == 0 {
+            break;
+        }
+        if to[i] == from[k - 1] {
+            k -= 1;
+            if k < i {
+                swap_vars(&mut t, k, i);
+            }
+        }
+    }
+    debug_assert_eq!(k, 0, "leaf in merged cut");
+    t
 }
 
 impl Cut {
@@ -268,6 +326,8 @@ struct Mapper<'a> {
     /// References of each node in the current mapping (as a LUT leaf or
     /// an output).
     map_refs: Vec<u32>,
+    /// Nodes that take no wide function (empty: none).
+    narrow: Vec<bool>,
 }
 
 /// Maps the outputs of `g` to K-input LUTs.
@@ -319,7 +379,14 @@ fn map_impl(
         area_flow: vec![0.0; n],
         est_refs: fanouts.iter().map(|&r| r.max(1) as f32).collect(),
         map_refs: vec![0; n],
+        narrow: Vec::new(),
     };
+    if opts.wide.is_some() && !timing.narrow.is_empty() {
+        m.narrow = vec![false; n];
+        for &k in &timing.narrow {
+            m.narrow[g.outputs[k].node() as usize] = true;
+        }
+    }
     m.compute_cuts(Mode::Depth);
     m.set_required();
     for _ in 0..opts.area_flow_passes {
@@ -429,6 +496,9 @@ impl Mapper<'_> {
                         add(&mut cand, c);
                     }
                 }
+            }
+            if self.narrow.get(i) == Some(&true) {
+                cand.retain(|c| c.len as usize <= self.opts.k);
             }
             let req = self.required[i];
             let mut scored: Vec<Scored> = cand
@@ -740,6 +810,7 @@ pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) ->
             .map(|o| Some(req[o.node() as usize]).filter(|&r| r != u32::MAX))
             .collect(),
         arcs: Vec::new(),
+        narrow: timing.narrow.clone(),
     }
 }
 
@@ -812,6 +883,42 @@ mod tests {
             c = g.maj(a[i], b[i], c);
         }
         g.output(c);
+    }
+
+    #[test]
+    fn expand_places_each_variable() {
+        // Against the definition: bit `idx` of the result is the bit of
+        // `t` at the values `idx` gives the leaves of `from`.
+        let naive = |t: Truth, from: &[u32], to: &[u32]| {
+            let mut out = [0u64; 4];
+            for idx in 0..(1usize << to.len()) {
+                let mut src = 0;
+                for (j, l) in from.iter().enumerate() {
+                    let p = to.iter().position(|x| x == l).unwrap();
+                    src |= ((idx >> p) & 1) << j;
+                }
+                out[idx / 64] |= u64::from(truth_bit(&t, src)) << (idx % 64);
+            }
+            out
+        };
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for n in 1..=MAX_LEAVES {
+            let to: Vec<u32> = (0..n as u32).map(|v| 3 * v + 1).collect();
+            for subset in 1..(1u32 << n) {
+                let from: Vec<u32> =
+                    (0..n).filter(|v| subset >> v & 1 != 0).map(|v| to[v]).collect();
+                let mask = truth_mask(from.len());
+                let t = and(std::array::from_fn(|_| next()), mask);
+                let got = and(expand(t, &from, &to), truth_mask(n));
+                assert_eq!(got, naive(t, &from, &to), "{from:?} in {to:?}");
+            }
+        }
     }
 
     #[test]
@@ -940,6 +1047,37 @@ mod tests {
         assert_eq!(area(&m), 4);
         assert!(area(&plain) > 4, "{} LUTs", area(&plain));
         assert_eq!(m.depth, 175);
+    }
+
+    #[test]
+    fn narrow_outputs_take_no_wide_function() {
+        // The random function of eight inputs above is one wide function,
+        // or LUT6s alone where its reader could not take a multiplexer.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..8).map(|_| g.input()).collect();
+        let mut rng = synth_core::rng::Rng::new(5);
+        let mut lvl: Vec<Lit> = (0..256)
+            .map(|_| if rng.next_u64() & 1 != 0 { Lit::TRUE } else { Lit::FALSE })
+            .collect();
+        for &sel in &x {
+            lvl = lvl.chunks(2).map(|p| g.mux(sel, p[1], p[0])).collect();
+        }
+        g.output(lvl[0]);
+        let opts = MapOptions {
+            k: 6,
+            lut_delay: 100,
+            wide: Some(Wide { delay: vec![50, 25] }),
+            ..MapOptions::default()
+        };
+        let choices = crate::choice::ChoiceAig::plain(g.clone());
+        let wide = map_choices_timed(&choices, &opts, &Timing::default());
+        assert_eq!(wide.luts.len(), 1);
+        let narrow = Timing { narrow: vec![0], ..Timing::default() };
+        let m = map_choices_timed(&choices, &opts, &narrow);
+        check(&g, &m, 8);
+        assert!(m.luts.len() >= 5, "{} LUTs", m.luts.len());
+        let root = m.luts.last().unwrap();
+        assert!(root.leaves.len() <= 6, "{} leaves", root.leaves.len());
     }
 
     #[test]
