@@ -296,7 +296,10 @@ fragment, so it is not sent to any server).
   `synth_weft::Options::testbench`) and answers its ports, clocks and
   memories; `tb_run` applies `restart` (back to power-up), `set`, `step`
   (with a `trace`), `read`, `load` and `dump` operations in order and answers what they read; `tb_stop`
-  drops the session. Simulation is two-state, as Weft defines it.
+  drops the session. Simulation is two-state, as Weft defines it. A
+  session can also run what an iCE40 bitstream implements, decoded back to
+  cells (`tb_start` with `bitstream`, as `run` returns it, and the pins),
+  with configuration bits flipped first if the request names them.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`

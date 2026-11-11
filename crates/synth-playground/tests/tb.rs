@@ -132,3 +132,71 @@ fn a_module_without_a_clock_port_gets_one() {
     let r = call("tb_run", Json::obj().with("id", s.at(&["id"]).clone()).with("ops", ops));
     assert_eq!(r.at(&["reads"]).dump(), r#"[{"cycle":3,"values":{"total":15}}]"#);
 }
+
+#[test]
+fn a_bitstream_decoded_back_to_cells_runs_and_a_flipped_bit_breaks_it() {
+    let top = "module top(in clk: clock, in en: bool @clk, out q: uint<4>) {\n    reg c: uint<4> = 0;\n    if en { c := c +% 1; }\n    q = c;\n}\n";
+    let pins = "set_io clk 15\nset_io en 1\nset_io q[0] 56\nset_io q[1] 57\nset_io q[2] 59\nset_io q[3] 60\n";
+    let req = Json::obj()
+        .with("files", files(top))
+        .with("part", "hx1k")
+        .with("package", "vq100")
+        .with("pins", pins)
+        .with("effort", 0.3);
+    let out = call("run", req);
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+    let bin = out.at(&["bin"]).as_str().unwrap().to_string();
+    let start = |flips: Json| {
+        call(
+            "tb_start",
+            Json::obj()
+                .with("bitstream", bin.as_str())
+                .with("part", "hx1k")
+                .with("package", "vq100")
+                .with("pins", pins)
+                .with("flips", flips),
+        )
+    };
+    let count = |s: &Json| {
+        let ops = Json::Arr(vec![
+            Json::obj().with("set", Json::obj().with("en", 1.0)),
+            Json::obj().with("step", 5.0).with("trace", Json::Arr(vec!["q".into()])),
+        ]);
+        let r = call("tb_run", Json::obj().with("id", s.at(&["id"]).clone()).with("ops", ops));
+        assert_eq!(r.at(&["ok"]).as_bool(), Some(true), "{}", r.dump());
+        r.at(&["reads"])
+            .as_array()
+            .iter()
+            .map(|x| x.at(&["values", "q"]).as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let s = start(Json::Arr(vec![]));
+    assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
+    assert_eq!(count(&s), [1, 2, 3, 4, 5]);
+    // Flip every set bit of the logic cells, one design at a time, until one
+    // of them changes what the counter does.
+    let mut broke = false;
+    'tiles: for t in out.at(&["bitstream", "tiles"]).as_array() {
+        for f in t.at(&["f"]).as_array() {
+            if !f.at(&["n"]).as_str().unwrap_or("").starts_with("logic cell") {
+                continue;
+            }
+            for b in f.at(&["b"]).as_array() {
+                let flip = Json::Arr(vec![Json::Arr(vec![
+                    t.at(&["x"]).clone(),
+                    t.at(&["y"]).clone(),
+                    b.clone(),
+                ])]);
+                let s = start(flip);
+                assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
+                if count(&s) != [1, 2, 3, 4, 5] {
+                    broke = true;
+                    break 'tiles;
+                }
+            }
+        }
+    }
+    assert!(broke, "no flipped LUT bit changed the counter");
+    let bad = start(Json::Arr(vec![Json::Arr(vec![0.0.into(), 0.0.into(), 0.0.into()])]));
+    assert_eq!(bad.at(&["ok"]).as_bool(), Some(false));
+}

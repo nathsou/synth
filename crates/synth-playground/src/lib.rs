@@ -834,6 +834,9 @@ fn elaborate(req: &Json) -> Result<(Option<synth_rtl::Module>, Json, usize), Str
 /// the request's `clock_hz` if it has one. A Weft top is elaborated as a
 /// testbench drives it ([`synth_weft::Options::testbench`]).
 fn tb_start(req: &Json) -> Json {
+    if let Some(bin) = req.at(&["bitstream"]).as_str() {
+        return tb_start_bitstream(req, bin);
+    }
     let mut req = req.clone();
     req.set("testbench", true);
     let (module, diagnostics, errors) = match elaborate(&req) {
@@ -851,6 +854,78 @@ fn tb_start(req: &Json) -> Json {
         Ok(info) => info.with("diagnostics", diagnostics),
         Err(e) => Json::obj().with("ok", false).with("error", e).with("diagnostics", diagnostics),
     }
+}
+
+/// Starts a testbench session on what an iCE40 bitstream implements: the
+/// bitstream (base64, as `run` gives it) decoded back to its cells, with the
+/// pads named in `pins` as ports, as `synth sim --level bitstream` does. A
+/// request may first flip configuration bits, `flips: [[x, y, bit], …]`,
+/// where `bit` is `row × width + column` within tile `(x, y)`, as the
+/// bitstream view numbers them.
+fn tb_start_bitstream(req: &Json, bin: &str) -> Json {
+    let fail = |e: String| Json::obj().with("ok", false).with("error", e);
+    let result = (|| -> Result<Json, String> {
+        let data = base64_decode(bin).ok_or("the bitstream is not valid base64")?;
+        let mut cfg = arch_ice40::bitstream::Config::from_bin(&data).map_err(|e| e.0)?;
+        for f in req.at(&["flips"]).as_array() {
+            let at = |i: usize| f.as_array().get(i).and_then(Json::as_i64);
+            let (Some(x), Some(y), Some(bit)) = (at(0), at(1), at(2)) else {
+                return Err(format!("a flip is `[x, y, bit]`, not {}", f.dump()));
+            };
+            let (x, y, bit) = (x as usize, y as usize, bit as usize);
+            let die = cfg.die;
+            if x >= die.grid_width() || y >= die.grid_height() {
+                return Err(format!("no tile ({x}, {y})"));
+            }
+            let w = die.tile_kind(x, y).config_width();
+            if w == 0 || bit >= w * arch_ice40::device::TILE_CONFIG_HEIGHT {
+                return Err(format!("tile ({x}, {y}) has no bit {bit}"));
+            }
+            let (col, row) = (bit % w, bit / w);
+            let v = cfg.tile_bit(x, y, col, row);
+            cfg.set_tile_bit(x, y, col, row, !v);
+        }
+        let part: arch_ice40::arch::Part = req.at(&["part"]).as_str().unwrap_or("hx1k").parse()?;
+        let package = req.at(&["package"]).as_str().unwrap_or("vq100");
+        let pcf = arch_ice40::pcf::parse_pcf(pins(req))?;
+        let arch = arch_ice40::arch::Arch::new(part, package)?;
+        let (nl, warnings) = arch_ice40::decode::decode(&cfg, &arch, &pcf.pins)?;
+        let module = synth_sim::netlist::from_netlist(&nl, &mut arch_ice40::sim::add_cell)?;
+        let signals = matches!(req.at(&["signals"]), Json::Bool(true));
+        let info = tb::start(module, signals)?;
+        Ok(info.with("decode_warnings", Json::Arr(warnings.into_iter().map(Json::from).collect())))
+    })();
+    result.unwrap_or_else(fail)
+}
+
+/// Decodes base64 (RFC 4648, with padding).
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = n << 6 | val(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let b = n.to_be_bytes();
+        out.extend_from_slice(&b[1..4 - pad]);
+    }
+    Some(out)
 }
 
 /// Starts a simulation of the design (see [`sim`]): its clock at
@@ -1167,6 +1242,9 @@ mod tests {
 
     #[test]
     fn base64_matches_rfc4648() {
+        for s in [&b""[..], b"f", b"fo", b"foo", b"foobar", &[0, 255, 128, 7]] {
+            assert_eq!(base64_decode(&base64(s)).as_deref(), Some(s));
+        }
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");

@@ -30,6 +30,12 @@
 //!   start, words}`). Values are numbers below 2⁵³ and `"0x…"` strings
 //!   above, unsigned (a port's `signed` says how to read it); inputs take
 //!   either form, and negative numbers for signed signals.
+//! - `tb_start {bitstream, part, package, pins, flips}` starts a session on
+//!   what an iCE40 bitstream (base64, as `run` gives it) implements, decoded
+//!   back to its cells as `synth sim --level bitstream` does, with the pads
+//!   named in the pin constraints as ports; `flips` (`[[x, y, bit], …]`,
+//!   numbered as the bitstream view numbers a tile's bits) are flipped
+//!   first, to see what a configuration upset does.
 //! - `tb_stop {id}` drops the session.
 
 use std::collections::HashMap;
