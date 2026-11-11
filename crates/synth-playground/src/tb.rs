@@ -13,6 +13,8 @@
 //! - `tb_run {id, ops}` applies the operations in order and answers `{ok,
 //!   cycle, reads}`, or `{ok: false, error, cycle, reads}` at the first
 //!   operation that fails (the ones before it took effect):
+//!   - `{"restart": true}` returns to power-up: every register and memory
+//!     at its initial value, every input at 0, cycle 0;
 //!   - `{"set": {name: value}}` drives inputs, then settles the logic;
 //!   - `{"step": n, "clock": name, "trace": [names]}` runs `n` cycles (1 if
 //!     absent) of the clock (the design's only clock if absent), reading
@@ -33,6 +35,7 @@ use std::sync::Mutex;
 
 use synth_core::{Json, Logic, LogicVec};
 use synth_rtl::{Module, PortDir};
+use synth_sim::program::Program;
 use synth_sim::{Options, Signal, Sim};
 
 /// Sessions kept at once; starting another drops the oldest.
@@ -41,6 +44,10 @@ const MAX_SESSIONS: usize = 16;
 #[derive(Debug)]
 struct Session {
     sim: Sim,
+    /// The compiled design, to restart from.
+    program: Program,
+    /// The data inputs, set to 0 at power-up.
+    inputs: Vec<Signal>,
     clocks: Vec<(String, Signal)>,
     cycle: u64,
     signals: HashMap<String, Signal>,
@@ -70,6 +77,7 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
     let clock_sigs = sim.clocks();
     let mut clocks = Vec::new();
     let mut port_json = Vec::new();
+    let mut inputs = Vec::new();
     for (_, name, dir, width, signed) in &ports {
         let Some(sig) = sim.signal(name) else { continue };
         let is_clock = *dir == PortDir::Input && *width == 1 && clock_sigs.contains(&sig);
@@ -78,6 +86,7 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
         }
         if *dir == PortDir::Input && !is_clock {
             sim.poke(&sig, 0);
+            inputs.push(sig.clone());
         }
         port_json.push(
             Json::obj()
@@ -142,7 +151,9 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
     if all.live.len() >= MAX_SESSIONS {
         all.live.remove(0);
     }
-    all.live.push((id, Session { sim, clocks, cycle: 0, signals: HashMap::new() }));
+    let program = sim.program().clone();
+    all.live
+        .push((id, Session { sim, program, inputs, clocks, cycle: 0, signals: HashMap::new() }));
     out.set("id", id);
     Ok(out)
 }
@@ -198,6 +209,14 @@ impl Session {
 }
 
 fn apply(s: &mut Session, op: &Json, reads: &mut Vec<Json>) -> Result<(), String> {
+    if matches!(op.at(&["restart"]), Json::Bool(true)) {
+        s.sim = Sim::from_program(s.program.clone());
+        for i in &s.inputs {
+            s.sim.poke(i, 0);
+        }
+        s.sim.eval();
+        s.cycle = 0;
+    }
     if let Json::Obj(sets) = op.at(&["set"]) {
         for (name, v) in sets {
             let sig = s.signal(name)?;

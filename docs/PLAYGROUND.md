@@ -294,8 +294,8 @@ fragment, so it is not sent to any server).
   drives it (a Weft top's inputs in its clock's domain instead of
   asynchronous, and a module without a clock port given one, `clk`:
   `synth_weft::Options::testbench`) and answers its ports, clocks and
-  memories; `tb_run` applies `set`, `step` (with a `trace`), `read`, `load`
-  and `dump` operations in order and answers what they read; `tb_stop`
+  memories; `tb_run` applies `restart` (back to power-up), `set`, `step`
+  (with a `trace`), `read`, `load` and `dump` operations in order and answers what they read; `tb_stop`
   drops the session. Simulation is two-state, as Weft defines it.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash

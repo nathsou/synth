@@ -46,6 +46,19 @@ fn a_counter_steps_and_reads() {
     let r = call("tb_run", Json::obj().with("id", id.clone()).with("ops", bad));
     assert_eq!(r.at(&["ok"]).as_bool(), Some(false));
     assert!(r.at(&["error"]).as_str().unwrap().contains("nope"));
+    // Back to power-up.
+    let again = Json::Arr(vec![
+        Json::obj().with("restart", true),
+        Json::obj().with("read", Json::Arr(vec!["count".into()])),
+        Json::obj().with("set", Json::obj().with("enable", true)),
+        Json::obj().with("step", 2.0),
+        Json::obj().with("read", Json::Arr(vec!["count".into()])),
+    ]);
+    let r = call("tb_run", Json::obj().with("id", id.clone()).with("ops", again));
+    assert_eq!(
+        r.at(&["reads"]).dump(),
+        r#"[{"cycle":0,"values":{"count":0}},{"cycle":2,"values":{"count":2}}]"#
+    );
     call("tb_stop", Json::obj().with("id", id.clone()));
     let r = call("tb_run", Json::obj().with("id", id).with("ops", Json::Arr(vec![])));
     assert_eq!(r.at(&["ok"]).as_bool(), Some(false));
