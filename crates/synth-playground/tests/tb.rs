@@ -73,6 +73,7 @@ fn combinational_designs_and_memories() {
         Json::obj().with("set", Json::obj().with("a", 200.0).with("b", "0x40")),
         Json::obj().with("read", Json::Arr(vec!["s".into()])),
     ]);
+    assert_eq!(s.at(&["state"]).as_bool(), Some(false));
     let r = call("tb_run", Json::obj().with("id", s.at(&["id"]).clone()).with("ops", ops));
     assert_eq!(r.at(&["reads"]).dump(), r#"[{"cycle":0,"values":{"s":264}}]"#);
 
@@ -120,6 +121,9 @@ fn a_module_without_a_clock_port_gets_one() {
     let s = call("tb_start", Json::obj().with("files", files(m)));
     assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
     assert_eq!(s.at(&["clocks"]).dump(), r#"["clk"]"#);
+    let clk = s.at(&["ports"]).as_array().iter().find(|p| p.at(&["name"]).as_str() == Some("clk"));
+    assert_eq!(clk.unwrap().at(&["added"]).as_bool(), Some(true));
+    assert_eq!(s.at(&["state"]).as_bool(), Some(true));
     let ops = Json::Arr(vec![
         Json::obj().with("set", Json::obj().with("x", 5.0)),
         Json::obj().with("step", 3.0),

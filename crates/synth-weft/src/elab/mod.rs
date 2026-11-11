@@ -1117,6 +1117,7 @@ fn elaborate_top<'a>(d: &mut Design<'a>, def: &'a ast::Module, opts: &Options) -
         let s = d.add_wire(name, 1, def.name.span, true);
         let SigBit::Wire(wid, _) = s.0[0] else { unreachable!() };
         d.out.wires[wid].port = Some((PortDir::Input, pos));
+        d.out.wires[wid].attrs.push(("testbench_clock".into(), synth_rtl::Attr::Str(name.into())));
         doms.insert("default".into(), DomBinding { clk: s.0[0], posedge: true, reset: None });
     }
     cx.bind_ports(d, &ports, sigs, doms)?;

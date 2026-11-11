@@ -8,8 +8,10 @@
 //!   module without a clock port given one, `clk`) and
 //!   keeps a two-state simulator of it (`undef` reads as 0, as in
 //!   docs/WEFT.md §17), with every input at 0. It answers `{ok, id, ports,
-//!   clocks, memories, signals}` (`signals` only when the request has
-//!   `"signals": true`), or `{ok: false, error, diagnostics}`.
+//!   clocks, memories, state, signals}` (`signals` only when the request has
+//!   `"signals": true`; `state` says whether the design has registers or
+//!   memories; a port the testbench added has `added`), or `{ok: false,
+//!   error, diagnostics}`.
 //! - `tb_run {id, ops}` applies the operations in order and answers `{ok,
 //!   cycle, reads}`, or `{ok: false, error, cycle, reads}` at the first
 //!   operation that fails (the ones before it took effect):
@@ -70,6 +72,16 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
         .filter_map(|w| w.port.map(|(d, pos)| (pos, w.name.clone(), d, w.width, w.signed)))
         .collect();
     ports.sort_by_key(|p| p.0);
+    // A clock the testbench elaboration added (a Weft top without a clock port), and whether the design
+    // holds any state at all.
+    let added: Vec<String> = module
+        .wires
+        .iter()
+        .filter(|w| w.attrs.iter().any(|(k, _)| k == "testbench_clock"))
+        .map(|w| w.name.clone())
+        .collect();
+    let state = module.memories.iter().any(|_| true)
+        || module.cells.iter().any(|c| c.alive && matches!(c.kind, synth_rtl::CellKind::Dff(_)));
     let signed: HashMap<String, bool> =
         module.wires.iter().filter(|w| w.public).map(|w| (w.name.clone(), w.signed)).collect();
     let opts = Options { four_state: false, ..Options::default() };
@@ -101,7 +113,8 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
                 )
                 .with("width", *width)
                 .with("signed", *signed)
-                .with("clock", is_clock),
+                .with("clock", is_clock)
+                .with("added", added.contains(name)),
         );
     }
     sim.eval();
@@ -126,7 +139,8 @@ pub fn start(mut module: Module, want_signals: bool) -> Result<Json, String> {
         .with("ok", true)
         .with("ports", port_json)
         .with("clocks", Json::Arr(clocks.iter().map(|(n, _)| Json::from(n.as_str())).collect()))
-        .with("memories", memories);
+        .with("memories", memories)
+        .with("state", state);
     if want_signals {
         let mut names: Vec<&str> = sim.signal_names().collect();
         names.sort_unstable();
