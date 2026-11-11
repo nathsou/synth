@@ -668,6 +668,9 @@ impl Builder<'_> {
                 }
                 CellKind::Shiftx { a, b, b_signed, offset, y } => {
                     let yv = self.slot_val(y);
+                    if !*b_signed && *offset == 0 && self.lut(a, b, yv) {
+                        continue;
+                    }
                     let av = self.operand(a);
                     let bv = self.operand(b);
                     let reads = vec![av.off, bv.off];
@@ -707,6 +710,72 @@ impl Builder<'_> {
             }
         }
         Ok(())
+    }
+
+    /// A one-bit part select of a constant by a few bits is a lookup table
+    /// (as the LUTs of a netlist are): one instruction reading the index
+    /// bits where they are, instead of gathering them into a value that a
+    /// part select then reads. Constant index bits are folded into the
+    /// table. Returns whether `y` was computed this way.
+    fn lut(&mut self, a: &Sig, b: &Sig, y: Val) -> bool {
+        let n = b.width();
+        if y.w != 1 || n == 0 || n > 6 || a.width() != 1 << n {
+            return false;
+        }
+        let Some(table) = a.as_const() else { return false };
+        let (mut t, tu) = (table.val_words()[0], table.unk_words()[0]);
+        if tu != 0 {
+            if self.four {
+                return false;
+            }
+            t &= !tu;
+        }
+        // Index bits that vary, and the index bits that are constant ones.
+        let mut vars = Vec::new();
+        let mut fixed = 0usize;
+        for (k, l) in self.locs(b).into_iter().enumerate() {
+            match l {
+                Loc::Bit { word, bit } => vars.push((k, word, bit)),
+                Loc::Const(Logic::One) => fixed |= 1 << k,
+                Loc::Const(Logic::Zero) => {}
+                Loc::Const(_) if self.four => return false,
+                Loc::Const(_) => {}
+            }
+        }
+        if vars.is_empty() {
+            return false;
+        }
+        let mut folded = 0u64;
+        for i in 0..1usize << vars.len() {
+            let mut idx = fixed;
+            for (j, &(k, _, _)) in vars.iter().enumerate() {
+                idx |= (i >> j & 1) << k;
+            }
+            folded |= (t >> idx & 1) << i;
+        }
+        let start = self.aux.parts.len() as u32;
+        let mut reads = Vec::new();
+        let mut j = 0;
+        while j < vars.len() {
+            let (_, word, bit) = vars[j];
+            let mut len = 1;
+            while j + len < vars.len()
+                && vars[j + len].1 == word
+                && vars[j + len].2 as usize == bit as usize + len
+            {
+                len += 1;
+            }
+            self.aux.parts.push(Part { src: word, dst: 0, lo: bit, pos: j as u8, len: len as u8 });
+            let s = self.slot_of[word as usize];
+            if !reads.contains(&s) {
+                reads.push(s);
+            }
+            j += len;
+        }
+        let mut ins = Ins::new(K::Lut, 1, y.off, start, self.aux.parts.len() as u32 - start);
+        ins.x = folded;
+        self.node(ins, reads, vec![y.off]);
+        true
     }
 
     fn flop(&mut self, d: &synth_rtl::Dff) -> Result<(), String> {

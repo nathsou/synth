@@ -258,6 +258,66 @@ fn shiftx() {
 }
 
 #[test]
+fn lookup_tables() {
+    // A bit of a constant selected by a few bits (the LUT of a netlist):
+    // index bits from two inputs, out of order, with constants among them.
+    let mut rng = Rng::new(16);
+    for n in 1..=6usize {
+        for round in 0..6 {
+            let mut m = Module::new("t");
+            let a = input(&mut m, "a", 3, 0);
+            let b = input(&mut m, "b", 3, 1);
+            let table = if round == 0 {
+                random(&mut rng, 1 << n, true)
+            } else {
+                LogicVec::from_u64(rng.next_u64(), 64).slice(0, 1 << n)
+            };
+            // Where each index bit comes from: a bit of `a` or `b`, or a
+            // constant.
+            let src: Vec<usize> = (0..n).map(|_| rng.below(8)).collect();
+            let idx = Sig(src
+                .iter()
+                .map(|&s| match s {
+                    0..=2 => a.0[s],
+                    3..=5 => b.0[s - 3],
+                    6 => synth_rtl::SigBit::ZERO,
+                    _ => synth_rtl::SigBit::ONE,
+                })
+                .collect());
+            let y = output(&mut m, "y", 1, 2);
+            m.add_cell(
+                "c",
+                CellKind::Shiftx {
+                    a: Sig::from_const(&table),
+                    b: idx,
+                    b_signed: false,
+                    offset: 0,
+                    y,
+                },
+            );
+            check(
+                &format!("lut n={n} table={table:?} index={src:?}"),
+                &m,
+                &[("a", 3), ("b", 3)],
+                |v| {
+                    let bits: Vec<Logic> = src
+                        .iter()
+                        .map(|&s| match s {
+                            0..=2 => v[0].get(s),
+                            3..=5 => v[1].get(s - 3),
+                            6 => Logic::Zero,
+                            _ => Logic::One,
+                        })
+                        .collect();
+                    eval::shiftx(&table, &LogicVec::from_bits(&bits), false, 0, 1)
+                },
+                &mut rng,
+            );
+        }
+    }
+}
+
+#[test]
 fn concatenations_and_slices() {
     // y = {a[2:0], 1'b1, b[70:5], x} through a connection.
     let mut rng = Rng::new(7);

@@ -601,6 +601,24 @@ impl Emitter<'_> {
                 );
                 self.line(&bin(&e));
             }
+            K::Lut => {
+                let parts = &p.aux.parts[a as usize..(a + b) as usize];
+                let idx: Vec<String> = parts
+                    .iter()
+                    .map(|part| {
+                        let mut e = self.w(part.src);
+                        if part.lo != 0 {
+                            e = format!("({e} >> {})", part.lo);
+                        }
+                        e = format!("({e} & {})", hex(mask(part.len as u32)));
+                        if part.pos != 0 {
+                            e = format!("({e} << {})", part.pos);
+                        }
+                        e
+                    })
+                    .collect();
+                self.line(&bin(&format!("{} >> ({}) & 1", hex(ins.x), idx.join(" | "))));
+            }
             K::MemRd => self.mem_read(ins.c, a, d, w),
             K::Latch | K::Arst => {
                 let c = self.ctl(ins.c, ins.x);

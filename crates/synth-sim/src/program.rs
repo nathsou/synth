@@ -98,6 +98,9 @@ pub enum K {
     Pmux,
     /// Dynamic part select of `w` (at most 64) bits: `shiftx[c]`.
     Shiftx,
+    /// A lookup table: bit `i` of the table `x` (of at most 64 bits), with
+    /// `i` gathered from `parts[a..a + b]` as [`K::Gather`] gathers a value.
+    Lut,
     /// Asynchronous memory read: memory `c`, address `a` of `b` bits.
     MemRd,
     /// Level-sensitive latch `d = en ? a : d`, `en` bit `x & 63` of word `c`,

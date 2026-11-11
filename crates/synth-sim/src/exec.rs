@@ -875,6 +875,22 @@ pub fn step<const F: bool>(aux: &Aux, ins: &Ins, st: &mut State) {
         }
         K::Pmux => pmux::<F>(aux, ins, st),
         K::Shiftx => shiftx::<F>(aux, ins, st),
+        K::Lut => {
+            let (mut i, mut u) = (0, 0);
+            for p in &aux.parts[ins.a as usize..(ins.a + ins.b) as usize] {
+                let m = mask(p.len as u32);
+                i |= (st.val[p.src as usize] >> p.lo & m) << p.pos;
+                if F {
+                    u |= st.unk[p.src as usize] >> p.lo & m;
+                }
+            }
+            let d = ins.d as usize;
+            // An unknown index bit makes the result unknown, as for `Shiftx`.
+            st.val[d] = if u != 0 { 0 } else { ins.x >> i & 1 };
+            if F {
+                st.unk[d] = (u != 0) as u64;
+            }
+        }
         K::MemRd => mem_read::<F>(aux, ins.c, ins.a, ins.d as usize, w, st),
         K::Latch | K::Arst => {
             if active::<F>(st, ins.c, ins.x & 63, ins.x >> 8 & 1 != 0) {

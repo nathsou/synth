@@ -191,6 +191,17 @@ impl Gen {
                     y: y.clone(),
                 }
             }
+            9 if w == 1 && self.below(2) == 0 => {
+                // A lookup table: a bit of a constant, selected by a few bits.
+                let bw = 1 + self.below(6);
+                CellKind::Shiftx {
+                    a: Sig::from_const(&self.constant(1 << bw)),
+                    b: self.sig(bw),
+                    b_signed: false,
+                    offset: 0,
+                    y: y.clone(),
+                }
+            }
             9 => {
                 let aw = self.width();
                 let bw = 1 + self.below(8);
