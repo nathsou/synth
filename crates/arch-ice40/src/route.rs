@@ -433,6 +433,9 @@ pub(crate) fn route_incremental(
     let t0 = synth_core::time::Instant::now();
     let trace = std::env::var("SYNTH_DEBUG").is_ok();
     let mut progress = |iter: usize, nets: usize, over: &[usize]| {
+        // For replays: the iteration, the nets routed in it, the nodes
+        // still used by more than one net.
+        synth_core::trace::record("route", || vec![iter as f64, nets as f64, over.len() as f64]);
         if !trace {
             return;
         }

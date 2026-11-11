@@ -1043,7 +1043,11 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         route_timing_rounds: arch_ice40::flow::ROUTE_TIMING_ROUNDS,
         tries: req.at(&["tries"]).as_i64().map_or(1, |n| n.max(1) as usize),
     };
-    let (res, imp) = arch_ice40::flow::implement_detailed(nl, &pcf.pins, &opts).map_err(|e| {
+    let want_trace = matches!(req.at(&["trace"]), Json::Bool(true));
+    let (implemented, records) =
+        synth_core::trace::collect(|| arch_ice40::flow::implement_detailed(nl, &pcf.pins, &opts));
+    let records = if want_trace { records } else { Vec::new() };
+    let (res, imp) = implemented.map_err(|e| {
         // The log of a failed run comes first, as `info:` lines.
         let mut msg = Vec::new();
         for l in e.lines() {
@@ -1068,6 +1072,9 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     );
     let t = Instant::now();
     let (chip, timing) = chip::chip(&imp, &opts);
+    if want_trace {
+        out.set("trace", trace_json(&imp, &chip, &records));
+    }
     out.set("chip", chip);
     out.set("timing", timing.with("met", res.timing_met));
     out.set("bitstream", chip::bitstream(&imp.arch, &res.config));
@@ -1219,6 +1226,71 @@ fn run_xc7(
     out.set("family", Family::Artix7.name());
     r.time("export", t);
     Ok(())
+}
+
+/// The most placement snapshots a trace keeps (spread over the annealing).
+const MAX_SNAPSHOTS: usize = 80;
+
+/// The placer's temperature steps and the router's iterations, as recorded
+/// by `synth_core::trace`: `{place: [{step, temperature, cost, accepted,
+/// range, xy}], route: [{iteration, nets, overused}]}`, where `xy[k]` is the
+/// position at that step of the chip's cell `k` (`[-1, -1]` if unplaced).
+/// Placement snapshots are thinned to [`MAX_SNAPSHOTS`]; the others keep
+/// only the numbers.
+fn trace_json(
+    imp: &arch_ice40::flow::Implementation,
+    chip: &Json,
+    records: &[synth_core::trace::Record],
+) -> Json {
+    let nl = &imp.netlist;
+    let by_name: std::collections::HashMap<&str, usize> =
+        nl.live_cells().map(|c| (nl.str(nl.cells[c].name), c.index())).collect();
+    let order: Vec<Option<usize>> = chip
+        .at(&["cells"])
+        .as_array()
+        .iter()
+        .map(|c| c.at(&["name"]).as_str().and_then(|n| by_name.get(n).copied()))
+        .collect();
+    let place: Vec<&synth_core::trace::Record> =
+        records.iter().filter(|r| r.kind == "place").collect();
+    let keep = place.len().div_ceil(MAX_SNAPSHOTS).max(1);
+    let place_json: Vec<Json> = place
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let v = &r.values;
+            let mut j = Json::obj()
+                .with("step", v[0])
+                .with("temperature", v[1])
+                .with("cost", v[2])
+                .with("accepted", v[3])
+                .with("range", v[4]);
+            if i % keep == 0 || i + 1 == place.len() {
+                let xy: Vec<Json> = order
+                    .iter()
+                    .map(|c| {
+                        let (x, y) = c
+                            .and_then(|c| Some((*v.get(5 + 2 * c)?, *v.get(6 + 2 * c)?)))
+                            .unwrap_or((-1.0, -1.0));
+                        Json::Arr(vec![x.into(), y.into()])
+                    })
+                    .collect();
+                j.set("xy", xy);
+            }
+            j
+        })
+        .collect();
+    let route_json: Vec<Json> = records
+        .iter()
+        .filter(|r| r.kind == "route")
+        .map(|r| {
+            Json::obj()
+                .with("iteration", r.values[0])
+                .with("nets", r.values[1])
+                .with("overused", r.values[2])
+        })
+        .collect();
+    Json::obj().with("place", place_json).with("route", route_json)
 }
 
 fn base64(data: &[u8]) -> String {

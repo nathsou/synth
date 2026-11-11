@@ -257,6 +257,11 @@ fragment, so it is not sent to any server).
   (the whole flow), `analyze` (diagnostics and the name index, for the editor),
   `format`, `examples` and `devices` (with the boards and pins of each
   package).
+- `run` with `trace: true` also returns how placement and routing went
+  (`synth_core::trace`): each temperature step of the annealer (its
+  temperature, cost, share of moves accepted and move range, and the
+  position of every logic cell, for up to 80 snapshots) and each iteration
+  of the router (the nets it routed and the nodes still overused).
 - `run` elaborates (Weft or Verilog), then synthesises through
   `arch_ice40::synth::synthesize_observed`, which reports the design after each
   pass, then implements it through `arch_ice40::flow::implement_detailed`,

@@ -1882,6 +1882,16 @@ impl<'a> Annealer<'a> {
                 }
             }
             let rate = accepted as f64 / tried.max(1) as f64;
+            // For replays: the step, its temperature, the cost, the share of
+            // moves accepted, the move range, then each cell's position.
+            synth_core::trace::record("place", || {
+                let mut v = vec![iters as f64, temp, self.total_cost(), rate, rlim];
+                for p in &self.pos {
+                    let (x, y) = p.map_or((-1.0, -1.0), |(x, y, _)| (f64::from(x), f64::from(y)));
+                    v.extend([x, y]);
+                }
+                v
+            });
             temp *= if rate > 0.96 {
                 0.5
             } else if rate > 0.8 {

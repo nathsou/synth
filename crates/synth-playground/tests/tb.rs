@@ -200,3 +200,45 @@ fn a_bitstream_decoded_back_to_cells_runs_and_a_flipped_bit_breaks_it() {
     let bad = start(Json::Arr(vec![Json::Arr(vec![0.0.into(), 0.0.into(), 0.0.into()])]));
     assert_eq!(bad.at(&["ok"]).as_bool(), Some(false));
 }
+
+#[test]
+fn a_run_can_trace_its_placement_and_routing() {
+    let top = "module top(in clk: clock, in en: bool @clk, out q: uint<8>) {\n    reg c: uint<8> = 0;\n    if en { c := c +% 1; }\n    q = c;\n}\n";
+    let req = Json::obj()
+        .with("files", files(top))
+        .with("part", "hx1k")
+        .with("package", "vq100")
+        .with("trace", true)
+        .with("effort", 0.5);
+    let out = call("run", req);
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+    let place = out.at(&["trace", "place"]).as_array();
+    assert!(place.len() > 5, "{} placement steps", place.len());
+    // The temperature falls, and the last snapshot is (nearly) the final placement.
+    let t = |i: usize| place[i].at(&["temperature"]).as_f64().unwrap();
+    assert!(t(place.len() - 1) < t(0));
+    let last = place.last().unwrap().at(&["xy"]).as_array();
+    let cells = out.at(&["chip", "cells"]).as_array();
+    assert_eq!(last.len(), cells.len());
+    // Logic cells are annealed; pads and global buffers are placed apart.
+    let lcs: Vec<_> =
+        cells.iter().zip(last).filter(|(c, _)| c.at(&["bel"]).as_str() == Some("lc")).collect();
+    let same = lcs
+        .iter()
+        .filter(|(c, xy)| {
+            xy.as_array()[0].as_i64() == c.at(&["x"]).as_i64()
+                && xy.as_array()[1].as_i64() == c.at(&["y"]).as_i64()
+        })
+        .count();
+    assert!(
+        same * 10 >= lcs.len() * 7,
+        "{same} of {} logic cells where the trace left them",
+        lcs.len()
+    );
+    let route = out.at(&["trace", "route"]).as_array();
+    assert!(!route.is_empty());
+    assert_eq!(route.last().unwrap().at(&["overused"]).as_i64(), Some(0));
+    // Without asking, there is no trace.
+    let plain = call("run", Json::obj().with("files", files(top)).with("effort", 0.3));
+    assert!(matches!(plain.at(&["trace"]), Json::Null));
+}
