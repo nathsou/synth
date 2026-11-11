@@ -288,6 +288,15 @@ fragment, so it is not sent to any server).
   ends it. `web/simview.js` paces the
   requests in real time and draws the board; `web/terminal.js` is the
   terminal.
+- `tb.rs` keeps testbench sessions for other pages that embed the
+  WebAssembly build (the Digital Circuits course runs its tests, waveforms
+  and CPU boards on them): `tb_start` elaborates the design as a testbench
+  drives it (a Weft top's inputs in its clock's domain instead of
+  asynchronous, and a module without a clock port given one, `clk`:
+  `synth_weft::Options::testbench`) and answers its ports, clocks and
+  memories; `tb_run` applies `set`, `step` (with a `trace`), `read`, `load`
+  and `dump` operations in order and answers what they read; `tb_stop`
+  drops the session. Simulation is two-state, as Weft defines it.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`

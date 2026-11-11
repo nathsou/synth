@@ -38,6 +38,11 @@ pub struct Options {
     pub defaults: Vec<(String, String)>,
     /// Check every module, without requiring a top (for editors).
     pub check_all: bool,
+    /// Elaborate the top as a testbench drives it: its unannotated inputs
+    /// in its default domain, as an instance's are, rather than
+    /// asynchronous, and a top with an implicit domain parameter given a
+    /// clock input of its own, `clk` (`tb_clk` if a port has that name).
+    pub testbench: bool,
 }
 
 /// A clock value.
@@ -215,6 +220,8 @@ pub(crate) struct ModCx<'a> {
     pub prefix: String,
     pub generics: HashMap<String, Value>,
     pub is_top: bool,
+    /// A testbench's top ([`Options::testbench`]).
+    pub testbench: bool,
     pub scopes: Vec<Scope>,
     pub lazy: HashMap<String, Lazy<'a>>,
     pub signals: Vec<Signal>,
@@ -1061,6 +1068,7 @@ fn elaborate_top<'a>(d: &mut Design<'a>, def: &'a ast::Module, opts: &Options) -
         given.insert(k.clone(), val);
     }
     let mut cx = ModCx::new(def, String::new(), true);
+    cx.testbench = opts.testbench;
     cx.bind_generics(d, def, &[], given, def.name.span)?;
     d.elaborated.insert(def.name.name.clone());
     let ports = cx.port_types(d)?;
@@ -1103,7 +1111,15 @@ fn elaborate_top<'a>(d: &mut Design<'a>, def: &'a ast::Module, opts: &Options) -
             }
         }
     }
-    cx.bind_ports(d, &ports, sigs, HashMap::new())?;
+    let mut doms = HashMap::new();
+    if opts.testbench && cx.implicit_dom_needed() {
+        let name = if ports.iter().any(|p| p.name == "clk") { "tb_clk" } else { "clk" };
+        let s = d.add_wire(name, 1, def.name.span, true);
+        let SigBit::Wire(wid, _) = s.0[0] else { unreachable!() };
+        d.out.wires[wid].port = Some((PortDir::Input, pos));
+        doms.insert("default".into(), DomBinding { clk: s.0[0], posedge: true, reset: None });
+    }
+    cx.bind_ports(d, &ports, sigs, doms)?;
     cx.run(d)
 }
 
@@ -1183,6 +1199,7 @@ impl<'a> ModCx<'a> {
             prefix,
             generics: HashMap::new(),
             is_top,
+            testbench: false,
             scopes: vec![Scope::default()],
             lazy: HashMap::new(),
             signals: Vec::new(),
@@ -1225,6 +1242,7 @@ impl<'a> ModCx<'a> {
             prefix: String::new(),
             generics: HashMap::new(),
             is_top: false,
+            testbench: false,
             scopes: vec![Scope::default()],
             lazy: HashMap::new(),
             signals: Vec::new(),
@@ -1766,7 +1784,7 @@ impl<'a> ModCx<'a> {
         dir: PortDir,
         dom: &PortDomain,
     ) -> R<FixedTag> {
-        let top_input = self.is_top && dir == PortDir::Input;
+        let top_input = self.is_top && dir == PortDir::Input && !self.testbench;
         match dom {
             PortDomain::Async => {
                 Ok(FixedTag { atom: Some(TagAtom::Async), what: "asynchronous".into() })

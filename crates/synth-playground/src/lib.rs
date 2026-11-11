@@ -19,6 +19,7 @@ pub mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod sim;
+pub mod tb;
 pub mod text;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -511,6 +512,9 @@ pub fn handle(method: &str, body: &str) -> String {
         "devices" => devices(),
         "sim_start" => sim_start(&req),
         "sim_step" => sim::step(&req).unwrap_or_else(|e| Json::obj().with("error", e)),
+        "tb_start" => tb_start(&req),
+        "tb_run" => tb::run(&req),
+        "tb_stop" => tb::stop(&req),
         "sim_stop" => {
             sim::stop();
             Json::obj()
@@ -729,6 +733,7 @@ fn options(req: &Json) -> synth_weft::Options {
         top,
         params,
         defaults: defaults.unwrap_or_default(),
+        testbench: matches!(req.at(&["testbench"]), Json::Bool(true)),
         ..Default::default()
     }
 }
@@ -823,6 +828,29 @@ fn elaborate(req: &Json) -> Result<(Option<synth_rtl::Module>, Json, usize), Str
         m
     };
     Ok((module, diagnostics_json(&sm, &diags), diags.error_count()))
+}
+
+/// Starts a testbench session on the design (see [`tb`]), its `CLK_HZ`
+/// the request's `clock_hz` if it has one. A Weft top is elaborated as a
+/// testbench drives it ([`synth_weft::Options::testbench`]).
+fn tb_start(req: &Json) -> Json {
+    let mut req = req.clone();
+    req.set("testbench", true);
+    let (module, diagnostics, errors) = match elaborate(&req) {
+        Ok(e) => e,
+        Err(e) => return Json::obj().with("ok", false).with("error", e),
+    };
+    let Some(module) = module else {
+        return Json::obj()
+            .with("ok", false)
+            .with("error", format!("{} error(s)", errors.max(1)))
+            .with("diagnostics", diagnostics);
+    };
+    let signals = matches!(req.at(&["signals"]), Json::Bool(true));
+    match tb::start(module, signals) {
+        Ok(info) => info.with("diagnostics", diagnostics),
+        Err(e) => Json::obj().with("ok", false).with("error", e).with("diagnostics", diagnostics),
+    }
 }
 
 /// Starts a simulation of the design (see [`sim`]): its clock at
