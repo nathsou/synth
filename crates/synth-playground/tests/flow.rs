@@ -258,3 +258,18 @@ fn verilog_frames_are_read_directly() {
     assert!(r.at(&["frames"]).as_array()[0].at(&["pixels"]).is_null());
     synth_playground::handle("sim_stop", "{}");
 }
+
+/// A net whose only sink is at its own source node gets no routing request;
+/// its timing connections must not point at the next net's (which ran past
+/// the end of the routes and panicked).
+#[test]
+fn a_net_routed_onto_its_own_source_does_not_panic() {
+    let text = "module m(in a: uint<4>, in b: uint<4>, in f: bool, out y: uint<4>) {\n    y = if f { a +% b } else { a -% b };\n}\n";
+    let req = Json::obj()
+        .with("files", Json::Arr(vec![Json::obj().with("name", "m.weft").with("text", text)]))
+        .with("part", "hx8k")
+        .with("package", "ct256")
+        .with("effort", 0.3);
+    let out = Json::parse(&synth_playground::handle("run", &req.dump())).unwrap();
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+}
