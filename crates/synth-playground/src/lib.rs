@@ -19,6 +19,7 @@ pub mod graph;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod sim;
+pub mod tb;
 pub mod text;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -509,8 +510,13 @@ pub fn handle(method: &str, body: &str) -> String {
         }
         "examples" => examples(),
         "devices" => devices(),
+        "delays" => delays(&req),
         "sim_start" => sim_start(&req),
         "sim_step" => sim::step(&req).unwrap_or_else(|e| Json::obj().with("error", e)),
+        "tb_start" => tb_start(&req),
+        "bram_load" => bram_load(&req),
+        "tb_run" => tb::run(&req),
+        "tb_stop" => tb::stop(&req),
         "sim_stop" => {
             sim::stop();
             Json::obj()
@@ -543,6 +549,63 @@ pub fn examples() -> Json {
             })
             .collect(),
     )
+}
+
+/// The delays (ps) of an iCE40 part's timing model that explain where a
+/// path's time goes: a LUT, the carry, a flip-flop's clock-to-output and
+/// set-up, and the multiplexers a signal crosses on its way: onto a span-4 or
+/// span-12 wire (`odrv4`, `odrv12`), from wire to wire, to a local track and
+/// into a cell (`local`, `inmux`), and each span wire's own delay by how
+/// many tiles of it are used (`span4`, `span12`, horizontal and vertical).
+pub fn delays(req: &Json) -> Json {
+    use arch_ice40::chipdb::ArcKind;
+    let part: arch_ice40::arch::Part = match req.at(&["part"]).as_str().unwrap_or("hx1k").parse() {
+        Ok(p) => p,
+        Err(e) => return Json::obj().with("error", e),
+    };
+    let package = req.at(&["package"]).as_str().unwrap_or(if part.name().ends_with("1k") {
+        "vq100"
+    } else {
+        "ct256"
+    });
+    let arch = match arch_ice40::arch::Arch::new(part, package) {
+        Ok(a) => a,
+        Err(e) => return Json::obj().with("error", e),
+    };
+    let db = arch.db;
+    // Pins may carry an edge (`posedge:clk`); the worst arc that matches.
+    let strip = |s: &str| s.rsplit(':').next().unwrap_or(s).to_string();
+    let arc = |cell: &str, kind: ArcKind, from: &str, to: &str| {
+        let worst = db
+            .timing
+            .iter()
+            .filter(|c| c.name == cell)
+            .flat_map(|c| &c.arcs)
+            .filter(|a| a.kind == kind && strip(&a.from) == from && strip(&a.to) == to)
+            .map(|a| a.rise.max(a.fall))
+            .fold(f32::NAN, f32::max);
+        Json::from(f64::from(worst))
+    };
+    let mux = |cell: &str| arc(cell, ArcKind::IoPath, "I", "O");
+    let span = |cell: &str, n: usize| {
+        Json::Arr((0..=n).map(|d| arc(&format!("{cell}{d}"), ArcKind::IoPath, "I", "O")).collect())
+    };
+    Json::obj()
+        .with("part", part.name())
+        .with("lut", arc("LogicCell40", ArcKind::IoPath, "in0", "lcout"))
+        .with("lut_in3", arc("LogicCell40", ArcKind::IoPath, "in3", "lcout"))
+        .with("carry", arc("LogicCell40", ArcKind::IoPath, "carryin", "carryout"))
+        .with("clk_to_q", arc("LogicCell40", ArcKind::IoPath, "clk", "lcout"))
+        .with("setup", arc("LogicCell40", ArcKind::Setup, "in0", "clk"))
+        .with("odrv4", mux("Odrv4"))
+        .with("odrv12", mux("Odrv12"))
+        .with("sp12to4", mux("Sp12to4"))
+        .with("local", mux("LocalMux"))
+        .with("inmux", mux("InMux"))
+        .with("span4_h", span("Span4Mux_h", 4))
+        .with("span4_v", span("Span4Mux_v", 4))
+        .with("span12_h", span("Span12Mux_h", 12))
+        .with("span12_v", span("Span12Mux_v", 12))
 }
 
 /// The supported parts, their packages, and the pins, board and clock of
@@ -729,6 +792,7 @@ fn options(req: &Json) -> synth_weft::Options {
         top,
         params,
         defaults: defaults.unwrap_or_default(),
+        testbench: matches!(req.at(&["testbench"]), Json::Bool(true)),
         ..Default::default()
     }
 }
@@ -823,6 +887,154 @@ fn elaborate(req: &Json) -> Result<(Option<synth_rtl::Module>, Json, usize), Str
         m
     };
     Ok((module, diagnostics_json(&sm, &diags), diags.error_count()))
+}
+
+/// Starts a testbench session on the design (see [`tb`]), its `CLK_HZ`
+/// the request's `clock_hz` if it has one. A Weft top is elaborated as a
+/// testbench drives it ([`synth_weft::Options::testbench`]).
+fn tb_start(req: &Json) -> Json {
+    if let Some(bin) = req.at(&["bitstream"]).as_str() {
+        return tb_start_bitstream(req, bin);
+    }
+    let mut req = req.clone();
+    req.set("testbench", true);
+    let (module, diagnostics, errors) = match elaborate(&req) {
+        Ok(e) => e,
+        Err(e) => return Json::obj().with("ok", false).with("error", e),
+    };
+    let Some(module) = module else {
+        return Json::obj()
+            .with("ok", false)
+            .with("error", format!("{} error(s)", errors.max(1)))
+            .with("diagnostics", diagnostics);
+    };
+    let signals = matches!(req.at(&["signals"]), Json::Bool(true));
+    match tb::start(module, signals) {
+        Ok(info) => info.with("diagnostics", diagnostics),
+        Err(e) => Json::obj().with("ok", false).with("error", e).with("diagnostics", diagnostics),
+    }
+}
+
+/// Starts a testbench session on what an iCE40 bitstream implements: the
+/// bitstream (base64, as `run` gives it) decoded back to its cells, with the
+/// pads named in `pins` as ports, as `synth sim --level bitstream` does. A
+/// request may first flip configuration bits, `flips: [[x, y, bit], …]`,
+/// where `bit` is `row × width + column` within tile `(x, y)`, as the
+/// bitstream view numbers them.
+/// Rewrites the initial contents of block RAMs in an iCE40 bitstream, and
+/// nothing else (what IceStorm's `icebram` does): `rams` lists each block by
+/// its bottom tile, the width of its words (16, 8, 4 or 2: its read mode) and
+/// its words from address 0; words not given keep their contents. Answers the
+/// new bitstream and the number of bits that changed.
+fn bram_load(req: &Json) -> Json {
+    let fail = |e: String| Json::obj().with("ok", false).with("error", e);
+    let result = (|| -> Result<Json, String> {
+        let bin = req.at(&["bitstream"]).as_str().ok_or("no bitstream")?;
+        let data = base64_decode(bin).ok_or("the bitstream is not valid base64")?;
+        let mut cfg = arch_ice40::bitstream::Config::from_bin(&data).map_err(|e| e.0)?;
+        let mut changed = 0usize;
+        for r in req.at(&["rams"]).as_array() {
+            let (Some(x), Some(y)) = (r.at(&["x"]).as_i64(), r.at(&["y"]).as_i64()) else {
+                return Err(format!("a RAM is `{{x, y, width, words}}`, not {}", r.dump()));
+            };
+            let (x, y) = (x as usize, y as usize);
+            if x >= cfg.die.grid_width() || y >= cfg.die.grid_height() || cfg.bram[0].width() == 0 {
+                return Err(format!("no block RAM at ({x}, {y})"));
+            }
+            let width = r.at(&["width"]).as_i64().unwrap_or(16) as usize;
+            if ![2, 4, 8, 16].contains(&width) {
+                return Err(format!(
+                    "a block RAM's words are 16, 8, 4 or 2 bits wide, not {width}"
+                ));
+            }
+            let words = r.at(&["words"]).as_array();
+            if words.len() > 4096 / width {
+                return Err(format!("a block RAM holds {} words of {width} bits", 4096 / width));
+            }
+            for (a, w) in words.iter().enumerate() {
+                let v = w.as_i64().ok_or("a word is a number")? as u64;
+                for b in 0..width {
+                    // Logical bit `a * width + b`; INIT bit order reverses
+                    // the four low bits of each 16-bit group (see synth.rs).
+                    let l = a * width + b;
+                    let i = (l & !15) | ((l & 1) << 3 | (l & 2) << 1 | (l & 4) >> 1 | (l & 8) >> 3);
+                    let bit = v >> b & 1 != 0;
+                    if cfg.bram_bit(x, y, i) != bit {
+                        cfg.set_bram_bit(x, y, i, bit);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        Ok(Json::obj().with("ok", true).with("bin", base64(&cfg.to_bin())).with("changed", changed))
+    })();
+    result.unwrap_or_else(fail)
+}
+
+fn tb_start_bitstream(req: &Json, bin: &str) -> Json {
+    let fail = |e: String| Json::obj().with("ok", false).with("error", e);
+    let result = (|| -> Result<Json, String> {
+        let data = base64_decode(bin).ok_or("the bitstream is not valid base64")?;
+        let mut cfg = arch_ice40::bitstream::Config::from_bin(&data).map_err(|e| e.0)?;
+        for f in req.at(&["flips"]).as_array() {
+            let at = |i: usize| f.as_array().get(i).and_then(Json::as_i64);
+            let (Some(x), Some(y), Some(bit)) = (at(0), at(1), at(2)) else {
+                return Err(format!("a flip is `[x, y, bit]`, not {}", f.dump()));
+            };
+            let (x, y, bit) = (x as usize, y as usize, bit as usize);
+            let die = cfg.die;
+            if x >= die.grid_width() || y >= die.grid_height() {
+                return Err(format!("no tile ({x}, {y})"));
+            }
+            let w = die.tile_kind(x, y).config_width();
+            if w == 0 || bit >= w * arch_ice40::device::TILE_CONFIG_HEIGHT {
+                return Err(format!("tile ({x}, {y}) has no bit {bit}"));
+            }
+            let (col, row) = (bit % w, bit / w);
+            let v = cfg.tile_bit(x, y, col, row);
+            cfg.set_tile_bit(x, y, col, row, !v);
+        }
+        let part: arch_ice40::arch::Part = req.at(&["part"]).as_str().unwrap_or("hx1k").parse()?;
+        let package = req.at(&["package"]).as_str().unwrap_or("vq100");
+        let pcf = arch_ice40::pcf::parse_pcf(pins(req))?;
+        let arch = arch_ice40::arch::Arch::new(part, package)?;
+        let (nl, warnings) = arch_ice40::decode::decode(&cfg, &arch, &pcf.pins)?;
+        let module = synth_sim::netlist::from_netlist(&nl, &mut arch_ice40::sim::add_cell)?;
+        let signals = matches!(req.at(&["signals"]), Json::Bool(true));
+        let info = tb::start(module, signals)?;
+        Ok(info.with("decode_warnings", Json::Arr(warnings.into_iter().map(Json::from).collect())))
+    })();
+    result.unwrap_or_else(fail)
+}
+
+/// Decodes base64 (RFC 4648, with padding).
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = n << 6 | val(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let b = n.to_be_bytes();
+        out.extend_from_slice(&b[1..4 - pad]);
+    }
+    Some(out)
 }
 
 /// Starts a simulation of the design (see [`sim`]): its clock at
@@ -940,7 +1152,11 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
         route_timing_rounds: arch_ice40::flow::ROUTE_TIMING_ROUNDS,
         tries: req.at(&["tries"]).as_i64().map_or(1, |n| n.max(1) as usize),
     };
-    let (res, imp) = arch_ice40::flow::implement_detailed(nl, &pcf.pins, &opts).map_err(|e| {
+    let want_trace = matches!(req.at(&["trace"]), Json::Bool(true));
+    let (implemented, records) =
+        synth_core::trace::collect(|| arch_ice40::flow::implement_detailed(nl, &pcf.pins, &opts));
+    let records = if want_trace { records } else { Vec::new() };
+    let (res, imp) = implemented.map_err(|e| {
         // The log of a failed run comes first, as `info:` lines.
         let mut msg = Vec::new();
         for l in e.lines() {
@@ -965,6 +1181,9 @@ fn run_inner(req: &Json, r: &mut Run, out: &mut Json) -> Result<(), String> {
     );
     let t = Instant::now();
     let (chip, timing) = chip::chip(&imp, &opts);
+    if want_trace {
+        out.set("trace", trace_json(&imp, &chip, &records));
+    }
     out.set("chip", chip);
     out.set("timing", timing.with("met", res.timing_met));
     out.set("bitstream", chip::bitstream(&imp.arch, &res.config));
@@ -1118,6 +1337,71 @@ fn run_xc7(
     Ok(())
 }
 
+/// The most placement snapshots a trace keeps (spread over the annealing).
+const MAX_SNAPSHOTS: usize = 80;
+
+/// The placer's temperature steps and the router's iterations, as recorded
+/// by `synth_core::trace`: `{place: [{step, temperature, cost, accepted,
+/// range, xy}], route: [{iteration, nets, overused}]}`, where `xy[k]` is the
+/// position at that step of the chip's cell `k` (`[-1, -1]` if unplaced).
+/// Placement snapshots are thinned to [`MAX_SNAPSHOTS`]; the others keep
+/// only the numbers.
+fn trace_json(
+    imp: &arch_ice40::flow::Implementation,
+    chip: &Json,
+    records: &[synth_core::trace::Record],
+) -> Json {
+    let nl = &imp.netlist;
+    let by_name: std::collections::HashMap<&str, usize> =
+        nl.live_cells().map(|c| (nl.str(nl.cells[c].name), c.index())).collect();
+    let order: Vec<Option<usize>> = chip
+        .at(&["cells"])
+        .as_array()
+        .iter()
+        .map(|c| c.at(&["name"]).as_str().and_then(|n| by_name.get(n).copied()))
+        .collect();
+    let place: Vec<&synth_core::trace::Record> =
+        records.iter().filter(|r| r.kind == "place").collect();
+    let keep = place.len().div_ceil(MAX_SNAPSHOTS).max(1);
+    let place_json: Vec<Json> = place
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let v = &r.values;
+            let mut j = Json::obj()
+                .with("step", v[0])
+                .with("temperature", v[1])
+                .with("cost", v[2])
+                .with("accepted", v[3])
+                .with("range", v[4]);
+            if i % keep == 0 || i + 1 == place.len() {
+                let xy: Vec<Json> = order
+                    .iter()
+                    .map(|c| {
+                        let (x, y) = c
+                            .and_then(|c| Some((*v.get(5 + 2 * c)?, *v.get(6 + 2 * c)?)))
+                            .unwrap_or((-1.0, -1.0));
+                        Json::Arr(vec![x.into(), y.into()])
+                    })
+                    .collect();
+                j.set("xy", xy);
+            }
+            j
+        })
+        .collect();
+    let route_json: Vec<Json> = records
+        .iter()
+        .filter(|r| r.kind == "route")
+        .map(|r| {
+            Json::obj()
+                .with("iteration", r.values[0])
+                .with("nets", r.values[1])
+                .with("overused", r.values[2])
+        })
+        .collect();
+    Json::obj().with("place", place_json).with("route", route_json)
+}
+
 fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -1139,6 +1423,9 @@ mod tests {
 
     #[test]
     fn base64_matches_rfc4648() {
+        for s in [&b""[..], b"f", b"fo", b"foo", b"foobar", &[0, 255, 128, 7]] {
+            assert_eq!(base64_decode(&base64(s)).as_deref(), Some(s));
+        }
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");

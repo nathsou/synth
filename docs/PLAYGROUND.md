@@ -255,8 +255,15 @@ fragment, so it is not sent to any server).
 
 - `handle(method, body)` answers the app's requests, JSON in and out: `run`
   (the whole flow), `analyze` (diagnostics and the name index, for the editor),
-  `format`, `examples` and `devices` (with the boards and pins of each
-  package).
+  `format`, `examples`, `devices` (with the boards and pins of each
+  package) and `delays` (the delays of an iCE40 part's timing model that
+  explain a path: LUT, carry, flip-flop, and the multiplexers and span wires
+  on the way).
+- `run` with `trace: true` also returns how placement and routing went
+  (`synth_core::trace`): each temperature step of the annealer (its
+  temperature, cost, share of moves accepted and move range, and the
+  position of every logic cell, for up to 80 snapshots) and each iteration
+  of the router (the nets it routed and the nodes still overused).
 - `run` elaborates (Weft or Verilog), then synthesises through
   `arch_ice40::synth::synthesize_observed`, which reports the design after each
   pass, then implements it through `arch_ice40::flow::implement_detailed`,
@@ -288,6 +295,25 @@ fragment, so it is not sent to any server).
   ends it. `web/simview.js` paces the
   requests in real time and draws the board; `web/terminal.js` is the
   terminal.
+- `tb.rs` keeps testbench sessions for other pages that embed the
+  WebAssembly build (the Digital Circuits course runs its tests, waveforms
+  and CPU boards on them): `tb_start` elaborates the design as a testbench
+  drives it (a Weft top's inputs in its clock's domain instead of
+  asynchronous, and a module without a clock port given one, `clk`:
+  `synth_weft::Options::testbench`) and answers its ports, clocks and
+  memories; `tb_run` applies `restart` (back to power-up), `set`, `step`
+  (with a `trace`), `read`, `load` and `dump` operations in order and answers what they read; `tb_stop`
+  drops the session. Simulation is two-state, as Weft defines it. A
+  session can also run what an iCE40 bitstream implements, decoded back to
+  cells (`tb_start` with `bitstream`, as `run` returns it, and the pins),
+  with configuration bits flipped first if the request names them. An
+  iCE40 logic cell in `run`'s chip names the tile bits of its truth table
+  (`lut_bits`, bit i of the LUT first), carry and flip-flop enables, and
+  the net on each physical LUT input (`lut_inputs`: the router may move a
+  logical input to another pin), so a page can program a cell by hand.
+  `bram_load` rewrites the initial contents of block RAMs in a bitstream and
+  nothing else, as IceStorm's `icebram` does: a program changes without a
+  new place and route.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`

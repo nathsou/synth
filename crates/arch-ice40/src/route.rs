@@ -383,6 +383,9 @@ pub(crate) fn route_incremental(
         let source = pin_node(arch, nl, placement, drv.cell, pin_name(drv))?;
         let mut sinks: Vec<u32> = Vec::new();
         let mut criticality: Vec<f32> = Vec::new();
+        // Timing connections of this net, recorded only if it gets a request:
+        // a net whose sinks are all at its source needs no route.
+        let mut targets: Vec<(usize, u32)> = Vec::new();
         for &u in &net.users {
             let node = sink_node(arch, nl, placement, u.cell, pin_name(u))?;
             if g.node_class[node.index()] == NodeClass::LcInput
@@ -392,7 +395,7 @@ pub(crate) fn route_incremental(
             }
             let conn = timing.conn_to(u.cell, u.pin as usize);
             if let Some(k) = conn {
-                conn_target[k] = Some((requests.len(), node.raw()));
+                targets.push((k, node.raw()));
             }
             let c = conn.map_or(0.0, |k| crit[k]) as f32;
             match sinks.iter().position(|&s| s == node.raw()) {
@@ -407,6 +410,9 @@ pub(crate) fn route_incremental(
         sources.insert(n, source);
         if sinks.is_empty() {
             continue;
+        }
+        for (k, node) in targets {
+            conn_target[k] = Some((requests.len(), node));
         }
         requests.push(NetRequest { source: source.raw(), sinks, criticality });
         ids.push(n);
@@ -433,6 +439,9 @@ pub(crate) fn route_incremental(
     let t0 = synth_core::time::Instant::now();
     let trace = std::env::var("SYNTH_DEBUG").is_ok();
     let mut progress = |iter: usize, nets: usize, over: &[usize]| {
+        // For replays: the iteration, the nets routed in it, the nodes
+        // still used by more than one net.
+        synth_core::trace::record("route", || vec![iter as f64, nets as f64, over.len() as f64]);
         if !trace {
             return;
         }
