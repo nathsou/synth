@@ -195,6 +195,21 @@ pub fn chip(imp: &Implementation, opts: &FlowOptions) -> (Json, Json) {
             .with("z", bel.z)
             .with("info", cell_info(imp, c))
             .with("pins", pins);
+        if bel.kind == BelKind::Lc {
+            // The nets on the LUT's physical inputs: the router may have moved
+            // a logical input `I<k>` to another pin (the table is rewritten to
+            // match), and the bits of the truth table are physical.
+            let perm = imp.routing.lut_pins.get(&c).copied().unwrap_or([0, 1, 2, 3]);
+            let mut phys = vec![Json::Null; 4];
+            for (k, name) in ["I0", "I1", "I2", "I3"].iter().enumerate() {
+                if let Some(n) = nl.pin_net(c, name)
+                    && let Some(slot) = phys.get_mut(perm[k] as usize)
+                {
+                    *slot = Json::from(nl.str(nl.nets[n].name));
+                }
+            }
+            j.set("lut_inputs", phys);
+        }
         if bel.kind == BelKind::Io
             && let Some(p) = arch.bel_pin_name(b)
         {

@@ -203,10 +203,16 @@ fn a_bitstream_decoded_back_to_cells_runs_and_a_flipped_bit_breaks_it() {
 
 #[test]
 fn a_logic_cell_reports_where_its_truth_table_lives() {
+    // Pins of the user's choosing, and pins of the placer's (whose router
+    // moves the LUT's inputs to other pins).
+    truth_table_bits("set_io a 1\nset_io b 2\nset_io y 56\n");
+    truth_table_bits("");
+}
+
+fn truth_table_bits(pins: &str) {
     // An XOR in one logic cell: inverting every bit of its truth table, by
     // flipping the tile bits the cell reports, makes it an XNOR.
     let top = "module top(in a: bool, in b: bool, out y: bool) {\n    y = a ^ b;\n}\n";
-    let pins = "set_io a 1\nset_io b 2\nset_io y 56\n";
     let req = Json::obj()
         .with("files", files(top))
         .with("part", "hx1k")
@@ -237,6 +243,16 @@ fn a_logic_cell_reports_where_its_truth_table_lives() {
     let lut: u32 =
         bits.iter().enumerate().filter(|(_, b)| set.contains(b)).map(|(i, _)| 1 << i).sum();
     assert_eq!(lut.count_ones(), 8, "an XOR of two of the four inputs: {lut:04x}");
+    // The pins as placed, to name the decoded design's ports.
+    let placed: String = out
+        .at(&["chip", "cells"])
+        .as_array()
+        .iter()
+        .filter_map(|c| {
+            let name = c.at(&["name"]).as_str()?.strip_suffix("$sb_io")?;
+            Some(format!("set_io {name} {}\n", c.at(&["pin"]).as_str()?))
+        })
+        .collect();
     let truth = |flips: Json| {
         let s = call(
             "tb_start",
@@ -244,7 +260,7 @@ fn a_logic_cell_reports_where_its_truth_table_lives() {
                 .with("bitstream", out.at(&["bin"]).clone())
                 .with("part", "hx1k")
                 .with("package", "vq100")
-                .with("pins", pins)
+                .with("pins", placed.as_str())
                 .with("flips", flips),
         );
         assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
@@ -265,6 +281,24 @@ fn a_logic_cell_reports_where_its_truth_table_lives() {
         bits.iter().map(|&b| Json::Arr(vec![x.clone(), y.clone(), (b as f64).into()])).collect(),
     );
     assert_eq!(truth(all), [1, 0, 0, 1]);
+    // The physical input that carries `a`: a table that copies it makes y = a.
+    let nets = out.at(&["chip", "nets"]).as_array();
+    let cells = out.at(&["chip", "cells"]).as_array();
+    let from_a = |name: &Json| {
+        nets.iter().any(|n| {
+            n.at(&["name"]) == name
+                && n.at(&["driver"]).as_i64().and_then(|d| cells[d as usize].at(&["name"]).as_str())
+                    == Some("a$sb_io")
+        })
+    };
+    let k = lc.at(&["lut_inputs"]).as_array().iter().position(from_a).expect("a reaches the LUT");
+    let copy = Json::Arr(
+        (0..16)
+            .filter(|&i| ((i >> k) & 1 == 1) != ((lut >> i) & 1 == 1))
+            .map(|i| Json::Arr(vec![x.clone(), y.clone(), (bits[i] as f64).into()]))
+            .collect(),
+    );
+    assert_eq!(truth(copy), [0, 0, 1, 1]);
 }
 
 #[test]

@@ -308,8 +308,9 @@ fragment, so it is not sent to any server).
   cells (`tb_start` with `bitstream`, as `run` returns it, and the pins),
   with configuration bits flipped first if the request names them. An
   iCE40 logic cell in `run`'s chip names the tile bits of its truth table
-  (`lut_bits`, bit i of the LUT first), carry and flip-flop enables, so a
-  page can program a cell by hand.
+  (`lut_bits`, bit i of the LUT first), carry and flip-flop enables, and
+  the net on each physical LUT input (`lut_inputs`: the router may move a
+  logical input to another pin), so a page can program a cell by hand.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`
