@@ -311,6 +311,9 @@ fragment, so it is not sent to any server).
   (`lut_bits`, bit i of the LUT first), carry and flip-flop enables, and
   the net on each physical LUT input (`lut_inputs`: the router may move a
   logical input to another pin), so a page can program a cell by hand.
+  `bram_load` rewrites the initial contents of block RAMs in a bitstream and
+  nothing else, as IceStorm's `icebram` does: a program changes without a
+  new place and route.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`

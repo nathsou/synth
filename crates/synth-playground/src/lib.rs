@@ -514,6 +514,7 @@ pub fn handle(method: &str, body: &str) -> String {
         "sim_start" => sim_start(&req),
         "sim_step" => sim::step(&req).unwrap_or_else(|e| Json::obj().with("error", e)),
         "tb_start" => tb_start(&req),
+        "bram_load" => bram_load(&req),
         "tb_run" => tb::run(&req),
         "tb_stop" => tb::stop(&req),
         "sim_stop" => {
@@ -920,6 +921,56 @@ fn tb_start(req: &Json) -> Json {
 /// request may first flip configuration bits, `flips: [[x, y, bit], …]`,
 /// where `bit` is `row × width + column` within tile `(x, y)`, as the
 /// bitstream view numbers them.
+/// Rewrites the initial contents of block RAMs in an iCE40 bitstream, and
+/// nothing else (what IceStorm's `icebram` does): `rams` lists each block by
+/// its bottom tile, the width of its words (16, 8, 4 or 2: its read mode) and
+/// its words from address 0; words not given keep their contents. Answers the
+/// new bitstream and the number of bits that changed.
+fn bram_load(req: &Json) -> Json {
+    let fail = |e: String| Json::obj().with("ok", false).with("error", e);
+    let result = (|| -> Result<Json, String> {
+        let bin = req.at(&["bitstream"]).as_str().ok_or("no bitstream")?;
+        let data = base64_decode(bin).ok_or("the bitstream is not valid base64")?;
+        let mut cfg = arch_ice40::bitstream::Config::from_bin(&data).map_err(|e| e.0)?;
+        let mut changed = 0usize;
+        for r in req.at(&["rams"]).as_array() {
+            let (Some(x), Some(y)) = (r.at(&["x"]).as_i64(), r.at(&["y"]).as_i64()) else {
+                return Err(format!("a RAM is `{{x, y, width, words}}`, not {}", r.dump()));
+            };
+            let (x, y) = (x as usize, y as usize);
+            if x >= cfg.die.grid_width() || y >= cfg.die.grid_height() || cfg.bram[0].width() == 0 {
+                return Err(format!("no block RAM at ({x}, {y})"));
+            }
+            let width = r.at(&["width"]).as_i64().unwrap_or(16) as usize;
+            if ![2, 4, 8, 16].contains(&width) {
+                return Err(format!(
+                    "a block RAM's words are 16, 8, 4 or 2 bits wide, not {width}"
+                ));
+            }
+            let words = r.at(&["words"]).as_array();
+            if words.len() > 4096 / width {
+                return Err(format!("a block RAM holds {} words of {width} bits", 4096 / width));
+            }
+            for (a, w) in words.iter().enumerate() {
+                let v = w.as_i64().ok_or("a word is a number")? as u64;
+                for b in 0..width {
+                    // Logical bit `a * width + b`; INIT bit order reverses
+                    // the four low bits of each 16-bit group (see synth.rs).
+                    let l = a * width + b;
+                    let i = (l & !15) | ((l & 1) << 3 | (l & 2) << 1 | (l & 4) >> 1 | (l & 8) >> 3);
+                    let bit = v >> b & 1 != 0;
+                    if cfg.bram_bit(x, y, i) != bit {
+                        cfg.set_bram_bit(x, y, i, bit);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        Ok(Json::obj().with("ok", true).with("bin", base64(&cfg.to_bin())).with("changed", changed))
+    })();
+    result.unwrap_or_else(fail)
+}
+
 fn tb_start_bitstream(req: &Json, bin: &str) -> Json {
     let fail = |e: String| Json::obj().with("ok", false).with("error", e);
     let result = (|| -> Result<Json, String> {

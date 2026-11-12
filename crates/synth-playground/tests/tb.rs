@@ -350,3 +350,93 @@ fn a_run_can_trace_its_placement_and_routing() {
     let plain = call("run", Json::obj().with("files", files(top)).with("effort", 0.3));
     assert!(matches!(plain.at(&["trace"]), Json::Null));
 }
+
+#[test]
+fn block_ram_contents_are_rewritten_in_place() {
+    // A ROM of 256 bytes, read through a register: one block RAM in its
+    // 512 x 8 mode.
+    let words: Vec<String> = (0..256).map(|i| ((i * 7 + 3) % 256).to_string()).collect();
+    let top = format!(
+        "module rom(in clk: clock, in a: uint<8> @clk, out q: uint<8>) {{\n    mem m: [uint<8>; 256] init [{}];\n    reg r: uint<8> = 0;\n    r := m[a];\n    q = r;\n}}\n",
+        words.join(", ")
+    );
+    let req = Json::obj()
+        .with("files", files(&top))
+        .with("part", "hx8k")
+        .with("package", "ct256")
+        .with("pins", "");
+    let out = call("run", req);
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+    let cells = out.at(&["chip", "cells"]).as_array();
+    let ram = cells.iter().find(|c| c.at(&["bel"]).as_str() == Some("ram")).expect("a block RAM");
+    let placed: String = cells
+        .iter()
+        .filter_map(|c| {
+            let name = c.at(&["name"]).as_str()?.strip_suffix("$sb_io")?;
+            Some(format!("set_io {name} {}\n", c.at(&["pin"]).as_str()?))
+        })
+        .collect();
+    let read = |bin: &Json, a: f64| {
+        let s = call(
+            "tb_start",
+            Json::obj()
+                .with("bitstream", bin.clone())
+                .with("part", "hx8k")
+                .with("package", "ct256")
+                .with("pins", placed.as_str()),
+        );
+        assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
+        let ops = Json::Arr(vec![
+            Json::obj().with("set", Json::obj().with("a", a)),
+            Json::obj().with("step", 1.0),
+            Json::obj().with("read", Json::Arr(vec!["q".into()])),
+        ]);
+        let r = call("tb_run", Json::obj().with("id", s.at(&["id"]).clone()).with("ops", ops));
+        assert_eq!(r.at(&["ok"]).as_bool(), Some(true), "{}", r.dump());
+        r.at(&["reads"]).as_array()[0].at(&["values", "q"]).as_i64().unwrap()
+    };
+    assert_eq!(read(out.at(&["bin"]), 5.0), 38);
+    // New contents: word a is 255 - a.
+    let new: Vec<Json> = (0..256).map(|a| Json::from(255 - a)).collect();
+    let load = |words: Vec<Json>| {
+        call(
+            "bram_load",
+            Json::obj().with("bitstream", out.at(&["bin"]).clone()).with(
+                "rams",
+                Json::Arr(vec![
+                    Json::obj()
+                        .with("x", ram.at(&["x"]).clone())
+                        .with("y", ram.at(&["y"]).clone())
+                        .with("width", 8.0)
+                        .with("words", Json::Arr(words)),
+                ]),
+            ),
+        )
+    };
+    let loaded = load(new);
+    assert_eq!(loaded.at(&["ok"]).as_bool(), Some(true), "{}", loaded.dump());
+    assert!(loaded.at(&["changed"]).as_i64().unwrap() > 0);
+    for a in [0.0, 5.0, 200.0] {
+        assert_eq!(read(loaded.at(&["bin"]), a), 255 - a as i64);
+    }
+    // The same words again change nothing; one word changes its own bits.
+    let same: Vec<Json> = words.iter().map(|w| Json::from(w.parse::<i64>().unwrap())).collect();
+    assert_eq!(load(same).at(&["changed"]).as_i64(), Some(0));
+    let mut one: Vec<Json> = words.iter().map(|w| Json::from(w.parse::<i64>().unwrap())).collect();
+    one[5] = Json::from(38 ^ 0b101);
+    assert_eq!(load(one).at(&["changed"]).as_i64(), Some(2));
+    let bad = call(
+        "bram_load",
+        Json::obj().with("bitstream", out.at(&["bin"]).clone()).with(
+            "rams",
+            Json::Arr(vec![
+                Json::obj()
+                    .with("x", 0.0)
+                    .with("y", 0.0)
+                    .with("width", 3.0)
+                    .with("words", Json::Arr(vec![])),
+            ]),
+        ),
+    );
+    assert_eq!(bad.at(&["ok"]).as_bool(), Some(false));
+}
