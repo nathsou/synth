@@ -255,8 +255,10 @@ fragment, so it is not sent to any server).
 
 - `handle(method, body)` answers the app's requests, JSON in and out: `run`
   (the whole flow), `analyze` (diagnostics and the name index, for the editor),
-  `format`, `examples` and `devices` (with the boards and pins of each
-  package).
+  `format`, `examples`, `devices` (with the boards and pins of each
+  package) and `delays` (the delays of an iCE40 part's timing model that
+  explain a path: LUT, carry, flip-flop, and the multiplexers and span wires
+  on the way).
 - `run` with `trace: true` also returns how placement and routing went
   (`synth_core::trace`): each temperature step of the annealer (its
   temperature, cost, share of moves accepted and move range, and the

@@ -510,6 +510,7 @@ pub fn handle(method: &str, body: &str) -> String {
         }
         "examples" => examples(),
         "devices" => devices(),
+        "delays" => delays(&req),
         "sim_start" => sim_start(&req),
         "sim_step" => sim::step(&req).unwrap_or_else(|e| Json::obj().with("error", e)),
         "tb_start" => tb_start(&req),
@@ -547,6 +548,63 @@ pub fn examples() -> Json {
             })
             .collect(),
     )
+}
+
+/// The delays (ps) of an iCE40 part's timing model that explain where a
+/// path's time goes: a LUT, the carry, a flip-flop's clock-to-output and
+/// set-up, and the multiplexers a signal crosses on its way: onto a span-4 or
+/// span-12 wire (`odrv4`, `odrv12`), from wire to wire, to a local track and
+/// into a cell (`local`, `inmux`), and each span wire's own delay by how
+/// many tiles of it are used (`span4`, `span12`, horizontal and vertical).
+pub fn delays(req: &Json) -> Json {
+    use arch_ice40::chipdb::ArcKind;
+    let part: arch_ice40::arch::Part = match req.at(&["part"]).as_str().unwrap_or("hx1k").parse() {
+        Ok(p) => p,
+        Err(e) => return Json::obj().with("error", e),
+    };
+    let package = req.at(&["package"]).as_str().unwrap_or(if part.name().ends_with("1k") {
+        "vq100"
+    } else {
+        "ct256"
+    });
+    let arch = match arch_ice40::arch::Arch::new(part, package) {
+        Ok(a) => a,
+        Err(e) => return Json::obj().with("error", e),
+    };
+    let db = arch.db;
+    // Pins may carry an edge (`posedge:clk`); the worst arc that matches.
+    let strip = |s: &str| s.rsplit(':').next().unwrap_or(s).to_string();
+    let arc = |cell: &str, kind: ArcKind, from: &str, to: &str| {
+        let worst = db
+            .timing
+            .iter()
+            .filter(|c| c.name == cell)
+            .flat_map(|c| &c.arcs)
+            .filter(|a| a.kind == kind && strip(&a.from) == from && strip(&a.to) == to)
+            .map(|a| a.rise.max(a.fall))
+            .fold(f32::NAN, f32::max);
+        Json::from(f64::from(worst))
+    };
+    let mux = |cell: &str| arc(cell, ArcKind::IoPath, "I", "O");
+    let span = |cell: &str, n: usize| {
+        Json::Arr((0..=n).map(|d| arc(&format!("{cell}{d}"), ArcKind::IoPath, "I", "O")).collect())
+    };
+    Json::obj()
+        .with("part", part.name())
+        .with("lut", arc("LogicCell40", ArcKind::IoPath, "in0", "lcout"))
+        .with("lut_in3", arc("LogicCell40", ArcKind::IoPath, "in3", "lcout"))
+        .with("carry", arc("LogicCell40", ArcKind::IoPath, "carryin", "carryout"))
+        .with("clk_to_q", arc("LogicCell40", ArcKind::IoPath, "clk", "lcout"))
+        .with("setup", arc("LogicCell40", ArcKind::Setup, "in0", "clk"))
+        .with("odrv4", mux("Odrv4"))
+        .with("odrv12", mux("Odrv12"))
+        .with("sp12to4", mux("Sp12to4"))
+        .with("local", mux("LocalMux"))
+        .with("inmux", mux("InMux"))
+        .with("span4_h", span("Span4Mux_h", 4))
+        .with("span4_v", span("Span4Mux_v", 4))
+        .with("span12_h", span("Span12Mux_h", 12))
+        .with("span12_v", span("Span12Mux_v", 12))
 }
 
 /// The supported parts, their packages, and the pins, board and clock of

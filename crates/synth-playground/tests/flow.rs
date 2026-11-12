@@ -273,3 +273,16 @@ fn a_net_routed_onto_its_own_source_does_not_panic() {
     let out = Json::parse(&synth_playground::handle("run", &req.dump())).unwrap();
     assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
 }
+
+#[test]
+fn delays_of_the_timing_model() {
+    let d = Json::parse(&synth_playground::handle("delays", r#"{"part":"hx1k"}"#)).unwrap();
+    for k in ["lut", "carry", "clk_to_q", "setup", "odrv4", "odrv12", "local", "inmux"] {
+        let v = d.at(&[k]).as_f64().unwrap_or(f64::NAN);
+        assert!(v > 0.0 && v < 2000.0, "{k}: {v}");
+    }
+    assert_eq!(d.at(&["span4_h"]).as_array().len(), 5);
+    assert_eq!(d.at(&["span12_v"]).as_array().len(), 13);
+    // A carry is much faster than a LUT, which is why adders use the chain.
+    assert!(d.at(&["carry"]).as_f64().unwrap() * 2.0 < d.at(&["lut"]).as_f64().unwrap());
+}
