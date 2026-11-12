@@ -9,7 +9,7 @@ use synth_sim::{Options, Sim, WritePort, attach_memory, emit_c, vcd::Vcd};
 use crate::args::Args;
 
 /// Parses a value: decimal, `0x` hexadecimal or `0b` binary.
-fn parse_value(v: &str) -> Result<u64, String> {
+pub(crate) fn parse_value(v: &str) -> Result<u64, String> {
     let v = v.replace('_', "");
     let r = if let Some(h) = v.strip_prefix("0x") {
         u64::from_str_radix(h, 16)
@@ -21,14 +21,14 @@ fn parse_value(v: &str) -> Result<u64, String> {
     r.map_err(|_| format!("bad value `{v}`"))
 }
 
-fn assignment(s: &str) -> Result<(String, u64), String> {
+pub(crate) fn assignment(s: &str) -> Result<(String, u64), String> {
     let (n, v) = s.split_once('=').ok_or_else(|| format!("expected NAME=VALUE, got `{s}`"))?;
     Ok((n.to_string(), parse_value(v)?))
 }
 
 /// Words of a `$readmemh`-style file: hexadecimal words separated by
 /// white space, `//` comments, and `@address` jumps.
-fn read_hex(text: &str) -> Result<Vec<(i64, u64)>, String> {
+pub(crate) fn read_hex(text: &str) -> Result<Vec<(i64, u64)>, String> {
     let mut out = Vec::new();
     let mut addr = 0i64;
     for line in text.lines() {
@@ -146,7 +146,15 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             "--timing-weight",
             "--level",
         ],
-        &["--four-state", "--two-state", "--trace", "--quiet", "--optimize", "--stats"],
+        &[
+            "--four-state",
+            "--two-state",
+            "--trace",
+            "--quiet",
+            "--optimize",
+            "--stats",
+            "--compiled",
+        ],
     )?;
     let weft = crate::input_files(&a).iter().any(|p| crate::is_weft(p));
     let mut m = crate::load_rtl(&mut a)?;
@@ -179,6 +187,9 @@ pub fn cmd_sim(argv: &[String]) -> Result<(), String> {
             addr: None,
         });
         attach_memory(&mut m, f[0], f[1], f[2], depth, write)?;
+    }
+    if a.flag("--compiled") {
+        return crate::sim_compiled::run(&mut a, &m);
     }
     let four = if a.flag("--four-state") {
         true

@@ -269,3 +269,78 @@ fn bitstreams_match_their_rtl() {
     );
     assert!(out.contains("led = 210 "), "{out}");
 }
+
+/// `--compiled` runs as the interpreter does (stimulus, --until, --print,
+/// --trace, --uart, --load) when there is a C compiler.
+#[test]
+fn compiled_runs_match_the_interpreter() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    if Command::new(&cc).arg("--version").output().is_err() {
+        eprintln!("no C compiler ({cc}): skipped");
+        return;
+    }
+    let run = |dir: &Path, args: &[&str]| {
+        let mut a = args.to_vec();
+        a.push("--two-state");
+        let (o1, e1) = sim(dir, &a);
+        *a.last_mut().unwrap() = "--compiled";
+        let (o2, e2) = sim(dir, &a);
+        assert_eq!(o1, o2, "synth sim {args:?}");
+        let cycles = |e: &str| {
+            e.lines()
+                .find(|l| l.contains(" cycles in "))
+                .map(|l| l.split(" in ").next().unwrap().to_string())
+        };
+        assert_eq!(cycles(&e1), cycles(&e2), "synth sim {args:?}:\n{e1}\n{e2}");
+        o2
+    };
+    let d = root().join("tests/designs/euler");
+    let out = run(
+        &d,
+        &[
+            "p092.v", "--top", "euler92", "--set", "start=1", "--set", "rst=1", "--at", "2:rst=0",
+            "--until", "done", "--print", "answer",
+        ],
+    );
+    assert!(out.contains("answer = 8581146 "), "{out}");
+    let out = run(
+        &d,
+        &[
+            "p031.v", "--top", "euler31", "--set", "start=1", "--set", "rst=1", "--at", "2:rst=0",
+            "--cycles", "20", "--print", "done", "--print", "answer", "--trace",
+        ],
+    );
+    assert_eq!(out.lines().count(), 20, "{out}");
+    let out = run(
+        &root().join("examples/weft"),
+        &[
+            "hello.weft",
+            "uart.weft",
+            "-P",
+            "PERIOD=100",
+            "-P",
+            "CLKS_PER_BIT=4",
+            "--cycles",
+            "1500",
+            "--uart",
+            "tx:4",
+        ],
+    );
+    assert!(out.starts_with("Hello, Weft!"), "{out:?}");
+    // A memory loaded from a file, read through a register.
+    let dir = std::env::temp_dir().join(format!("synth-sim-compiled-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("rom.v"),
+        "module rom(input clk, input [3:0] a, output reg [11:0] q);\n\
+         reg [11:0] mem [0:15];\nalways @(posedge clk) q <= mem[a];\nendmodule\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("rom.hex"), "@3 abc 1def // the top bit is dropped\n").unwrap();
+    let out = run(
+        &dir,
+        &["rom.v", "--load", "mem=rom.hex", "--set", "a=4", "--cycles", "3", "--print", "q"],
+    );
+    assert!(out.contains("q = 3567 (0xdef)"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

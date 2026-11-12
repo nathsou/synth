@@ -70,6 +70,8 @@ kernels, deterministic results, and the code must build for WebAssembly.
 - Weft gains a simulator: `synth sim` runs a design with a stimulus, writes
   VCD, or emits a C model.
 - The C backend makes the performance of long simulations depend on a C
-  compiler, which synth itself never needs.
+  compiler, which synth itself never needs. `synth sim --compiled` builds
+  a model and a driver for the run with it, so that long runs need no
+  testbench of the user's; without a C compiler they stay interpreted.
 - External memories (a cartridge, a firmware ROM) are modelled as memories
   attached to ports, so they run inside the program in every backend.

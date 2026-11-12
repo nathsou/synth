@@ -137,7 +137,7 @@ struct Plan {
     children: Vec<Vec<u32>>,
 }
 
-fn plan(p: &Program) -> Plan {
+fn plan(p: &Program, observed: &[usize]) -> Plan {
     let n = p.ops.len();
     let words = p.init_val.len();
     let mut member = vec![false; n];
@@ -176,7 +176,7 @@ fn plan(p: &Program) -> Plan {
     for c in &p.clocks {
         keep[p.slot_of[c.word as usize] as usize] = true;
     }
-    for &(si, _, _) in &p.ports {
+    for si in p.ports.iter().map(|x| x.0).chain(observed.iter().copied()) {
         for l in &p.signals[si].1 {
             if let Loc::Bit { word, .. } = l {
                 keep[p.slot_of[*word as usize] as usize] = true;
@@ -1228,14 +1228,83 @@ fn table(out: &mut String, name: &str, ty: &str, values: &[String]) {
     out.push_str("};\n");
 }
 
+/// Runs of the bits of a signal: `(word, bit, len, k)` for `len` bits from
+/// bit `bit` of `word` at bit `k` of the value, and the value's constant
+/// one bits.
+fn runs(locs: &[Loc]) -> (Vec<(u32, u8, usize, usize)>, u64) {
+    let (mut out, mut ones) = (Vec::new(), 0);
+    let mut k = 0;
+    while k < locs.len() {
+        match locs[k] {
+            Loc::Const(c) => {
+                if c == synth_core::Logic::One {
+                    ones |= 1 << k;
+                }
+                k += 1;
+            }
+            Loc::Bit { word, bit } => {
+                let mut len = 1;
+                while k + len < locs.len()
+                    && bit as usize + len < 64
+                    && locs[k + len] == (Loc::Bit { word, bit: bit + len as u8 })
+                {
+                    len += 1;
+                }
+                out.push((word, bit, len, k));
+                k += len;
+            }
+        }
+    }
+    (out, ones)
+}
+
+/// A C expression of the value of a signal of at most 64 bits (in model `m`).
+fn gather(locs: &[Loc]) -> String {
+    let (runs, ones) = runs(locs);
+    let mut parts: Vec<String> = Vec::new();
+    if ones != 0 {
+        parts.push(hex(ones));
+    }
+    for (word, bit, len, k) in runs {
+        let mut e = format!("m->v[{word}]");
+        if bit != 0 {
+            e = format!("({e} >> {bit})");
+        }
+        e = format!("({e} & {})", hex(mask(len as u32)));
+        if k != 0 {
+            e = format!("({e} << {k})");
+        }
+        parts.push(e);
+    }
+    if parts.is_empty() { "0".to_string() } else { parts.join(" | ") }
+}
+
+/// Whether every bit of signal `si` can be written: inputs (undriven bits)
+/// and state, as [`crate::Sim::writable`].
+pub fn writable(p: &Program, si: usize) -> bool {
+    p.signals[si].1.iter().all(|l| match l {
+        Loc::Bit { word, .. } => {
+            matches!(p.word_kind[*word as usize], SlotKind::Input | SlotKind::State)
+        }
+        Loc::Const(_) => false,
+    })
+}
+
 /// Emits a two-state program as a C model named `prefix`.
 pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
+    emit_observing(p, prefix, &[])
+}
+
+/// As [`emit`], with accessors for signals of at most 64 bits besides the
+/// ports: `<prefix>_peek<i>` reads `p.signals[i]` for each `i` of
+/// `observed`, and `<prefix>_poke<i>` writes it when it is [`writable`].
+pub fn emit_observing(p: &Program, prefix: &str, observed: &[usize]) -> Result<CModel, String> {
     if p.four_state {
         return Err("the C backend simulates two-state programs only".into());
     }
     let prefix = ident(prefix);
     let pre = &prefix;
-    let plan = plan(p);
+    let plan = plan(p, observed);
     let np = plan.parts.len();
     let dirty_words = np.div_ceil(64).max(1);
     let e = Emitter {
@@ -1293,6 +1362,27 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
     for (i, mem) in p.aux.mems.iter().enumerate() {
         writeln!(h, "#define {pre}_MEM_{} mem{i}", ident(&mem.name).to_uppercase()).unwrap();
     }
+    // Writing a memory word by memory number, for drivers.
+    let mut cases = String::new();
+    for (i, mem) in p.aux.mems.iter().enumerate() {
+        let (ty, nw) = mem_type(mem.width);
+        write!(
+            cases,
+            " case {i}: if (i < {}) {{ m->mem{i}[i * {nw}] = ({ty})(x & {});",
+            mem.depth,
+            hex(mask(mem.width))
+        )
+        .unwrap();
+        for j in 1..nw {
+            write!(cases, " m->mem{i}[i * {nw} + {j}] = 0;").unwrap();
+        }
+        cases.push_str(" } break;");
+    }
+    writeln!(
+        h,
+        "/* Sets word i (from 0) of memory `mem` (in order of the MEM_ names) to x,\n   zero-extended; call memories_written after. */\nstatic inline void {pre}_load_memory({pre}_t *m, unsigned mem, uint64_t i, uint64_t x) {{ switch (mem) {{{cases} default: break; }} (void)m; (void)i; (void)x; }}"
+    )
+    .unwrap();
     let mut ports = p.ports.clone();
     ports.sort_by_key(|x| x.2);
     for (si, dir, _) in &ports {
@@ -1302,39 +1392,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         if w == 0 || w > 64 {
             continue;
         }
-        // Getter: gather the bits.
-        let mut parts: Vec<String> = Vec::new();
-        let mut k = 0;
-        while k < w {
-            match locs[k] {
-                Loc::Const(c) => {
-                    if c == synth_core::Logic::One {
-                        parts.push(format!("(1ull << {k})"));
-                    }
-                    k += 1;
-                }
-                Loc::Bit { word, bit } => {
-                    let mut len = 1;
-                    while k + len < w
-                        && bit as usize + len < 64
-                        && locs[k + len] == (Loc::Bit { word, bit: bit + len as u8 })
-                    {
-                        len += 1;
-                    }
-                    let mut e = format!("m->v[{word}]");
-                    if bit != 0 {
-                        e = format!("({e} >> {bit})");
-                    }
-                    e = format!("({e} & {})", hex(mask(len as u32)));
-                    if k != 0 {
-                        e = format!("({e} << {k})");
-                    }
-                    parts.push(e);
-                    k += len;
-                }
-            }
-        }
-        let body = if parts.is_empty() { "0".to_string() } else { parts.join(" | ") };
+        let body = gather(locs);
         writeln!(h, "static inline uint64_t {pre}_get_{id}(const {pre}_t *m) {{ return {body}; }}")
             .unwrap();
         // Setter for inputs that are one whole input slot.
@@ -1353,6 +1411,44 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
             .unwrap();
         }
     }
+    for &si in observed {
+        let locs = &p.signals[si].1;
+        if locs.is_empty() || locs.len() > 64 {
+            return Err(format!("`{}` is wider than 64 bits", p.signals[si].0));
+        }
+        let name = &p.signals[si].0;
+        writeln!(
+            h,
+            "/* {name} */\nstatic inline uint64_t {pre}_peek{si}(const {pre}_t *m) {{ return {}; }}",
+            gather(locs)
+        )
+        .unwrap();
+        if !writable(p, si) {
+            continue;
+        }
+        // Each run of bits into its word, marking that word's readers if it
+        // changed.
+        let mut body = String::from("uint64_t n;");
+        for (word, bit, len, k) in runs(locs).0 {
+            let m = mask(len as u32);
+            let ms = e.mark_readers(word, "m->dirty", NONE);
+            write!(
+                body,
+                " n = (m->v[{word}] & ~{}) | (x >> {k} & {}) << {bit}; if (n != m->v[{word}]) {{ m->v[{word}] = n; {} }}",
+                hex(m << bit),
+                hex(m),
+                ms.join(" ")
+            )
+            .unwrap();
+        }
+        writeln!(h, "static inline void {pre}_poke{si}({pre}_t *m, uint64_t x) {{ {body} }}")
+            .unwrap();
+    }
+    writeln!(
+        h,
+        "/* Settles after inputs changed and takes the clocks as they are, without\n   running an edge (for setting up initial values). */\nvoid {pre}_eval_quiet({pre}_t *m);"
+    )
+    .unwrap();
     writeln!(h, "\n#endif").unwrap();
 
     // Implementation.
@@ -1477,6 +1573,12 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         }
     }
     writeln!(e.out, "    memset(m->dirty, 0xff, sizeof m->dirty);\n    settle(m);").unwrap();
+    for (k, c) in p.clocks.iter().enumerate() {
+        writeln!(e.out, "    m->clk[{k}] = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
+    }
+    writeln!(e.out, "}}\n").unwrap();
+
+    writeln!(e.out, "void {pre}_eval_quiet({pre}_t *m) {{\n    settle(m);").unwrap();
     for (k, c) in p.clocks.iter().enumerate() {
         writeln!(e.out, "    m->clk[{k}] = m->v[{}] >> {} & 1;", c.word, c.bit).unwrap();
     }

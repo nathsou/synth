@@ -1407,7 +1407,8 @@ recognize patterns.
 **Simulation.** `synth sim` simulates a Weft design two-state, as this
 specification defines it (`undef` reads as 0): it drives the clock, sets inputs
 (`--set`, `--at`), prints signals, decodes a serial line (`--uart`) and writes
-VCD; `--emit-c` writes a C model for long runs. The elaborated RTL can also be
+VCD; for long runs, `--compiled` runs it as a C model built by the C compiler,
+and `--emit-c` writes that model for a testbench of your own. The elaborated RTL can also be
 written as Verilog (`synth elab design.weft --verilog out.v`) for Icarus
 Verilog or Verilator, where `undef` appears as `x`.
 

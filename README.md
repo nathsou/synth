@@ -137,7 +137,17 @@ target/release/synth sim tests/designs/euler/p031.v --top euler31 \
 target/release/synth sim soc.v picorv32.v --top top --cycles 200000 --uart tx:8
 ```
 
-For long runs, `--emit-c <dir>` writes the design as a C model (`<top>.h`,
+For long runs, `--compiled` runs the same simulation as a C model built
+by the C compiler (`CC`, default `cc`, with `CFLAGS`, default `-O1`): 7 to
+70 times faster once built, which takes a second for a CPU and a few for
+the NES. It is two-state and optimized as `--optimize` is, so only ports
+and the internal signals that remain can be named, and it writes no VCD.
+
+```sh
+target/release/synth sim soc.v picorv32.v --top top --cycles 20000000 --uart tx:8 --compiled
+```
+
+`--emit-c <dir>` writes the design as a C model (`<top>.h`,
 `<top>.c`) to compile with a testbench of your own, like a Verilator model.
 `--attach` places external memories (a ROM on the design's address and data
 ports) inside the model. The model runs only the logic that changed, or all
