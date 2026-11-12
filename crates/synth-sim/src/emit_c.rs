@@ -340,6 +340,10 @@ const PROBE: u32 = 64;
 /// branch costs more than running them.
 const SMALL: usize = 8;
 
+/// Brackets a partition's multiplexer branches may nest (clang accepts 256
+/// by default, counting every bracket); deeper ones compute both inputs.
+const MAX_NEST: usize = 96;
+
 /// Sizes of the nested groups of dirty bits `settle` tests, outermost
 /// first (a word, then within it). Measured best on the NES and the
 /// PicoRV32 SoC; an event loop jumping to each dirty partition was slower.
@@ -369,6 +373,8 @@ struct Emitter<'p> {
     indent: usize,
     /// Temporaries for loops.
     tmp: usize,
+    /// Brackets opened by the multiplexer branches of the current tree.
+    nest: usize,
     /// Set by a memory write when it writes.
     on_write: Vec<String>,
 }
@@ -832,7 +838,7 @@ impl Emitter<'_> {
         let p = self.p;
         let ins = p.ops[u as usize];
         let children = self.plan.children[u as usize].clone();
-        if ins.k == K::Mux && nwords(ins.w) == 1 && ins.a != ins.b {
+        if ins.k == K::Mux && nwords(ins.w) == 1 && ins.a != ins.b && self.nest < MAX_NEST {
             let (sel, a, b) = (p.slot_of[ins.c as usize], ins.a, ins.b);
             let of = |slot: u32| {
                 children
@@ -850,6 +856,7 @@ impl Emitter<'_> {
                 let (vd, va, vb) = (self.w(ins.d), self.w(a), self.w(b));
                 self.line(&format!("if ({s}) {{"));
                 self.indent += 1;
+                self.nest += 1;
                 for c in cb {
                     self.tree(c)?;
                 }
@@ -862,11 +869,12 @@ impl Emitter<'_> {
                 }
                 self.line(&format!("{vd} = {va};"));
                 self.indent -= 1;
+                self.nest -= 1;
                 self.line("}");
                 return Ok(());
             }
         }
-        if ins.k == K::Pmux && nwords(ins.w) == 1 && ins.c <= 64 {
+        if ins.k == K::Pmux && nwords(ins.w) == 1 && ins.c <= 64 && self.nest + 3 <= MAX_NEST {
             // A one-hot multiplexer: each input's cone only in its case.
             let cases: Vec<u32> =
                 p.aux.lists[ins.x as usize..ins.x as usize + ins.c as usize].to_vec();
@@ -882,14 +890,17 @@ impl Emitter<'_> {
                     self.tree(c)?;
                 }
                 let vd = self.w(ins.d);
+                // An arm sits in a block, a switch and a case.
                 let arm = |e: &mut Self, slot: u32| -> Result<(), String> {
                     e.indent += 1;
+                    e.nest += 3;
                     for c in of(slot) {
                         e.tree(c)?;
                     }
                     let line = format!("{vd} = {};", e.w(slot));
                     e.line(&line);
                     e.indent -= 1;
+                    e.nest -= 3;
                     Ok(())
                 };
                 self.line(&format!("{{ uint64_t s = {} & {};", self.w(ins.b), hex(mask(ins.c))));
@@ -1234,6 +1245,7 @@ pub fn emit(p: &Program, prefix: &str) -> Result<CModel, String> {
         out: String::new(),
         indent: 0,
         tmp: 0,
+        nest: 0,
         on_write: Vec::new(),
     };
 

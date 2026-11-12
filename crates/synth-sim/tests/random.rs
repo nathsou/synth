@@ -952,3 +952,71 @@ fn random_designs_in_c() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A long chain of multiplexers, each reading the last (an `if`/`else if`
+/// chain), nests branches in the C model: no deeper than C compilers
+/// accept (clang counts 256 brackets by default).
+#[test]
+fn deep_multiplexer_chains_in_c() {
+    let mut m = Module::new("top");
+    let id = m.add_wire("s", 64);
+    m.wires[id].port = Some((PortDir::Input, 0));
+    let s = m.wire_sig(id);
+    let id = m.add_wire("y", 8);
+    m.wires[id].port = Some((PortDir::Output, 1));
+    let y = m.wire_sig(id);
+    let n = 300;
+    let mut prev = Sig::from_const(&LogicVec::from_u64(0xa5, 8));
+    for i in 0..n {
+        let out = if i + 1 == n { y.clone() } else { m.new_sig(8) };
+        let c = Sig::from_const(&LogicVec::from_u64(i as u64, 8));
+        let kind = CellKind::Mux { a: c, b: prev, s: s.0[i % 64], y: out.clone(), ternary: false };
+        m.add_cell(format!("m{i}"), kind);
+        prev = out;
+    }
+    let sim = Sim::new(&m, &Options { four_state: false, prune: false, optimize: false }).unwrap();
+    let model = synth_sim::emit_c::emit(sim.program(), "top").unwrap();
+    let dir = std::env::temp_dir().join(format!("synth-sim-deep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("top.h"), &model.header).unwrap();
+    std::fs::write(dir.join("top.c"), &model.source).unwrap();
+    let values = [0u64, u64::MAX, 0x0123_4567_89ab_cdef, u64::MAX << 1, 1 << 63];
+    let mut main = String::from(
+        "#include <stdio.h>\n#include \"top.h\"\nint main(void) {\n  static top_t m;\n  top_init(&m);\n",
+    );
+    let mut want = String::new();
+    let mut sim = sim;
+    let (ss, ys) = (sim.signal("s").unwrap(), sim.signal("y").unwrap());
+    for v in values {
+        main.push_str(&format!(
+            "  top_set_s(&m, {v}ull); top_eval(&m); printf(\"%u\\n\", (unsigned)top_get_y(&m));\n"
+        ));
+        sim.poke(&ss, v);
+        sim.eval();
+        want.push_str(&format!("{}\n", sim.peek(&ys).unwrap()));
+    }
+    main.push_str("  return 0;\n}\n");
+    std::fs::write(dir.join("main.c"), main).unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let mut ran = false;
+    for cc in [cc.as_str(), "clang"] {
+        let exe = dir.join("sim");
+        let Ok(out) = std::process::Command::new(cc)
+            .args(["-O1", "-w", "-o"])
+            .arg(&exe)
+            .arg(dir.join("main.c"))
+            .arg(dir.join("top.c"))
+            .output()
+        else {
+            continue;
+        };
+        assert!(out.status.success(), "{cc}: {}", String::from_utf8_lossy(&out.stderr));
+        let run = std::process::Command::new(&exe).output().unwrap();
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), want, "{cc}");
+        ran = true;
+    }
+    if !ran {
+        eprintln!("no C compiler: skipped");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
