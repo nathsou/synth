@@ -203,7 +203,13 @@ pub fn decode_full(cfg: &Config, arch: &Arch, pins: &PinConstraints) -> Result<D
                 let lout = db
                     .node_by_name(x, y, &format!("lutff_{z}/lout"))
                     .filter(|l| size[d.uf.find(l.raw()) as usize] > 1);
-                if bits.iter().any(|&b| b) || lout.is_some() {
+                // A cell whose output is routed is in use even when its
+                // table is all zeros (a constant 0).
+                let routed = bel
+                    .pins
+                    .iter()
+                    .any(|p| p.name == "O" && size[d.uf.find(p.node.raw()) as usize] > 1);
+                if bits.iter().any(|&b| b) || lout.is_some() || routed {
                     lcs.push(LcInfo { bel: bi, bits, lout });
                 }
             }

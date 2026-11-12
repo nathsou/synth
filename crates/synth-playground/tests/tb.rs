@@ -281,6 +281,14 @@ fn truth_table_bits(pins: &str) {
         bits.iter().map(|&b| Json::Arr(vec![x.clone(), y.clone(), (b as f64).into()])).collect(),
     );
     assert_eq!(truth(all), [1, 0, 0, 1]);
+    // An empty table is a constant 0, and the cell, still routed, is kept.
+    let clear = Json::Arr(
+        bits.iter()
+            .filter(|b| set.contains(b))
+            .map(|&b| Json::Arr(vec![x.clone(), y.clone(), (b as f64).into()]))
+            .collect(),
+    );
+    assert_eq!(truth(clear), [0, 0, 0, 0]);
     // The physical input that carries `a`: a table that copies it makes y = a.
     let nets = out.at(&["chip", "nets"]).as_array();
     let cells = out.at(&["chip", "cells"]).as_array();
