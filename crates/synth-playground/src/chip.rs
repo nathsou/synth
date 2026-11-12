@@ -200,6 +200,25 @@ pub fn chip(imp: &Implementation, opts: &FlowOptions) -> (Json, Json) {
         {
             j.set("pin", p);
         }
+        // Where the cell's 16 LUT bits are in its tile's configuration
+        // (`row × width + column`, as the bitstream view numbers them), truth
+        // table bit 0 first, and its carry and flip-flop enables.
+        if bel.kind == BelKind::Lc
+            && let Some(t) = db.template_at(bel.x as usize, bel.y as usize)
+            && let Some(e) = t.config(&format!("LC_{}", bel.z))
+        {
+            let w = die.tile_kind(bel.x as usize, bel.y as usize).config_width();
+            let at =
+                |k: usize| e.bits.get(k).map(|b| Json::from(b.row as usize * w + b.col as usize));
+            let lut: Option<Vec<Json>> = LUT_PERM.iter().map(|&k| at(k)).collect();
+            if let Some(lut) = lut {
+                j.set("lut_bits", lut);
+            }
+            if let (Some(c), Some(f)) = (at(8), at(9)) {
+                j.set("carry_bit", c);
+                j.set("dff_bit", f);
+            }
+        }
         if let Some(g) = imp.placement.cell_global.get(&c) {
             j.set("global", *g);
         }

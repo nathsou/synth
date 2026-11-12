@@ -202,6 +202,72 @@ fn a_bitstream_decoded_back_to_cells_runs_and_a_flipped_bit_breaks_it() {
 }
 
 #[test]
+fn a_logic_cell_reports_where_its_truth_table_lives() {
+    // An XOR in one logic cell: inverting every bit of its truth table, by
+    // flipping the tile bits the cell reports, makes it an XNOR.
+    let top = "module top(in a: bool, in b: bool, out y: bool) {\n    y = a ^ b;\n}\n";
+    let pins = "set_io a 1\nset_io b 2\nset_io y 56\n";
+    let req = Json::obj()
+        .with("files", files(top))
+        .with("part", "hx1k")
+        .with("package", "vq100")
+        .with("pins", pins);
+    let out = call("run", req);
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+    let lc = out
+        .at(&["chip", "cells"])
+        .as_array()
+        .iter()
+        .find(|c| c.at(&["bel"]).as_str() == Some("lc"))
+        .expect("a logic cell")
+        .clone();
+    let bits: Vec<i64> =
+        lc.at(&["lut_bits"]).as_array().iter().map(|b| b.as_i64().unwrap()).collect();
+    assert_eq!(bits.len(), 16);
+    let (x, y) = (lc.at(&["x"]).clone(), lc.at(&["y"]).clone());
+    let tile = out
+        .at(&["bitstream", "tiles"])
+        .as_array()
+        .iter()
+        .find(|t| t.at(&["x"]) == &x && t.at(&["y"]) == &y)
+        .expect("the cell's tile")
+        .clone();
+    let set: Vec<i64> = tile.at(&["set"]).as_array().iter().map(|b| b.as_i64().unwrap()).collect();
+    // The truth table's set bits are exactly the cell's LUT bits that are set.
+    let lut: u32 =
+        bits.iter().enumerate().filter(|(_, b)| set.contains(b)).map(|(i, _)| 1 << i).sum();
+    assert_eq!(lut.count_ones(), 8, "an XOR of two of the four inputs: {lut:04x}");
+    let truth = |flips: Json| {
+        let s = call(
+            "tb_start",
+            Json::obj()
+                .with("bitstream", out.at(&["bin"]).clone())
+                .with("part", "hx1k")
+                .with("package", "vq100")
+                .with("pins", pins)
+                .with("flips", flips),
+        );
+        assert_eq!(s.at(&["ok"]).as_bool(), Some(true), "{}", s.dump());
+        let mut got = vec![];
+        for (a, b) in [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+            let ops = Json::Arr(vec![
+                Json::obj().with("set", Json::obj().with("a", a).with("b", b)),
+                Json::obj().with("read", Json::Arr(vec!["y".into()])),
+            ]);
+            let r = call("tb_run", Json::obj().with("id", s.at(&["id"]).clone()).with("ops", ops));
+            assert_eq!(r.at(&["ok"]).as_bool(), Some(true), "{}", r.dump());
+            got.push(r.at(&["reads"]).as_array()[0].at(&["values", "y"]).as_i64().unwrap());
+        }
+        got
+    };
+    assert_eq!(truth(Json::Arr(vec![])), [0, 1, 1, 0]);
+    let all = Json::Arr(
+        bits.iter().map(|&b| Json::Arr(vec![x.clone(), y.clone(), (b as f64).into()])).collect(),
+    );
+    assert_eq!(truth(all), [1, 0, 0, 1]);
+}
+
+#[test]
 fn a_run_can_trace_its_placement_and_routing() {
     let top = "module top(in clk: clock, in en: bool @clk, out q: uint<8>) {\n    reg c: uint<8> = 0;\n    if en { c := c +% 1; }\n    q = c;\n}\n";
     let req = Json::obj()

@@ -306,7 +306,10 @@ fragment, so it is not sent to any server).
   drops the session. Simulation is two-state, as Weft defines it. A
   session can also run what an iCE40 bitstream implements, decoded back to
   cells (`tb_start` with `bitstream`, as `run` returns it, and the pins),
-  with configuration bits flipped first if the request names them.
+  with configuration bits flipped first if the request names them. An
+  iCE40 logic cell in `run`'s chip names the tile bits of its truth table
+  (`lut_bits`, bit i of the LUT first), carry and flip-flop enables, so a
+  page can program a cell by hand.
 - `web/ftdi.js` drives an FTDI bridge over WebUSB (MPSSE mode, status bytes
   stripped from reads); `web/program.js` holds the protocols, SPI flash
   writing for iCE40 and JTAG configuration for Artix-7, over any `write`/`read`
