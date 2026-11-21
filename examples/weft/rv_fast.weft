@@ -242,7 +242,15 @@ fn pick(
     rf: uint<32>,
     alt: uint<32>,
 ) -> uint<32> {
-    (mask(s.es) & es) | (mask(s.esh) & esh) | uint<32>((s.eslt && eslt).bits()) | (mask(s.eo) & eo) | (mask(s.m) & m) | (mask(s.w) & w) | (mask(s.x) & x) | (mask(s.rf) & rf) | (mask(s.alt) & alt)
+    (mask(s.es) & es)
+        | (mask(s.esh) & esh)
+        | uint<32>((s.eslt && eslt).bits())
+        | (mask(s.eo) & eo)
+        | (mask(s.m) & m)
+        | (mask(s.w) & w)
+        | (mask(s.x) & x)
+        | (mask(s.rf) & rf)
+        | (mask(s.alt) & alt)
 }
 
 /// Where the bytes of a loaded value come from, one-hot: byte lane 0 takes
@@ -282,9 +290,9 @@ fn lanes(load: bool, funct3: uint<3>, offset: uint<2>) -> Lanes {
     }
 }
 
-/// A loaded value, from the lanes and the word read.
-/// Byte `k` of a word read is the RAM's, or the store's before if `f[k]`:
-/// the selects arrive before the RAM's data, which goes through two LUTs.
+/// A loaded value, from the lanes and the word read: its byte `k` is the
+/// RAM's, or that of the store before it if `f[k]` (`s`). The selects
+/// arrive before the RAM's data, which goes through two LUTs.
 fn align(l: Lanes, w: uint<32>, f: uint<4>, s: uint<32>) -> uint<32> {
     var b0: uint<8> = 0;
     var b1: uint<8> = 0;
@@ -324,9 +332,8 @@ fn counter(c: uint<2>, taken: bool) -> uint<2> {
 /// bits of index of the branch target buffer (at most PC_BITS - 3).
 module rv_fast<PC_BITS: int = 12, RAM_BITS: int = 10, BTB_BITS: int = 8>(
     // The instruction memory: the word at `iaddr` comes on `idata` in the
-    // cycle after one with `ien` high (a block RAM's registered read).
+    // next cycle (a block RAM's registered read).
     out iaddr: uint<PC_BITS - 2>,
-    out ien: bool,
     in  idata: uint<32>,
     // The data RAM: read in EX, the word at `daddr` comes on `drdata` in
     // the next cycle; written in MEM, the bytes set in `dwe` of the word at
@@ -489,7 +496,6 @@ module rv_fast<PC_BITS: int = 12, RAM_BITS: int = 10, BTB_BITS: int = 8>(
     let fetch = if flush { m_target } else if hit { btb_q[PW - 1:0] } else { pc +% 1 };
     pc := if replay { d_pc } else if jump { if dec.ret { ras[0] } else { target } } else { fetch };
     iaddr = pc;
-    ien = true;
     btb_q := btb[fetch[BB - 1:0]];
     bht_q := bht[fetch];
     btb_ok := !jump && !replay;
@@ -686,7 +692,7 @@ module top<
     inst dev = devices<CLKS_PER_BIT>();
 
     reg instr: uint<32> init 0;
-    if cpu.ien { instr := rom[cpu.iaddr]; }
+    instr := rom[cpu.iaddr];
     cpu.idata = instr;
 
     reg word: uint<32> init 0;

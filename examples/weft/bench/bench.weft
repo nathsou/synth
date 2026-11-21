@@ -52,7 +52,7 @@ module bench<
     inst dev = bench_devices<CLKS_PER_BIT>();
 
     reg instr: uint<32> init 0;
-    if cpu.ien { instr := rom[cpu.iaddr]; }
+    instr := rom[cpu.iaddr];
     cpu.idata = instr;
 
     reg word: uint<32> init 0;
