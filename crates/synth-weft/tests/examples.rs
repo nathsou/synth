@@ -234,6 +234,64 @@ fn riscv_pipelined_runs_the_program() {
 }
 
 #[test]
+fn riscv_fast_runs_the_program() {
+    let (_, text) = run_riscv("examples/weft/rv_fast.weft", 60_000);
+    assert_eq!(text, riscv_expected());
+}
+
+/// What bench.c prints (the checksums from `cc -DHOST bench.c`), up to the
+/// cycle count.
+const BENCH_EXPECTED: &str =
+    "c8051c82 a22376ca 0c41a0ed 4eae9570 01180194 0017fe00 ffffa099 aa5fa60f\ncycles ";
+
+/// Runs examples/weft/bench on rv_fast until it has printed its results,
+/// and gives the cycles and instructions between its marks (the LEDs at 1,
+/// then 2) with the text printed.
+fn run_bench() -> (u64, u64, String) {
+    let m = compile_files(
+        &[
+            "examples/weft/bench/bench.weft",
+            "examples/weft/rv_fast.weft",
+            "examples/weft/rv32i.weft",
+            "examples/weft/rv_program.weft",
+            "examples/weft/uart.weft",
+        ],
+        &[],
+        Some("bench"),
+        &[("CLKS_PER_BIT", "4")],
+    );
+    let mut s = Sim::new(m);
+    let (mut cycles, mut instructions) = (0, 0);
+    let mut line = Vec::new();
+    for _ in 0..2_000_000 {
+        let led = s.peek("led").unwrap();
+        if led == 1 {
+            cycles += 1;
+            instructions += s.peek("cpu.m_valid").unwrap();
+        }
+        line.push(s.peek("tx").unwrap());
+        if led == 3 {
+            break;
+        }
+        s.step();
+    }
+    (cycles, instructions, String::from_utf8_lossy(&uart_decode(&line, 4)).into_owned())
+}
+
+#[test]
+fn riscv_fast_runs_the_benchmark() {
+    let (cycles, instructions, text) = run_bench();
+    assert!(text.starts_with(BENCH_EXPECTED), "{text}");
+    // The system's own count, printed, is the same as the simulation's.
+    let counted = u64::from_str_radix(text[BENCH_EXPECTED.len()..].trim(), 16).unwrap();
+    assert!(counted.abs_diff(cycles) < 8, "{counted} {cycles}");
+    eprintln!(
+        "{cycles} cycles, {instructions} instructions, CPI {:.3}",
+        cycles as f64 / instructions as f64
+    );
+}
+
+#[test]
 fn breathe_brightens_then_dims() {
     let m = compile_files(&["examples/weft/breathe.weft"], &[], None, &[("STEP", "256")]);
     let mut s = Sim::new(m);

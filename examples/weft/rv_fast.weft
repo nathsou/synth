@@ -1,0 +1,706 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// A fast RV32I core: six pipeline stages laid out for the iCE40's LUT4s,
+// carry chains and block RAMs, so that no stage has more than a carry
+// chain and a few LUTs between two registers.
+//
+//   IF   the PC addresses the instruction ROM; the branch target buffer
+//        and the branch history table, read a cycle earlier, choose the
+//        next PC
+//   ID   decode; the register file is addressed; the source of each
+//        operand is chosen (the register file, or one of the four
+//        instructions ahead); a taken branch IF did not predict is taken
+//   RF   the operands are read and forwarded into EX's operand registers
+//   EX   the ALU; branches are checked; loads and stores address the RAM
+//   MEM  loads are aligned; devices are read and written; a mispredicted
+//        branch or a JALR redirects the fetch
+//   WB   the register file is written
+//
+// - The sources of each operand are found in ID and registered one-hot, so
+//   that RF's multiplexers are a flat AND-OR. An instruction can use the
+//   result of the one just before: the sum, a shift or a logic result goes
+//   from EX straight into the operand registers. Results known only in MEM
+//   (loads, SLT) make an instruction that uses them right after wait one
+//   cycle in ID.
+// - Branches and JALs are predicted in IF: the BTB has the targets of the
+//   taken ones, the BHT a two-bit counter for each instruction (3 for
+//   JALs). Both are read with the next PC, so a predicted branch costs no
+//   cycle. A branch or JAL whose target IF does not know yet is taken from
+//   ID, at the cost of a cycle. Branches are checked in EX, and a
+//   misprediction (or a JALR) redirects the fetch from MEM, four cycles
+//   after the branch was fetched.
+// - Loads and stores have their own adder, for the 12 bits of address the
+//   RAM and the device decoding need.
+// - The PC counts words and has only the bits the instruction memory
+//   needs (PC_BITS bits of byte address).
+
+/// What an instruction does after ID.
+struct Ctl {
+    rd: uint<5>,
+    funct3: uint<3>,
+    writes: bool, // writes rd (never x0)
+    late: bool,   // its result is known only in MEM: loads
+    sum: bool,    // its result is the adder's: LUI, AUIPC, ADD(I), SUB
+    link: bool,   // its result is the return address: JAL, JALR
+    logic: bool,  // XOR, OR, AND (immediate or not), selected by funct3
+    shift: bool,  // SLL, SRL, SRA (immediate or not), selected by funct3
+    arith: bool,  // bit 30: SRA rather than SRL
+    slt: bool,    // SLT(I)(U), funct3[0] for unsigned
+    load: bool,
+    store: bool,
+    branch: bool,
+    jalr: bool,
+}
+
+/// Decoded in ID, for ID and RF.
+struct Dec {
+    ctl: Ctl,
+    uses1: bool, // reads rs1
+    uses2: bool, // reads rs2
+    a_alt: bool, // the first operand is the PC (AUIPC) or 0 (LUI), not rs1
+    a_pc: bool,
+    b_imm: bool, // the second operand is the immediate, not rs2
+    inv_b: bool, // the second operand is inverted and the carry in set: a - b
+    imm: uint<32>,
+    offset: uint<12>, // of a load or store
+    branch: bool,
+    jal: bool,
+    call: bool, // JAL or JALR linking to x1 or x5: pushes the return address
+    ret: bool,  // JALR x0, 0(x1 or x5): pops it
+}
+
+/// Which value an operand takes in RF: exactly one is set.
+struct Sel {
+    es: bool,  // the result of the instruction in EX, the adder's sum
+    esh: bool, // the result of the instruction in EX, a shift
+    eslt: bool, // the result of the instruction in EX, an SLT
+    eo: bool,  // the result of the instruction in EX, another one
+    m: bool,   // ... in MEM
+    w: bool,   // ... in WB
+    x: bool,   // ... that wrote the register file in the previous cycle
+    rf: bool,  // the register file
+    alt: bool, // something else: the immediate, or the PC
+}
+
+const NOP_CTL: Ctl = Ctl {
+    rd: 0,
+    funct3: 0,
+    writes: false,
+    late: false,
+    sum: false,
+    link: false,
+    logic: false,
+    shift: false,
+    arith: false,
+    slt: false,
+    load: false,
+    store: false,
+    branch: false,
+    jalr: false,
+};
+
+const NO_SEL: Sel = Sel { es: false, esh: false, eslt: false, eo: false, m: false, w: false, x: false, rf: true, alt: false };
+
+fn decode_fast(i: uint<32>) -> Dec {
+    let f3 = i[14:12];
+    var d: Dec = Dec {
+        ctl: Ctl {
+            rd: i[11:7],
+            funct3: f3,
+            writes: false,
+            late: false,
+            sum: false,
+            link: false,
+            logic: false,
+            shift: false,
+            arith: i[30],
+            slt: false,
+            load: false,
+            store: false,
+            branch: false,
+            jalr: false,
+        },
+        uses1: true,
+        uses2: false,
+        a_alt: false,
+        a_pc: false,
+        b_imm: true,
+        inv_b: false,
+        imm: sext(i[31:20]),
+        offset: i[31:20],
+        branch: false,
+        jal: false,
+        call: false,
+        ret: false,
+    };
+    let link_rd = i[11:7] == 1 || i[11:7] == 5;
+    match i[6:0] {
+        0b0110111 => { // LUI
+            d.imm = concat(i[31:12], uint<12>(0));
+            d.a_alt = true;
+            d.uses1 = false;
+            d.ctl.sum = true;
+            d.ctl.writes = true;
+        }
+        0b0010111 => { // AUIPC
+            d.imm = concat(i[31:12], uint<12>(0));
+            d.a_alt = true;
+            d.a_pc = true;
+            d.uses1 = false;
+            d.ctl.sum = true;
+            d.ctl.writes = true;
+        }
+        0b1101111 => { // JAL
+            d.jal = true;
+            d.call = link_rd;
+            d.uses1 = false;
+            d.ctl.link = true;
+            d.ctl.writes = true;
+        }
+        0b1100111 => { // JALR
+            d.ctl.jalr = true;
+            d.call = link_rd;
+            d.ret = i[11:7] == 0 && (i[19:15] == 1 || i[19:15] == 5) && i[31:20] == 0;
+            d.ctl.link = true;
+            d.ctl.writes = true;
+        }
+        0b1100011 => { // BEQ, BNE, BLT, BGE, BLTU, BGEU
+            d.branch = true;
+            d.ctl.branch = true;
+            d.b_imm = false;
+            d.inv_b = true;
+            d.uses2 = true;
+        }
+        0b0000011 => { // LB, LH, LW, LBU, LHU
+            d.ctl.load = true;
+            d.ctl.late = true;
+            d.ctl.writes = true;
+        }
+        0b0100011 => { // SB, SH, SW: the second operand is the data
+            d.offset = concat(i[31:25], i[11:7]);
+            d.ctl.store = true;
+            d.b_imm = false;
+            d.uses2 = true;
+        }
+        0b0010011 | 0b0110011 => { // ADDI … ANDI, ADD … AND
+            let is_reg = i[5];
+            d.ctl.writes = true;
+            if is_reg {
+                d.b_imm = false;
+                d.uses2 = true;
+            }
+            match f3 {
+                0 => {
+                    d.ctl.sum = true;
+                    d.inv_b = is_reg && i[30]; // SUB
+                }
+                1 | 5 => d.ctl.shift = true;
+                2 | 3 => {
+                    d.ctl.slt = true;
+                    d.inv_b = true;
+                }
+                _ => d.ctl.logic = true;
+            }
+        }
+        _ => d.uses1 = false; // FENCE, ECALL, EBREAK and the rest: no-ops
+    }
+    if d.ctl.rd == 0 { d.ctl.writes = false; }
+    d
+}
+
+/// The offset of a JAL, or of a branch, in bytes.
+fn jal_offset(i: uint<32>) -> uint<32> { sext(concat(i[31], i[19:12], i[20], i[30:21], 0b0)) }
+fn branch_offset(i: uint<32>) -> uint<32> { sext(concat(i[31], i[7], i[30:25], i[11:8], 0b0)) }
+
+/// The one-hot choice among the instructions ahead (`e` the closest, `c`
+/// what it does) and the register file, unless the operand is something
+/// else (`alt`).
+fn select(e: bool, c: Ctl, m: bool, w: bool, x: bool, alt: bool) -> Sel {
+    Sel {
+        es: !alt && e && c.sum,
+        esh: !alt && e && c.shift,
+        eslt: !alt && e && c.slt,
+        eo: !alt && e && !c.sum && !c.shift && !c.slt,
+        m: !alt && !e && m,
+        w: !alt && !e && !m && w,
+        x: !alt && !e && !m && !w && x,
+        rf: !alt && !e && !m && !w && !x,
+        alt: alt,
+    }
+}
+
+fn mask(b: bool) -> uint<32> { b.bits().replicate(32) }
+
+fn pick(
+    s: Sel,
+    es: uint<32>,
+    esh: uint<32>,
+    eslt: bool,
+    eo: uint<32>,
+    m: uint<32>,
+    w: uint<32>,
+    x: uint<32>,
+    rf: uint<32>,
+    alt: uint<32>,
+) -> uint<32> {
+    (mask(s.es) & es) | (mask(s.esh) & esh) | uint<32>((s.eslt && eslt).bits()) | (mask(s.eo) & eo) | (mask(s.m) & m) | (mask(s.w) & w) | (mask(s.x) & x) | (mask(s.rf) & rf) | (mask(s.alt) & alt)
+}
+
+/// Where the bytes of a loaded value come from, one-hot: byte lane 0 takes
+/// the word's byte `b0`, lane 1 the byte `b1` (or the sign, if `ext1`),
+/// lanes 2 and 3 the word's upper half if `hi` (or the sign). The sign is
+/// the top bit of the byte `sx` (0 for LBU, LHU). All 0 but for loads from
+/// the RAM.
+struct Lanes {
+    b0: uint<4>,
+    b1: uint<4>,
+    ext1: bool,
+    hi: bool,
+    sx: uint<4>,
+}
+
+const NO_LANES: Lanes = Lanes { b0: 0, b1: 0, ext1: false, hi: false, sx: 0 };
+
+fn lanes(load: bool, funct3: uint<3>, offset: uint<2>) -> Lanes {
+    let at = uint<4>(1) << offset;
+    let signed = !funct3[2];
+    match funct3[1:0] {
+        0 => Lanes { // LB, LBU
+            b0: if load { at } else { 0 },
+            b1: 0,
+            ext1: load,
+            hi: false,
+            sx: if load && signed { at } else { 0 },
+        },
+        1 => Lanes { // LH, LHU
+            b0: if load { at } else { 0 },
+            b1: if load { at << 1 } else { 0 },
+            ext1: false,
+            hi: false,
+            sx: if load && signed { at << 1 } else { 0 },
+        },
+        _ => Lanes { b0: if load { 0b0001 } else { 0 }, b1: if load { 0b0010 } else { 0 }, ext1: false, hi: load, sx: 0 },
+    }
+}
+
+/// A loaded value, from the lanes and the word read.
+/// Byte `k` of a word read is the RAM's, or the store's before if `f[k]`:
+/// the selects arrive before the RAM's data, which goes through two LUTs.
+fn align(l: Lanes, w: uint<32>, f: uint<4>, s: uint<32>) -> uint<32> {
+    var b0: uint<8> = 0;
+    var b1: uint<8> = 0;
+    var hi: uint<16> = 0;
+    var sign = false;
+    for k in 0..4 {
+        let wk = w[k * 8 + 7:k * 8];
+        let sk = s[k * 8 + 7:k * 8];
+        let fw = !f[k];
+        let fs = f[k];
+        b0 = b0 | (mask8(l.b0[k] && fw) & wk) | (mask8(l.b0[k] && fs) & sk);
+        b1 = b1 | (mask8(l.b1[k] && fw) & wk) | (mask8(l.b1[k] && fs) & sk);
+        sign = sign || (l.sx[k] && (if fs { sk[7] } else { wk[7] }));
+        if k >= 2 {
+            let h = (mask8(l.hi && fw) & wk) | (mask8(l.hi && fs) & sk);
+            hi[(k - 2) * 8 + 7:(k - 2) * 8] = h;
+        }
+    }
+    let lane1 = b1 | mask8(l.ext1 && sign);
+    let upper = hi | sign.bits().replicate(16);
+    concat(upper, lane1, b0)
+}
+
+fn mask8(b: bool) -> uint<8> { b.bits().replicate(8) }
+
+/// A two-bit counter moved towards `taken`.
+fn counter(c: uint<2>, taken: bool) -> uint<2> {
+    if taken {
+        if c == 3 { 3 } else { c +% 1 }
+    } else {
+        if c == 0 { 0 } else { c -% 1 }
+    }
+}
+
+/// The core. PC_BITS: bits of instruction address (the ROM holds
+/// 2^(PC_BITS - 2) words); RAM_BITS: bits of RAM word address; BTB_BITS:
+/// bits of index of the branch target buffer (at most PC_BITS - 3).
+module rv_fast<PC_BITS: int = 12, RAM_BITS: int = 10, BTB_BITS: int = 8>(
+    // The instruction memory: the word at `iaddr` comes on `idata` in the
+    // cycle after one with `ien` high (a block RAM's registered read).
+    out iaddr: uint<PC_BITS - 2>,
+    out ien: bool,
+    in  idata: uint<32>,
+    // The data RAM: read in EX, the word at `daddr` comes on `drdata` in
+    // the next cycle; written in MEM, the bytes set in `dwe` of the word at
+    // `dwaddr` take `dwdata`.
+    out daddr: uint<RAM_BITS>,
+    out dwaddr: uint<RAM_BITS>,
+    out dwe: uint<4>,
+    out dwdata: uint<32>,
+    in  drdata: uint<32>,
+    // The devices (addresses with bit 28 set), in MEM: `io_rdata` is read
+    // by loads, `io_write` is a store; `io_addr` has the low address bits.
+    out io_write: bool,
+    out io_addr: uint<12>,
+    out io_wdata: uint<32>,
+    in  io_rdata: uint<32>,
+) {
+    const PW: int = PC_BITS - 2; // bits of the PC, which counts words
+    assert(RAM_BITS <= 10, "the RAM has at most 4 KiB (addresses of 12 bits)");
+    // The branch target buffer: for the taken branches and JALs at 2^BB
+    // PCs, a valid bit, the rest of the PC (TW bits) and the target. The
+    // branch history table: a two-bit counter for every instruction (3 for
+    // JALs), weakly not taken to begin with.
+    const BB: int = min(BTB_BITS, PW - 1);
+    const TW: int = PW - BB;
+    const EW: int = 1 + TW + PW;
+
+    mem regs1: [uint<32>; 32]; // two copies of the register file, one per read port
+    mem regs2: [uint<32>; 32];
+    mem btb: [uint<EW>; 2 ** BB];
+    mem bht: [uint<2>; 2 ** PW] init [1; 2 ** PW];
+
+    // IF
+    reg pc: uint<PW> = 0;
+    reg btb_q: uint<EW> init 0; // the entries of `pc`, read with the next PC
+    reg bht_q: uint<2> init 1;
+    reg btb_ok: bool = false;   // ... unless ID redirected the fetch
+
+    // ID: the instruction is `idata`.
+    reg d_valid: bool = false;
+    reg d_pc: uint<PW> init 0;
+    reg d_hit: bool init false; // predicted taken in IF
+    reg d_bht: uint<2> init 1;
+    // The return address stack: the return addresses of the calls in
+    // progress, the latest first, as ID sees them.
+    reg ras: [uint<PW>; 4] init [0; 4];
+    reg replayed: bool = false; // the instruction arriving is fetched again
+    reg again: bool = false;    // the instruction in ID was replayed
+    reg saved_bht: uint<2> init 1; // ... and this is its counter
+
+    // RF
+    reg r_valid: bool = false;
+    reg r_ctl: Ctl init NOP_CTL;
+    reg r_sa: Sel init NO_SEL;
+    reg r_sb: Sel init NO_SEL;
+    reg r_rf1: uint<32> init 0;
+    reg r_rf2: uint<32> init 0;
+    reg r_alt: uint<32> init 0; // the first operand when not rs1
+    reg r_imm: uint<32> init 0;
+    reg r_offset: uint<12> init 0;
+    reg r_inv: bool init false;
+    reg r_link: uint<32> init 0;
+    reg r_pred: bool init false; // predicted taken
+    reg r_other: uint<PW> init 0; // where the branch goes if mispredicted
+    reg r_target: uint<PW> init 0; // where it goes if taken
+    reg r_bht: uint<2> init 1;
+    reg r_pc: uint<PW> init 0;
+    reg r_ret: bool init false; // a return taken from ID, to `r_other`
+
+    // EX
+    reg e_valid: bool = false;
+    reg e_ctl: Ctl init NOP_CTL;
+    reg e_a: uint<32> init 0;
+    reg e_b: uint<32> init 0;
+    reg e_offset: uint<12> init 0; // of a load or store; a store's data is b
+    reg e_cin: bool init false;
+    reg e_link: uint<32> init 0;
+    reg e_other: uint<PW> init 0;
+    // How a branch in EX is checked, set in RF: whether it compares for
+    // equality, signed, and whether its outcome is mispredicted when the
+    // comparison holds rather than when it does not.
+    reg e_br: bool = false; // a valid branch
+    reg e_jr: bool = false; // a valid JALR
+    reg e_ret: bool init false; // ... a return, predicted to go to e_other
+    reg e_keq: bool init false;
+    reg e_ksgn: bool init false;
+    reg e_kinv: bool init false;
+    reg e_target: uint<PW> init 0;
+    reg e_bht: uint<2> init 1;
+    reg e_pc: uint<PW> init 0;
+
+    // MEM
+    reg m_valid: bool = false;
+    reg m_ctl: Ctl init NOP_CTL;
+    reg m_result: uint<32> init 0;
+    reg m_addr: uint<12> init 0;
+    reg m_sd: uint<32> init 0;
+    reg m_dev: bool init false;  // a load or store addresses a device
+    reg m_lanes: Lanes init NO_LANES;
+    // A store to the RAM, written in MEM.
+    reg m_we: uint<4> = 0;
+    reg m_waddr: uint<RAM_BITS> init 0;
+    reg m_wdata: uint<32> init 0;
+    // The bytes of the word the load in MEM read that the store before it
+    // wrote at the same time, and what it wrote.
+    reg m_fwd: uint<4> init 0;
+    reg m_fwd_data: uint<32> init 0;
+    reg m_ioload: bool init false; // a load from a device
+    reg m_redirect: bool = false;
+    reg m_target: uint<PW> init 0;
+    // What the predictors learn, from the branch or JAL in MEM.
+    reg m_branch: bool = false;
+    reg m_jal: bool = false;
+    reg m_taken: bool init false;
+    reg m_pc: uint<PW> init 0;
+    reg m_jump_to: uint<PW> init 0;
+    reg m_bht: uint<2> init 1;
+
+    // WB
+    reg w_writes: bool = false;
+    reg w_rd: uint<5> init 0;
+    reg w_value: uint<32> init 0;
+
+    // The instruction that wrote the register file in the previous cycle.
+    reg x_value: uint<32> init 0;
+
+    let flush = m_redirect;
+
+    // ---------------------------------------------------------------- ID
+    let instr = idata;
+    let dec = decode_fast(instr);
+    let rs1 = instr[19:15];
+    let rs2 = instr[24:20];
+    // An instruction that uses the value of a load right before it is
+    // fetched again (and so waits two cycles): holding it in ID would make
+    // the decision reach the read enables of the ROM's block RAMs.
+    let late_rd = r_valid && r_ctl.writes && r_ctl.late;
+    let hazard = late_rd && ((dec.uses1 && r_ctl.rd == rs1) || (dec.uses2 && r_ctl.rd == rs2));
+    let replay = d_valid && hazard && !flush;
+    // Not predicted in IF (its target unknown), a JAL, or a branch the
+    // BHT predicts taken, is taken from ID.
+    let pred = d_hit || dec.jal || (dec.branch && d_bht[1]);
+    let act = d_valid && !replay && !flush;
+    let jump = act && ((pred && !d_hit) || dec.ret);
+    let offset = if dec.jal { jal_offset(instr) } else { branch_offset(instr) };
+    let target = d_pc +% offset[PC_BITS - 1:2];
+    let next = d_pc +% 1;
+
+    // Where each operand will be when this instruction is in RF.
+    let e1 = r_valid && r_ctl.writes && r_ctl.rd == rs1;
+    let m1 = e_valid && e_ctl.writes && e_ctl.rd == rs1;
+    let w1 = m_valid && m_ctl.writes && m_ctl.rd == rs1;
+    let x1 = w_writes && w_rd == rs1;
+    let e2 = r_valid && r_ctl.writes && r_ctl.rd == rs2;
+    let m2 = e_valid && e_ctl.writes && e_ctl.rd == rs2;
+    let w2 = m_valid && m_ctl.writes && m_ctl.rd == rs2;
+    let x2 = w_writes && w_rd == rs2;
+
+    // IF: the BTB's and BHT's entries for `pc` give the next PC.
+    let hit = btb_ok && btb_q[EW - 1] && btb_q[EW - 2:PW] == pc[PW - 1:BB] && bht_q[1];
+    let fetch = if flush { m_target } else if hit { btb_q[PW - 1:0] } else { pc +% 1 };
+    pc := if replay { d_pc } else if jump { if dec.ret { ras[0] } else { target } } else { fetch };
+    iaddr = pc;
+    ien = true;
+    btb_q := btb[fetch[BB - 1:0]];
+    bht_q := bht[fetch];
+    btb_ok := !jump && !replay;
+    d_valid := !flush && !jump && !replay;
+    d_pc := pc;
+    // A replayed instruction keeps its BHT counter; IF did not predict it.
+    replayed := replay;
+    if !replayed { saved_bht := d_bht; }
+    d_hit := !replayed && hit;
+    d_bht := if replayed { saved_bht } else { bht_q };
+
+    // Calls push their return address, returns pop it, the first time
+    // they are in ID (not when they come back after a replay).
+    again := replayed;
+    let once = d_valid && !flush && !again;
+    if once && dec.call {
+        ras := [next, ras[0], ras[1], ras[2]];
+    } else if once && dec.ret {
+        ras := [ras[1], ras[2], ras[3], ras[3]];
+    }
+
+    // ID to RF
+    r_valid := d_valid && !replay && !flush;
+    r_ctl := dec.ctl;
+    r_sa := select(e1, r_ctl, m1, w1, x1, dec.a_alt);
+    r_sb := select(e2, r_ctl, m2, w2, x2, dec.b_imm);
+    r_rf1 := regs1[rs1];
+    r_rf2 := regs2[rs2];
+    r_alt := if dec.a_pc { uint<32>(concat(d_pc, 0b00)) } else { 0 };
+    r_imm := dec.imm;
+    r_offset := dec.offset;
+    r_inv := dec.inv_b;
+    r_link := uint<32>(concat(next, 0b00));
+    r_pred := pred;
+    r_other := if dec.ret { ras[0] } else if pred { next } else { target };
+    r_ret := dec.ret;
+    r_target := target;
+    r_bht := d_bht;
+    r_pc := d_pc;
+
+    // ---------------------------------------------------------------- EX
+    let s33 = uint<33>(e_a) + e_b + e_cin.bits();
+    let sum = s33[31:0];
+    let logic = match e_ctl.funct3[1:0] {
+        2 => e_a | e_b,
+        3 => e_a & e_b,
+        _ => e_a ^ e_b,
+    };
+    let shl = e_ctl.shift && !e_ctl.funct3[2];
+    let fill = e_ctl.arith && e_a[31];
+    let right = (concat(fill, e_a).as_sint() >> e_b[4:0]).bits()[31:0];
+    let left = e_a << e_b[4:0];
+    let shifted = if shl { left } else { right };
+    // a - b is a + ~b + 1: the carry out is a >= b.
+    let ltu = !s33[32];
+    let same_sign = e_a[31] == e_b[31]; // b is inverted: the signs differ
+    let lt = ltu != same_sign;
+    let slt = if e_ctl.funct3[0] { ltu } else { lt };
+    // The results an instruction right after can use: the sum, the shift, or
+    // this.
+    let fast = if e_ctl.link { e_link } else { logic };
+
+    // ---------------------------------------------------------------- MEM
+    // A load's value, from the RAM (aligned by `m_lanes`) or a device.
+    let from_io = load_value(m_ctl.funct3, m_addr[1:0], io_rdata);
+    let m_value = align(m_lanes, drdata, m_fwd, m_fwd_data)
+        | (mask(m_ioload) & from_io)
+        | (mask(!m_ctl.load) & m_result);
+
+    // ---------------------------------------------------------------- RF
+    let va = pick(r_sa, sum, shifted, slt, fast, m_value, w_value, x_value, r_rf1, r_alt);
+    let vb = pick(r_sb, sum, shifted, slt, fast, m_value, w_value, x_value, r_rf2, r_imm);
+    e_valid := r_valid && !flush;
+    e_ctl := r_ctl;
+    e_a := va;
+    e_b := vb ^ mask(r_inv);
+    e_offset := r_offset;
+    e_cin := r_inv;
+    e_link := r_link;
+    e_other := r_other;
+    e_br := r_valid && !flush && r_ctl.branch;
+    e_jr := r_valid && !flush && r_ctl.jalr;
+    e_ret := r_ret;
+    e_keq := !r_ctl.funct3[2];
+    e_ksgn := r_ctl.funct3[2:1] == 0b10;
+    e_kinv := r_ctl.funct3[0] != r_pred;
+    e_target := r_target;
+    e_bht := r_bht;
+    e_pc := r_pc;
+
+    // ---------------------------------------------------------------- EX
+    let eq = (e_a ^ e_b).all();
+    // The comparison a branch makes (BNE, BGE and BGEU invert it).
+    let holds = if e_keq { eq } else { ltu != (e_ksgn && same_sign) };
+    let taken = holds != e_ctl.funct3[0];
+    let live = e_valid && !flush;
+    // A return is checked against where ID sent it.
+    let returned = e_ret && sum[PC_BITS - 1:2] == e_other;
+    m_redirect := !flush && ((e_br && holds != e_kinv) || (e_jr && !returned));
+    m_target := if e_ctl.jalr { sum[PC_BITS - 1:2] } else { e_other };
+    m_branch := live && e_ctl.branch;
+    m_jal := live && e_ctl.link && !e_ctl.jalr;
+    m_taken := taken;
+    m_pc := e_pc;
+    m_jump_to := e_target;
+    m_bht := e_bht;
+
+    // Loads and stores address the RAM, or a device: bit 28 of the address,
+    // rs1 + offset. The RAM needs the low 12 bits of it, and with a 12-bit
+    // offset, the carry into bit 28 needs only their carry out and rs1's
+    // bits 27:12.
+    let addr = uint<13>(e_a[11:0]) + e_offset;
+    let c12 = addr[12];
+    let neg = e_offset[11];
+    let c28 = if neg { c12 || e_a[27:12].any() } else { c12 && e_a[27:12].all() };
+    let to_device = e_a[28] != (neg != c28);
+    // A store writes the RAM from MEM, which is when the load after it
+    // reads it: that load takes the bytes the store writes.
+    let word_at = addr[RAM_BITS + 1:2];
+    daddr = word_at;
+    m_we := if live && e_ctl.store && !to_device { store_mask(e_ctl.funct3, addr[1:0]) } else { 0 };
+    m_waddr := word_at;
+    m_wdata := store_lanes(e_ctl.funct3, e_b);
+    m_fwd := if word_at == m_waddr { m_we } else { 0 };
+    m_fwd_data := m_wdata;
+
+    m_valid := live;
+    m_ctl := e_ctl;
+    m_result := (mask(e_ctl.sum) & sum)
+        | (mask(e_ctl.link) & e_link)
+        | (mask(e_ctl.logic) & logic)
+        | (mask(e_ctl.shift) & shifted)
+        | uint<32>((e_ctl.slt && slt).bits());
+    m_addr := addr[11:0];
+    m_sd := e_b;
+    m_dev := to_device;
+    m_lanes := lanes(e_ctl.load && !to_device, e_ctl.funct3, addr[1:0]);
+    m_ioload := e_ctl.load && to_device;
+
+    // ---------------------------------------------------------------- MEM
+    io_write = m_valid && m_ctl.store && m_dev;
+    dwaddr = m_waddr;
+    dwe = m_we;
+    dwdata = m_wdata;
+    io_addr = m_addr;
+    io_wdata = m_sd;
+    // The BHT learns where branches go and that JALs are taken; the BTB,
+    // the targets of the taken ones.
+    if m_branch || m_jal {
+        bht[m_pc] := if m_jal { 3 } else { counter(m_bht, m_taken) };
+    }
+    if m_jal || (m_branch && m_taken) {
+        btb[m_pc[BB - 1:0]] := concat(true, m_pc[PW - 1:BB], m_jump_to);
+    }
+    w_writes := m_valid && m_ctl.writes;
+    w_rd := m_ctl.rd;
+    w_value := m_value;
+
+    // ---------------------------------------------------------------- WB
+    if w_writes {
+        regs1[w_rd] := w_value;
+        regs2[w_rd] := w_value;
+    }
+    x_value := w_value;
+}
+
+/// The system: the core, its ROM (rv_program.weft) and RAM, the LEDs and
+/// the UART, as for the other cores.
+///
+/// CLK_HZ: the board's clock frequency. MAX_HZ: the fastest clock the core
+/// meets timing at on every board (the Alchitry Cu's iCE40 being the
+/// slowest); it runs at SYS_HZ, the slower of the two, from the board's PLL.
+/// CLKS_PER_BIT: for 115200 baud. DELAY: the pause between two runs of the
+/// program (see rv_program.weft).
+module top<
+    CLK_HZ: int = 12_000_000,
+    MAX_HZ: int = 90_000_000,
+    SYS_HZ: int = min(CLK_HZ, MAX_HZ),
+    CLKS_PER_BIT: int = SYS_HZ / 115200,
+    DELAY: int = 2000,
+>(
+    in  clk: clock,
+    out tx: bool,
+    out led: uint<8>,
+) {
+    inst pll = synth_pll<IN_HZ: CLK_HZ, OUT_HZ: SYS_HZ>(clk_in: clk);
+    domain raw { clock: pll.clk_out }
+    let rst = reset_sync(!pll.locked) @raw;
+    default domain sys { clock: pll.clk_out, reset: rst }
+
+    inst cpu = rv_fast<PC_BITS: 9, RAM_BITS: 8>();
+    mem rom: [uint<32>; 128] init program<128>(DELAY);
+    mem ram: [uint<32>; 256];
+    inst dev = devices<CLKS_PER_BIT>();
+
+    reg instr: uint<32> init 0;
+    if cpu.ien { instr := rom[cpu.iaddr]; }
+    cpu.idata = instr;
+
+    reg word: uint<32> init 0;
+    word := ram[cpu.daddr];
+    for i in 0..4 {
+        if cpu.dwe[i] { ram[cpu.dwaddr][i * 8 + 7:i * 8] := cpu.dwdata[i * 8 + 7:i * 8]; }
+    }
+    cpu.drdata = word;
+
+    dev.write = cpu.io_write;
+    dev.uart_port = cpu.io_addr[2];
+    dev.wdata = cpu.io_wdata;
+    cpu.io_rdata = dev.rdata;
+
+    tx = dev.tx;
+    led = dev.led;
+}

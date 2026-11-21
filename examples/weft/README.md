@@ -18,11 +18,12 @@ All of them are also in the [playground](../../docs/PLAYGROUND.md).
 | [`rv_single.weft`](rv_single.weft) | An RV32I core that runs one instruction per cycle; the ROM and register file in block RAM, read for the next instruction |
 | [`rv_multi.weft`](rv_multi.weft) | An RV32I core that takes five cycles per instruction, one per step: a `match` on an enum state (it just fits the Go Board's HX1K) |
 | [`rv_pipe.weft`](rv_pipe.weft) | An RV32I core in five pipeline stages, with forwarding, a load-use stall and branches resolved in EX |
+| [`rv_fast.weft`](rv_fast.weft) | An RV32I core built for speed on the iCE40: six pipeline stages of a carry chain and a few LUTs each, forwarding chosen a stage ahead, branches and JALs predicted by a branch target buffer and a history table, returns by a return address stack. 0.94 instructions per cycle on [`bench`](bench), at 98 MHz on the Alchitry Cu ([details](../../docs/RV_FAST.md)) |
 
-The three cores share [`rv32i.weft`](rv32i.weft) (decoder, ALU, load and
+The four cores share [`rv32i.weft`](rv32i.weft) (decoder, ALU, load and
 store lanes, the memory-mapped LEDs and UART, and an assembler written as
-functions) and run [`rv_program.weft`](rv_program.weft), a program assembled
-at compile time. It prints a few results, the Fibonacci numbers up to 610 and
+functions; `rv_fast` has a decoder of its own) and run
+[`rv_program.weft`](rv_program.weft), a program assembled at compile time. It prints a few results, the Fibonacci numbers up to 610 and
 their sum over the UART, one hexadecimal number per line, and shows each
 Fibonacci number on the LEDs.
 
@@ -36,15 +37,32 @@ synth build life.weft uart.weft --device hx1k --package vq100 --pcf go_board.pcf
 synth build rv_pipe.weft rv32i.weft rv_program.weft uart.weft --device hx8k --package ct256 --pcf hx8k_breakout.pcf -o rv_pipe.bin
 ```
 
-`rv_single.weft` and `rv_multi.weft` build like `rv_pipe.weft`. On the Go
-Board, `rv_multi.weft` needs `-P CLKS_PER_BIT=217 --top top` (for 25 MHz).
+`rv_single.weft`, `rv_multi.weft` and `rv_fast.weft` build like
+`rv_pipe.weft`. On the Go Board, `rv_multi.weft` needs `-P CLKS_PER_BIT=217
+--top top` (for 25 MHz). On the Alchitry Cu, `rv_fast.weft` runs at 90 MHz
+from the board's PLL:
+
+```sh
+synth build rv_fast.weft rv32i.weft rv_program.weft uart.weft --board alchitry-cu -P CLK_HZ=100000000 -o rv_fast.bin
+```
+
+[`bench/`](bench) is a benchmark in C for the RISC-V cores (checksums,
+sorting, a sieve, pointer chasing, string hashing, calls, multiplication in
+software and bit twiddling), built for rv32i with clang, and the system that
+runs it on `rv_fast` from an 8 KiB ROM and a 4 KiB RAM; it prints its
+results and the cycles it took over the UART:
+
+```sh
+cd bench && make   # rom.hex and ram.hex, already built
+synth build bench.weft ../rv_fast.weft ../rv32i.weft ../uart.weft ../rv_program.weft --top bench --board alchitry-cu -o bench.bin
+```
 
 For `serv.weft`, see the command at the top of the file.
 
 `cargo test -p synth-weft --test examples` simulates these designs: it decodes
-the UART output of `hello`, `echo`, `life` and the RISC-V cores, measures the
-brightness of `breathe`, and runs `blinky_ram` and `serv` cycle by cycle
-against their Verilog originals.
+the UART output of `hello`, `echo`, `life`, the RISC-V cores and the
+benchmark, measures the brightness of `breathe`, and runs `blinky_ram` and
+`serv` cycle by cycle against their Verilog originals.
 
 To see the diagnostics, break something. For example, use the button in
 `blinky_ram.weft` without `@clk`:
