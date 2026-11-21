@@ -656,7 +656,7 @@ impl<'a> Elab<'a> {
                         st.current(bk)
                     };
                     let mut val = old;
-                    for k in 0..width {
+                    for (k, &bit) in v.0.iter().enumerate().take(width) {
                         if k > q || q - k + width > n {
                             continue;
                         }
@@ -669,7 +669,7 @@ impl<'a> Elab<'a> {
                             continue; // not representable in the index width
                         }
                         let hit = self.out.eq_const(index.clone(), &tv.resize(iw, false));
-                        val = self.out.mux(hit, Sig::bit(val), Sig::bit(v.0[k])).0[0];
+                        val = self.out.mux(hit, Sig::bit(val), Sig::bit(bit)).0[0];
                     }
                     new_vals.push((bk, val));
                 }
@@ -1100,14 +1100,14 @@ impl<'a> Elab<'a> {
         let c = iv.as_const().unwrap();
         let mut a = Sig::new();
         let mut b = Sig::new();
-        for i in 0..w as usize {
+        for (i, &subj_bit) in subj.0.iter().enumerate().take(w as usize) {
             let bit = c.get(i);
             let wild = match kind {
                 ast::CaseKind::Casez => bit == Logic::Z,
                 _ => !bit.is_known(),
             };
             if !wild {
-                a.push(subj.0[i]);
+                a.push(subj_bit);
                 b.push(SigBit::Const(bit));
             }
         }

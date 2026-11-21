@@ -99,8 +99,8 @@ pub(crate) fn verilog_instance(
             ok = false;
             continue;
         }
-        for i in 0..vw {
-            map.insert(SigBit::Wire(w, i as u32), sig.0[i]);
+        for (i, &bit) in sig.0.iter().enumerate().take(vw) {
+            map.insert(SigBit::Wire(w, i as u32), bit);
         }
     }
     for (pname, w) in &ports {

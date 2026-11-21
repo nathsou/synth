@@ -227,9 +227,9 @@ impl Config {
         w.cmd16(0x62, cw - 1);
         w.cmd16(0x72, ch);
         w.cmd16(0x82, 0);
-        for bank in 0..4 {
+        for (bank, cram) in self.cram.iter().enumerate() {
             w.bytes(&[0x11, bank as u8, 0x01, 0x01]);
-            w.bits(&self.cram[bank], cw, 0, ch);
+            w.bits(cram, cw, 0, ch);
             w.bytes(&[0, 0]);
         }
 
@@ -237,12 +237,12 @@ impl Config {
         if bw != 0 && bh != 0 {
             w.cmd16(0x62, bw - 1);
             w.cmd16(0x72, BRAM_CHUNK);
-            for bank in 0..4 {
+            for (bank, bram) in self.bram.iter().enumerate() {
                 w.bytes(&[0x11, bank as u8]);
                 for offset in (0..bh).step_by(BRAM_CHUNK) {
                     w.cmd16(0x82, offset);
                     w.bytes(&[0x01, 0x03]);
-                    w.bits(&self.bram[bank], bw, offset, BRAM_CHUNK);
+                    w.bits(bram, bw, offset, BRAM_CHUNK);
                     w.bytes(&[0, 0]);
                 }
             }
