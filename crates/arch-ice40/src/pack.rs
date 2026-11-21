@@ -799,6 +799,38 @@ pub fn global_class(kind: &str, pin: &str) -> Option<GlobalClass> {
     }
 }
 
+/// Logic levels, in tenths, from which a control net is late: four LUTs,
+/// or three after a block RAM.
+const LATE_CONTROL: u32 = 40;
+
+/// Logic levels in tenths before the output of `cell`, an estimate of its
+/// arrival: 0 for registers and pads, 14 for a block RAM's read data (2.15
+/// ns after the clock), ten more than the latest input for a LUT and one
+/// more than its carry in for a carry. Memoized in `memo`; at most 100.
+fn levels(nl: &Netlist, cell: CellId, memo: &mut FxHashMap<CellId, u32>) -> u32 {
+    if let Some(&d) = memo.get(&cell) {
+        return d;
+    }
+    let d = match nl.cell_kind(cell) {
+        RAM => 14,
+        LC if get_int(nl, cell, "DFF_ENABLE") == 0 => {
+            // Cycles through LUTs are broken by the placeholder.
+            memo.insert(cell, 0);
+            let input = |nl: &Netlist, p: &str, memo: &mut FxHashMap<CellId, u32>| {
+                (net_of(nl, cell, p))
+                    .and_then(|n| nl.nets[n].driver)
+                    .map_or(0, |d| levels(nl, d.cell, memo))
+            };
+            let lut = LC_INPUTS.iter().map(|p| input(nl, p, memo)).max().unwrap_or(0) + 10;
+            let carry = input(nl, "CIN", memo) + 1;
+            lut.max(carry).min(100)
+        }
+        _ => 0,
+    };
+    memo.insert(cell, d);
+    d
+}
+
 /// Inserts `SB_GB` global buffers for clocks and high-fanout control nets
 /// (at most eight globals, counting explicitly instantiated ones).
 ///
@@ -807,6 +839,7 @@ pub fn global_class(kind: &str, pin: &str) -> Option<GlobalClass> {
 /// net carries a single class of users; the others stay on fabric routing.
 fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), String> {
     let mut used = nl.live_cells().filter(|&c| nl.cell_kind(c) == GB).count();
+    let mut depth = FxHashMap::default();
     let mut candidates: Vec<(usize, GlobalClass, NetId)> = Vec::new();
     for n in nl.live_nets() {
         let net = &nl.nets[n];
@@ -832,9 +865,15 @@ fn promote_globals(nl: &mut Netlist, report: &mut PackReport) -> Result<(), Stri
                 None => {}
             }
         }
+        // A control net decided by logic late in the cycle would be later
+        // still through a global buffer, at its fixed place on the die: it
+        // takes one only for many more users (logic cells, eight to a
+        // tile's control) than a net from a register or a few LUTs.
+        let late = levels(nl, drv.cell, &mut depth) >= LATE_CONTROL;
+        let min_users = if late { 128 } else { 32 };
         if clocks > 0 {
             candidates.push((clocks + 1_000_000, GlobalClass::Clock, n));
-        } else if resets.max(enables) > 32 {
+        } else if resets.max(enables) > min_users {
             let class = if resets >= enables { GlobalClass::Reset } else { GlobalClass::Enable };
             candidates.push((resets.max(enables), class, n));
         }
@@ -919,6 +958,42 @@ mod tests {
                 (init >> at) & 1
             })
             .collect()
+    }
+
+    /// A clock enable `levels` LUTs after a register, read by `users`
+    /// flip-flops: whether it is promoted to a global network.
+    fn enable_promoted(levels: usize, users: usize) -> bool {
+        let mut nl = Netlist::new();
+        let q = nl.add_net("q");
+        let reg = new_lc(&mut nl, "reg");
+        set_int(&mut nl, reg, "DFF_ENABLE", 1);
+        nl.connect(pin_ref(&nl, reg, "O").unwrap(), q).unwrap();
+        let mut net = q;
+        for k in 0..levels {
+            let c = lut(&mut nl, [Some(net), None, None, None], 0x5555);
+            net = nl.add_net(&format!("en{k}"));
+            nl.connect(pin_ref(&nl, c, "O").unwrap(), net).unwrap();
+        }
+        for _ in 0..users {
+            let ff = new_lc(&mut nl, "ff");
+            set_int(&mut nl, ff, "DFF_ENABLE", 1);
+            nl.connect(pin_ref(&nl, ff, "CEN").unwrap(), net).unwrap();
+        }
+        let mut report = PackReport { messages: Vec::new() };
+        promote_globals(&mut nl, &mut report).unwrap();
+        nl.live_cells().any(|c| nl.cell_kind(c) == GB)
+    }
+
+    #[test]
+    fn late_control_nets_need_more_users_for_a_global_network() {
+        // From a register or up to three LUTs: past 32 users.
+        assert!(enable_promoted(0, 40));
+        assert!(enable_promoted(3, 40));
+        assert!(!enable_promoted(3, 32));
+        // Decided by four levels of logic: past 128.
+        assert!(!enable_promoted(4, 40));
+        assert!(!enable_promoted(4, 128));
+        assert!(enable_promoted(4, 129));
     }
 
     #[test]
