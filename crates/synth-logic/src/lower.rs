@@ -475,7 +475,11 @@ impl Lower<'_> {
 
     /// For `a + b` (result `y`) where one operand is a single zero-extended
     /// bit `c` and the other is the whole result of another addition read
-    /// nowhere else, returns that addition's operands and `c`.
+    /// nowhere else, returns that addition's operands and `c`. The inner
+    /// result may also be zero-extended to the outer width (as width
+    /// reduction leaves `(x + y) + c` when it narrows the inner addition)
+    /// if that addition cannot overflow: the top bits of both its operands
+    /// are 0, so that its sum is the same at any wider width.
     fn carry_in_operand(&self, a: &Sig, b: &Sig, y: &Sig) -> Option<(Sig, Sig, SigBit)> {
         let w = y.width();
         for (x, z) in [(a, b), (b, a)] {
@@ -494,12 +498,25 @@ impl Lower<'_> {
             else {
                 continue;
             };
-            if iy.width() < w.min(x.width())
-                || x.width() < w
-                || (0..w).any(|i| self.resolve(x.0[i]) != iy.0[i])
-                || iy.iter().any(|b| self.uses.get(b).copied().unwrap_or(0) > 1)
-            {
+            if x.width() < w || iy.iter().any(|b| self.uses.get(b).copied().unwrap_or(0) > 1) {
                 continue;
+            }
+            let iw = iy.width();
+            if iw >= w {
+                if (0..w).any(|i| self.resolve(x.0[i]) != iy.0[i]) {
+                    continue;
+                }
+            } else {
+                let zero = |b: SigBit| matches!(self.resolve(b), SigBit::Const(Logic::Zero));
+                // Bit iw - 1 and any above it (which the inner sum drops).
+                let top_zero = |s: &Sig| (iw - 1..s.width()).all(|i| zero(s.0[i]));
+                if (0..iw).any(|i| self.resolve(x.0[i]) != iy.0[i])
+                    || (iw..w).any(|i| !zero(x.0[i]))
+                    || !top_zero(ia)
+                    || !top_zero(ib)
+                {
+                    continue;
+                }
             }
             return Some((ia.clone(), ib.clone(), c));
         }
@@ -919,7 +936,12 @@ mod tests {
     /// Lowers `m` (input port `a`, output port `y`) and checks `y` against
     /// `f` for every value of `a`.
     fn check_function(m: &Module, f: impl Fn(u64) -> u64) {
-        let net = lower(m, &LowerOptions::default()).unwrap();
+        check_lowered(m, &LowerOptions::default(), f);
+    }
+
+    /// [`check_function`] with lowering options; gives the lowered design.
+    fn check_lowered(m: &Module, opts: &LowerOptions, f: impl Fn(u64) -> u64) -> LogicNet {
+        let net = lower(m, opts).unwrap();
         let port = |name: &str| net.ports.iter().find(|p| p.name == name).unwrap().bits.clone();
         let (a, y) = (port("a"), port("y"));
         for v in 0..1u64 << a.len() {
@@ -958,6 +980,7 @@ mod tests {
                 .sum();
             assert_eq!(got, f(v), "a = {v}");
         }
+        net
     }
 
     fn ports(m: &mut Module, aw: u32, yw: u32) -> (Sig, Sig) {
@@ -1013,6 +1036,31 @@ mod tests {
         assert!(synth_rtl::opt::reduce_widths(&mut m) > 0);
         synth_rtl::opt::clean(&mut m).unwrap();
         check_function(&m, |v| (v >> 3) * (v & 7) + (v >> 3));
+    }
+
+    /// `(x + z) + c` as width reduction leaves it: the inner sum narrower
+    /// than the outer, zero-extended. With carry chains, it is one chain with
+    /// carry-in `c` when the inner sum cannot overflow (the other chain is
+    /// left unread), and two chains otherwise.
+    #[test]
+    fn carry_in_after_width_reduction() {
+        let opts = LowerOptions { carry_min_width: Some(3) };
+        for (xw, iw) in [(3u32, 4usize), (4, 4)] {
+            let mut m = Module::new("t");
+            let (a, y) = ports(&mut m, 2 * xw + 1, 7);
+            let x = a.slice(0, xw as usize).extend(iw, false);
+            let z = a.slice(xw as usize, xw as usize).extend(iw, false);
+            let c = a.slice(2 * xw as usize, 1).extend(7, false);
+            let s = m.binary(BinaryOp::Add, false, x, z);
+            let t = m.binary(BinaryOp::Add, false, s.extend(7, false), c);
+            m.connect(y, t);
+            let mask = (1 << xw) - 1;
+            let net = check_lowered(&m, &opts, |v| {
+                ((v & mask) + (v >> xw & mask)) % (1 << iw) + (v >> (2 * xw))
+            });
+            let merged = net.carries.iter().any(|ch| !net.aig.outputs[ch.cin].is_const());
+            assert_eq!(merged, (xw as usize) < iw, "{xw}-bit operands");
+        }
     }
 
     #[test]
