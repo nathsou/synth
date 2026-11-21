@@ -170,7 +170,9 @@ pub fn widen(
     let lg = lutmap::lut_graph(&net.aig, mapping);
     let choices = crate::choice::build(&[&net.aig, &lg], &Default::default());
     let mut t = timing(net);
-    t.output_required = vec![Some(mapping.depth); net.aig.outputs.len()];
+    t.output_required = (0..net.aig.outputs.len())
+        .map(|k| Some(mapping.depth.saturating_sub(t.output_delay.get(k).copied().unwrap_or(0))))
+        .collect();
     // Cuts of up to eight leaves need more room per node.
     let o = MapOptions { cuts_per_node: 2 * opts.cuts_per_node, ..opts.clone() };
     let c = map_best(net, choices, &o, &t, &cost)?;
