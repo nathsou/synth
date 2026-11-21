@@ -258,3 +258,31 @@ fn verilog_frames_are_read_directly() {
     assert!(r.at(&["frames"]).as_array()[0].at(&["pixels"]).is_null());
     synth_playground::handle("sim_stop", "{}");
 }
+
+/// A net whose only sink is at its own source node gets no routing request;
+/// its timing connections must not point at the next net's (which ran past
+/// the end of the routes and panicked).
+#[test]
+fn a_net_routed_onto_its_own_source_does_not_panic() {
+    let text = "module m(in a: uint<4>, in b: uint<4>, in f: bool, out y: uint<4>) {\n    y = if f { a +% b } else { a -% b };\n}\n";
+    let req = Json::obj()
+        .with("files", Json::Arr(vec![Json::obj().with("name", "m.weft").with("text", text)]))
+        .with("part", "hx8k")
+        .with("package", "ct256")
+        .with("effort", 0.3);
+    let out = Json::parse(&synth_playground::handle("run", &req.dump())).unwrap();
+    assert_eq!(out.at(&["ok"]).as_bool(), Some(true), "{}", out.at(&["error"]).dump());
+}
+
+#[test]
+fn delays_of_the_timing_model() {
+    let d = Json::parse(&synth_playground::handle("delays", r#"{"part":"hx1k"}"#)).unwrap();
+    for k in ["lut", "carry", "clk_to_q", "setup", "odrv4", "odrv12", "local", "inmux"] {
+        let v = d.at(&[k]).as_f64().unwrap_or(f64::NAN);
+        assert!(v > 0.0 && v < 2000.0, "{k}: {v}");
+    }
+    assert_eq!(d.at(&["span4_h"]).as_array().len(), 5);
+    assert_eq!(d.at(&["span12_v"]).as_array().len(), 13);
+    // A carry is much faster than a LUT, which is why adders use the chain.
+    assert!(d.at(&["carry"]).as_f64().unwrap() * 2.0 < d.at(&["lut"]).as_f64().unwrap());
+}

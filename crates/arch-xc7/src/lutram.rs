@@ -54,8 +54,7 @@ pub(crate) fn map(m: &mut Module, mi: MemId) -> usize {
     let raddrs: Vec<Sig> = mem.reads.iter().map(|r| index(m, &r.addr)).collect();
     // The primitive has a single write enable: one group per enable signal.
     let mut groups: Vec<(SigBit, Vec<usize>)> = Vec::new();
-    for b in 0..mem.width as usize {
-        let en = wr.en.0[b];
+    for (b, &en) in wr.en.0.iter().enumerate().take(mem.width as usize) {
         match groups.iter_mut().find(|(e, _)| *e == en) {
             Some((_, bits)) => bits.push(b),
             None => groups.push((en, vec![b])),

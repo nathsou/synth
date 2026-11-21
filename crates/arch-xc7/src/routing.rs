@@ -351,11 +351,10 @@ impl RoutingGraph {
             std::collections::BTreeMap::<i16, std::collections::BTreeSet<String>>::new();
         for (ti, t) in db.tiles.iter().enumerate() {
             let template = &db.templates[t.template];
-            for w in 0..t.nodes.len() {
+            for (w, wire) in template.wires.iter().enumerate().take(t.nodes.len()) {
                 if !used.contains(&(ti, w)) {
                     continue;
                 }
-                let wire = &template.wires[w];
                 if t.kind.starts_with("CLK_HROW_") {
                     if let Some(lane) = wire.strip_prefix("CLK_HROW_R_CK_").filter(|s| {
                         s.starts_with("GCLK") && s[4..].bytes().all(|b| b.is_ascii_digit())

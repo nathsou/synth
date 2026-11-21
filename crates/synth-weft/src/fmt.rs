@@ -27,6 +27,11 @@
 //! ) {
 //! ```
 
+/// Operators that can only continue an expression, never start a statement.
+/// (`-` and `.` can: a negative pattern, an enum variant in a `match` arm.)
+const BINARY_OPS: [&str; 14] =
+    ["||", "&&", "|", "&", "^", "+", "*", "/", "%", "==", "!=", "<=", ">=", "<<"];
+
 /// The width past which a module header is broken over several lines.
 pub const MAX_WIDTH: usize = 100;
 
@@ -74,7 +79,11 @@ pub fn format(src: &str) -> String {
         let closes_generics = text.starts_with('>') && stack.last() == Some(&('<', false));
         let closes_first = text.starts_with(['}', ')', ']']) || closes_generics;
         let mut level = depth - usize::from(closes_first && depth > 0);
-        if continuation && !closes_first && !text.starts_with("//") {
+        // A statement never starts with a binary operator, so a line that
+        // does continues the one before, even after a line ending in `)`.
+        let starts_with_op =
+            !text.starts_with("/*") && BINARY_OPS.iter().any(|op| text.starts_with(op));
+        if (continuation || starts_with_op) && !closes_first && !text.starts_with("//") {
             level += 1;
         }
         let in_ports = stack.last().is_some_and(|&(c, ports)| c == '(' && ports);
@@ -394,6 +403,19 @@ mod tests {
         let want = "module m<W: int = 8>(\n    in    start: bool,\n    out   tx: bool,\n    inout pad: bool,\n) {\n    reg x: uint<W> = 0;\n\n    if start {\n        x := x +%\n            1;\n    }\n    tx = x[0]; // done\n}\n";
         assert_eq!(format(src), want);
         assert_eq!(format(want), want);
+    }
+
+    #[test]
+    fn continues_lines_that_start_with_an_operator() {
+        // Every line of a long condition is a continuation, even after one
+        // that ends with a closing bracket; a `match` arm with a negative
+        // pattern or a variant is not.
+        let src = "module m(in a: bool, in b: bool, out y: bool) {\ny = a\n|| (a && b)\n|| (b && a)\n|| b;\n}\n";
+        let want = "module m(in a: bool, in b: bool, out y: bool) {\n    y = a\n        || (a && b)\n        || (b && a)\n        || b;\n}\n";
+        assert_eq!(format(src), want);
+        assert_eq!(format(want), want);
+        let arms = "module m(in s: sint<4>, out y: bool) {\n    y = match s {\n        -1 => true,\n        _ => false,\n    };\n}\n";
+        assert_eq!(format(arms), arms);
     }
 
     #[test]

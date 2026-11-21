@@ -1497,7 +1497,9 @@ changing the meaning of existing programs.
 - `match` guards.
 - Runtime assertions, cover properties and formal verification.
 - Testbench constructs (the simulator, `synth sim`, exists; stimulus comes
-  from its options or from Rust through `synth-sim`).
+  from its options, from Rust through `synth-sim`, or from a page through
+  the playground's testbench sessions, which elaborate the top as an
+  instance: `synth_weft::Options::testbench`).
 - Asynchronous FIFO and handshake crossings in the standard library.
 - Saturating arithmetic; runtime division.
 - Packages, imports and visibility.

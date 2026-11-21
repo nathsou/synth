@@ -529,8 +529,8 @@ impl Arch {
                 }
             }
         }
-        for g in 0..8 {
-            let (x, y) = db.globals[g].fabout;
+        for (g, global) in db.globals.iter().enumerate().take(8) {
+            let (x, y) = global.fabout;
             let pins = vec![
                 BelPin { name: "USER_SIGNAL_TO_GLOBAL_BUFFER", node: self.node(x, y, "fabout")? },
                 BelPin {

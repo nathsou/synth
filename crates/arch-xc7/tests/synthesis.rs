@@ -293,11 +293,11 @@ fn unused_carry_lanes_take_no_propagate_luts() {
     for slice in &p.slices {
         let Some(c) = slice.carry else { continue };
         let used = |pin: String| nl.pin_net(c, &pin).is_some_and(|n| !nl.nets[n].users.is_empty());
-        for lane in 0..4 {
+        for (lane, lut) in slice.luts.iter().enumerate().take(4) {
             if !(lane..4).any(|k| used(format!("O[{k}]")) || used(format!("CO[{k}]"))) {
                 // Any LUT there is unrelated logic, not a propagate copy.
                 let s = nl.pin_net(c, &format!("S[{lane}]"));
-                assert!(slice.luts[lane].is_none_or(|l| nl.pin_net(l, "O") != s), "lane {lane}");
+                assert!(lut.is_none_or(|l| nl.pin_net(l, "O") != s), "lane {lane}");
                 dead += 1;
             }
         }
