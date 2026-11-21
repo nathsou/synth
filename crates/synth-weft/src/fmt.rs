@@ -74,7 +74,8 @@ pub fn format(src: &str) -> String {
         let closes_generics = text.starts_with('>') && stack.last() == Some(&('<', false));
         let closes_first = text.starts_with(['}', ')', ']']) || closes_generics;
         let mut level = depth - usize::from(closes_first && depth > 0);
-        if continuation && !closes_first && !text.starts_with("//") {
+        if (continuation || starts_with_operator(text)) && !closes_first && !text.starts_with("//")
+        {
             level += 1;
         }
         let in_ports = stack.last().is_some_and(|&(c, ports)| c == '(' && ports);
@@ -384,9 +385,28 @@ fn align_ports(lines: &mut [String], opens: &[usize]) {
     }
 }
 
+/// Whether a line starts with a binary operator, so that it continues the
+/// statement before it (`-`, `!` and `~` may start an expression, `.` an
+/// enum variant).
+fn starts_with_operator(text: &str) -> bool {
+    text.starts_with(['|', '&', '^', '+', '*', '%'])
+        || text.starts_with("==")
+        || text.starts_with("!=")
+        || (text.starts_with('/') && !text.starts_with("//") && !text.starts_with("/*"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_starting_with_an_operator_continues() {
+        let src = "module m(in a: bool, in b: bool, out y: bool) {\ny = (a && b)\n|| b;\n}\n";
+        let want =
+            "module m(in a: bool, in b: bool, out y: bool) {\n    y = (a && b)\n        || b;\n}\n";
+        assert_eq!(format(src), want);
+        assert_eq!(format(want), want);
+    }
 
     #[test]
     fn indents_and_aligns() {
