@@ -25,6 +25,7 @@ pub mod par;
 pub mod progress;
 pub mod rng;
 pub mod time;
+pub mod trace;
 
 pub use bigint::BigInt;
 pub use diag::{Diagnostic, Diagnostics, FileId, Severity, SourceMap, Span};

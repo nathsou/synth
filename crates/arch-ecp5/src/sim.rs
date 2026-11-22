@@ -167,8 +167,8 @@ pub fn add_cell(
             };
             let (a, b) = (operand(m, "A"), operand(m, "B"));
             let product = m.binary(BinaryOp::Mul, false, a, b);
-            for i in 0..36 {
-                drive(m, pin(&format!("P{i}")), product.0[i]);
+            for (i, &bit) in product.0.iter().enumerate().take(36) {
+                drive(m, pin(&format!("P{i}")), bit);
             }
         }
         EHXPLLL => {

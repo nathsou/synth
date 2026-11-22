@@ -596,13 +596,13 @@ pub fn aig_graph(net: &LogicNet) -> Json {
         let w = c.sum.len();
         let mut ins = Vec::new();
         let mut ks = Vec::new();
-        for i in 0..w {
+        for (i, &k) in c.a.iter().enumerate().take(w) {
             ins.push((format!("a{i}"), 1));
-            ks.push(c.a[i]);
+            ks.push(k);
         }
-        for i in 0..w {
+        for (i, &k) in c.b.iter().enumerate().take(w) {
             ins.push((format!("b{i}"), 1));
-            ks.push(c.b[i]);
+            ks.push(k);
         }
         ins.push(("cin".into(), 1));
         ks.push(c.cin);
