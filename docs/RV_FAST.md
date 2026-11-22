@@ -193,6 +193,6 @@ the median of seeds 1-3 (each the best of four placements), `--freq 200`.
 
 Without rv_fast's systems, Fmax rises 0.8% (geometric mean); the
 PicoRV32 SoC's median is 3% lower, within its spread over seeds (79-88
-MHz before, 79-86 after). A calibration of the carry chains in the
+MHz before, 81-86 after). A calibration of the carry chains in the
 mapper's delays (a tenth of the tile crossings per bit) was measured too,
 and left out: it changed nothing consistently.
