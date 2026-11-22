@@ -86,14 +86,15 @@ ID (it waits two cycles instead of one): holding it would make the
 decision, late in ID, reach the read enables of the ROM's sixteen block
 RAMs. Shifts are two shifters of five LUT levels each, and an SLT's bit
 comes a LUT after the adder's carry out, so both are forwarded too; at
-first they were late like loads, and their stalls cost 20% of the cycles.
+first they were late like loads, and their stalls cost 15% of the cycles.
 
 **Prediction in IF.** The branch target buffer (256 entries: a valid
 bit, the rest of the PC and the target, in one block RAM) and the branch
 history table (a two-bit counter for every instruction, 3 for JALs, in
 another) are read with the *next* PC, so their entries for the PC being
 fetched are there in the same cycle, and a predicted taken branch costs no
-cycle: RAM data, tag check, multiplexer, RAM address, 8 ns. A JAL or a
+cycle (from the RAMs' data through the tag check and the multiplexer of
+the next PC back to their address). A JAL or a
 branch the table predicts taken whose target IF does not know yet (the
 first time) is taken from ID, a cycle late; so are returns, from a return
 address stack of four entries that calls push in ID. Branches are checked
@@ -130,7 +131,8 @@ mispredicted branches are mostly the benchmark's data-dependent ones
 (comparisons of random numbers, character classes).
 
 The design went through these steps, each measured on the benchmark (CPI)
-and on the Cu (Fmax of the system with `rv_program.weft`):
+and on the Cu (Fmax of the system with `rv_program.weft`, one build with
+the default seed, the best of four placements):
 
 | Step | CPI | Fmax |
 |---|---:|---:|
@@ -144,7 +146,7 @@ and on the Cu (Fmax of the system with `rv_program.weft`):
 | Address adder; store data through the second operand | 1.084 | 102.9 MHz |
 | Replay instead of stall; SLT forwarded | 1.082 | 100.5 MHz |
 | Stores from MEM; return address stack | 1.064 | 97.6 MHz |
-| Late control nets off global buffers (synth) | 1.064 | 99.1 MHz |
+| Late control nets off global buffers (synth) | 1.064 | 99.0 MHz |
 
 ## What it changed in synth
 
