@@ -230,11 +230,42 @@ const CHAIN_ENTRY: u32 = 20;
 const CHAIN_BIT: u32 = 11;
 const CHAIN_SUM: u32 = 27;
 const LEVEL: u32 = 100;
+/// How much later a block RAM's read data comes than a flip-flop's output
+/// (2.15 ns from the clock against 0.54 ns).
+const BRAM_DATA: u32 = 140;
+/// How much longer the route into a block RAM's inputs is than into a
+/// flip-flop next to its driver: the RAMs are in columns of their own.
+const BRAM_INPUT: u32 = 60;
 
 /// Mapping constraints for the carry chains of `net`: every operand bit
-/// reaches the sums at and above it, and the carry out.
+/// reaches the sums at and above it, and the carry out. Block RAM read
+/// data arrives late, and its inputs are further away.
 fn chain_timing(net: &LogicNet) -> lutmap::Timing {
     let mut t = lutmap::Timing::default();
+    let set = |v: &mut Vec<u32>, i: usize, d: u32| {
+        if v.len() <= i {
+            v.resize(i + 1, 0);
+        }
+        v[i] = d;
+    };
+    for inst in &net.instances {
+        if !inst.module.starts_with("SB_RAM40_4K") {
+            continue;
+        }
+        for (name, dir, bits) in &inst.conns {
+            for &b in bits {
+                match b {
+                    Bit::Src(s) if *dir == PortDir::Output && name == "RDATA" => {
+                        set(&mut t.input_arrival, s as usize, BRAM_DATA)
+                    }
+                    Bit::Snk(k) if *dir == PortDir::Input && !name.ends_with("CLK") => {
+                        set(&mut t.output_delay, k, BRAM_INPUT)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     for c in &net.carries {
         let w = c.a.len();
         let mut arc = |from: usize, to: u32, delay: u32| {

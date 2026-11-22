@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+// The benchmark of bench.c on rv_fast.weft: an 8 KiB ROM and a 4 KiB RAM
+// (rom.hex and ram.hex, built by the Makefile), the LEDs, the UART and a
+// cycle counter. It prints the kernels' checksums and the cycles they took
+// over the UART (115200 8N1). Build with ../rv_fast.weft, ../rv32i.weft
+// and ../uart.weft, with `--top bench`.
+
+/// The LEDs (write 0x1000_0000), the UART (write 0x1000_0004: send; read:
+/// bit 0 is busy) and the cycles since configuration (read 0x1000_0008).
+module bench_devices<CLKS_PER_BIT: int>(
+    in  write: bool,
+    in  addr: uint<12>,
+    in  wdata: uint<32>,
+    out rdata: uint<32>,
+    out tx: bool,
+    out led: uint<8>,
+) {
+    inst uart = uart_tx<CLKS_PER_BIT>();
+    reg leds: uint<8> = 0;
+    reg cycles: uint<32> init 0;
+
+    cycles := cycles +% 1;
+    uart.start = write && addr[3:2] == 1;
+    uart.byte = wdata[7:0];
+    if write && addr[3:2] == 0 { leds := wdata[7:0]; }
+    rdata = if addr[3] { cycles } else { uint<32>(uart.busy.bits()) };
+    tx = uart.tx;
+    led = leds;
+}
+
+/// CLK_HZ: the board's clock frequency. MAX_HZ: the fastest clock the core
+/// meets timing at on the Alchitry Cu; it runs at SYS_HZ, the slower of the
+/// two, from the board's PLL. CLKS_PER_BIT: for 115200 baud.
+module bench<
+    CLK_HZ: int = 100_000_000,
+    MAX_HZ: int = 90_000_000,
+    SYS_HZ: int = min(CLK_HZ, MAX_HZ),
+    CLKS_PER_BIT: int = SYS_HZ / 115200,
+>(
+    in  clk: clock,
+    out tx: bool,
+    out led: uint<8>,
+) {
+    inst pll = synth_pll<IN_HZ: CLK_HZ, OUT_HZ: SYS_HZ>(clk_in: clk);
+    domain raw { clock: pll.clk_out }
+    let rst = reset_sync(!pll.locked) @raw;
+    default domain sys { clock: pll.clk_out, reset: rst }
+
+    inst cpu = rv_fast<PC_BITS: 13, RAM_BITS: 10>();
+    mem rom: [uint<32>; 2048] init hex_file("rom.hex");
+    mem ram: [uint<32>; 1024] init hex_file("ram.hex");
+    inst dev = bench_devices<CLKS_PER_BIT>();
+
+    reg instr: uint<32> init 0;
+    instr := rom[cpu.iaddr];
+    cpu.idata = instr;
+
+    reg word: uint<32> init 0;
+    word := ram[cpu.daddr];
+    for i in 0..4 {
+        if cpu.dwe[i] { ram[cpu.dwaddr][i * 8 + 7:i * 8] := cpu.dwdata[i * 8 + 7:i * 8]; }
+    }
+    cpu.drdata = word;
+
+    dev.write = cpu.io_write;
+    dev.addr = cpu.io_addr;
+    dev.wdata = cpu.io_wdata;
+    cpu.io_rdata = dev.rdata;
+
+    tx = dev.tx;
+    led = dev.led;
+}

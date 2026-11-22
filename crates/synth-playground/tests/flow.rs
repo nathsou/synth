@@ -153,6 +153,7 @@ fn examples_build_for_ice40_boards() {
         "rv_single",
         "rv_multi",
         "rv_pipe",
+        "rv_fast",
         "euler10",
         "euler14",
         "euler25",

@@ -289,6 +289,20 @@ pub const EXAMPLES: &[Example] = &[
         top: "",
     },
     Example {
+        id: "rv_fast",
+        title: "RISC-V, fast",
+        description: "An RV32I core in six pipeline stages, with branch prediction, for 100 MHz on the HX8K",
+        files: &[
+            ("rv_fast.weft", include_str!("../../../examples/weft/rv_fast.weft")),
+            ("rv32i.weft", RV32I),
+            ("rv_program.weft", RV_PROGRAM),
+            ("uart.weft", UART),
+        ],
+        part: "hx8k",
+        package: "ct256",
+        top: "",
+    },
+    Example {
         id: "blinky_ram_v",
         title: "Blinky RAM (Verilog)",
         description: "The Verilog original of Blinky RAM",

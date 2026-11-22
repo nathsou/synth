@@ -16,6 +16,9 @@ use crate::pack::{GB, IO, LC, RAM};
 use crate::place::Placement;
 use crate::route::{Routing, sink_node};
 
+/// A timing path: each cell pin along it, with its arrival time (ps).
+pub type Path = Vec<(CellId, usize, f64)>;
+
 /// Timing of one clock domain.
 #[derive(Clone, Debug)]
 pub struct ClockTiming {
@@ -150,7 +153,21 @@ pub fn analyse_full(
 ) -> (TimingReport, TimingGraph, Analysis) {
     let graph = TimingGraph::with_lut_pins(arch, nl, clocks, &routing.lut_pins);
     let pin_name = |c: CellId, i: usize| nl.str(nl.cells[c].pins[i].name).to_string();
-    let a = graph.analyse(&routed_delays(arch, nl, placement, routing, &graph));
+    let delays = routed_delays(arch, nl, placement, routing, &graph);
+    let a = graph.analyse(&delays);
+    // A debugging aid: the latest paths into the N worst endpoints.
+    if let Some(n) = std::env::var("SYNTH_TIMING_ENDPOINTS").ok().and_then(|v| v.parse().ok()) {
+        for (t, path) in graph.worst_endpoints(&delays, n) {
+            let steps: Vec<String> = path
+                .iter()
+                .filter(|&&(c, i, _)| !matches!(pin_name(c, i).as_str(), "CIN" | "COUT"))
+                .map(|&(c, i, t)| {
+                    format!("{}.{} @{:.2}", nl.str(nl.cells[c].name), pin_name(c, i), t / 1000.0)
+                })
+                .collect();
+            eprintln!("debug: endpoint {:.2} ns: {}", t / 1000.0, steps.join(" -> "));
+        }
+    }
     let mut report = TimingReport::default();
     for (ci, clk) in graph.clocks.iter().enumerate() {
         let Some(path) = a.paths[ci].as_ref() else { continue };
@@ -758,6 +775,45 @@ impl TimingGraph {
             }
         }
         out
+    }
+
+    /// The `n` endpoints with the latest arrival (setup included, rising
+    /// edge launches only), one per cell, each with its latest path.
+    pub fn worst_endpoints(&self, delay: &[f64], n: usize) -> Vec<(f64, Path)> {
+        let edge_delay = |e: Edge| match e {
+            Edge::Net(k) => delay[k as usize],
+            Edge::Cell(d) => d as f64,
+        };
+        let mut arr = vec![f64::NEG_INFINITY; self.node_pin.len()];
+        for &(s, d, _, neg) in &self.starts {
+            if !neg {
+                arr[s as usize] = d + CLOCK_JITTER_PS;
+            }
+        }
+        for &v in &self.order {
+            let v = v as usize;
+            for &(from, e) in
+                &self.fanin[self.fanin_off[v] as usize..self.fanin_off[v + 1] as usize]
+            {
+                arr[v] = arr[v].max(arr[from as usize] + edge_delay(e));
+            }
+        }
+        let mut best: FxHashMap<CellId, (f64, u32)> = FxHashMap::default();
+        for &(e, setup, _, neg) in &self.ends {
+            let t = arr[e as usize] + setup;
+            if neg || !t.is_finite() {
+                continue;
+            }
+            let c = self.node_pin[e as usize].0;
+            let slot = best.entry(c).or_insert((f64::NEG_INFINITY, e));
+            if t > slot.0 {
+                *slot = (t, e);
+            }
+        }
+        let mut ends: Vec<(f64, u32)> = best.into_values().collect();
+        ends.sort_by(|a, b| b.0.total_cmp(&a.0));
+        ends.truncate(n);
+        ends.into_iter().map(|(t, e)| (t, self.trace(&arr, e, &edge_delay))).collect()
     }
 
     /// The latest path into node `end`, from its start point.

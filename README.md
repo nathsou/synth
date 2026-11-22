@@ -240,6 +240,11 @@ included: `synth_pll<IN_HZ, OUT_HZ>` (Weft or Verilog) makes a clock with the
 device's PLL on iCE40, Artix-7 and ECP5 alike ([docs/WEFT.md](docs/WEFT.md) §8.7).
 [examples/](examples/README.md) has RISC-V systems for the Alchitry Cu
 (Hazard3, 5-stage pipelined) and the Go Board (SERV), ready to program.
+[rv_fast](docs/RV_FAST.md), an RV32I core in Weft laid out for the iCE40,
+runs a C benchmark at 0.94 instructions per cycle and about 98 MHz on the
+Alchitry Cu: 2.4 times as fast as the Weft examples' five-stage core and
+5.2 times as fast as PicoRV32 with its barrel shifter, in as many logic
+cells.
 
 Every stage is checked by simulation against the source RTL on four RISC-V
 cores (PicoRV32, SERV, DarkRISCV, Hazard3) and ten Project Euler solvers

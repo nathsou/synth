@@ -83,8 +83,12 @@ pub struct Timing {
     pub input_arrival: Vec<u32>,
     /// Required time of each output (missing entries or `None`: the arrival
     /// time of the latest output in a delay-optimal mapping, plus
-    /// `depth_relax` LUT delays).
+    /// `depth_relax` LUT delays, less the output's delay).
     pub output_required: Vec<Option<u32>>,
+    /// Delay of each output beyond the graph, before what reads it (a route
+    /// to a hard block that is longer than to a flip-flop; missing entries:
+    /// 0): its arrival counts that much later.
+    pub output_delay: Vec<u32>,
     /// Paths through boxes outside the graph (carry chains): from an output
     /// of the graph to an input, with a delay.
     pub arcs: Vec<BoxArc>,
@@ -563,11 +567,16 @@ impl Mapper<'_> {
                 }
             }
         }
-        let target = g.outputs.iter().map(|o| self.arrival[o.node() as usize]).max().unwrap_or(0)
+        let od = |k: usize| self.timing.output_delay.get(k).copied().unwrap_or(0);
+        let target = (g.outputs.iter().enumerate())
+            .map(|(k, o)| self.arrival[o.node() as usize] + od(k))
+            .max()
+            .unwrap_or(0)
             + self.opts.depth_relax * self.opts.lut_delay;
         self.required.iter_mut().for_each(|r| *r = u32::MAX);
         for (k, o) in g.outputs.iter().enumerate() {
-            let req = self.timing.output_required.get(k).copied().flatten().unwrap_or(target);
+            let req = (self.timing.output_required.get(k).copied().flatten())
+                .unwrap_or(target.saturating_sub(od(k)));
             let r = &mut self.required[o.node() as usize];
             *r = (*r).min(req);
         }
@@ -696,7 +705,11 @@ impl Mapper<'_> {
                 luts.push(Lut { node: i as u32, leaves, truth: c.truth });
             }
         }
-        let depth = g.outputs.iter().map(|o| level[o.node() as usize]).max().unwrap_or(0);
+        let od = |k: usize| self.timing.output_delay.get(k).copied().unwrap_or(0);
+        let depth = (g.outputs.iter().enumerate())
+            .map(|(k, o)| level[o.node() as usize] + od(k))
+            .max()
+            .unwrap_or(0);
         Mapping { luts, depth }
     }
 }
@@ -760,7 +773,7 @@ fn box_order(g: &Aig, choices: &[Vec<(u32, bool)>], arcs_into: &[Vec<(u32, u32)>
 /// boxes, from what those inputs feed), for passes that take a mapping as
 /// it is.
 pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) -> Timing {
-    if timing.arcs.is_empty() {
+    if timing.arcs.is_empty() && timing.output_delay.iter().all(|&d| d == 0) {
         return timing.clone();
     }
     let n = g.nodes.len();
@@ -784,10 +797,18 @@ pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) ->
             },
         };
     }
-    let target = g.outputs.iter().map(|o| arr[o.node() as usize]).max().unwrap_or(0);
+    let od = |k: usize| timing.output_delay.get(k).copied().unwrap_or(0);
+    let target = g
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(k, o)| arr[o.node() as usize] + od(k))
+        .max()
+        .unwrap_or(0);
     let mut req = vec![u32::MAX; n];
     for (k, o) in g.outputs.iter().enumerate() {
-        let r = timing.output_required.get(k).copied().flatten().unwrap_or(target);
+        let r = (timing.output_required.get(k).copied().flatten())
+            .unwrap_or(target.saturating_sub(od(k)));
         req[o.node() as usize] = req[o.node() as usize].min(r);
     }
     for &i in order.iter().rev() {
@@ -810,6 +831,7 @@ pub fn resolved_timing(g: &Aig, m: &Mapping, timing: &Timing, lut_delay: u32) ->
             .map(|o| Some(req[o.node() as usize]).filter(|&r| r != u32::MAX))
             .collect(),
         arcs: Vec::new(),
+        output_delay: Vec::new(),
         narrow: timing.narrow.clone(),
     }
 }
@@ -962,6 +984,27 @@ mod tests {
         let r = resolved_timing(&g, &m, &timing, 100);
         assert_eq!(r.input_arrival[2], 150);
         assert_eq!(r.output_required[0], Some(100));
+    }
+
+    #[test]
+    fn output_delay_counts_towards_the_depth() {
+        // Two 8-input ANDs, each two LUTs deep; the second output has a LUT
+        // delay more to go: the mapping is three deep, and the second output
+        // is required a LUT delay earlier than the first.
+        let mut g = Aig::new();
+        let x: Vec<Lit> = (0..16).map(|_| g.input()).collect();
+        let y0 = g.and_all(&x[..8]);
+        let y1 = g.and_all(&x[8..]);
+        g.output(y0);
+        g.output(y1);
+        let timing = Timing { output_delay: vec![0, 100], ..Default::default() };
+        let opts = MapOptions { lut_delay: 100, ..MapOptions::default() };
+        let c = crate::choice::ChoiceAig::plain(g.clone());
+        let m = map_choices_timed(&c, &opts, &timing);
+        check(&g, &m, 4);
+        assert_eq!(m.depth, 300);
+        let r = resolved_timing(&g, &m, &timing, 100);
+        assert_eq!(r.output_required, vec![Some(300), Some(200)]);
     }
 
     #[test]
