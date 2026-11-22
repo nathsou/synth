@@ -168,5 +168,31 @@ the default seed, the best of four placements):
 - **Weft formatter.** A line starting with an operator continues the
   statement before it.
 
-On the rest of the iCE40 benchmark (median of three seeds), see
-[the pull request](https://github.com/nathsou/synth) for the measurements.
+On the iCE40 benchmark of `tools/qor.sh`, with rv_pipe and rv_fast's two
+systems, against the revision before (`a87a7e9`): logic cells and Fmax,
+the median of seeds 1-3 (each the best of four placements), `--freq 200`.
+
+| Design | Cells before | after | Fmax before | after |
+|---|---:|---:|---:|---:|
+| PicoRV32 SoC | 1545 | 1544 | 84.9 MHz | 82.1 MHz (-3.3%) |
+| Hazard3 SoC (Cu) | 2204 | 2227 | 49.5 MHz | 50.1 MHz (+1.2%) |
+| SERV, Go Board | 581 | 579 | 115.1 MHz | 119.7 MHz (+4.0%) |
+| rv_pipe | 1807 | 1835 | 49.4 MHz | 50.3 MHz (+1.8%) |
+| rv_fast | 1755 | 1749 | 87.9 MHz | 100.2 MHz (+14.0%) |
+| rv_fast, benchmark system | 2031 | 2014 | 87.1 MHz | 97.6 MHz (+12.1%) |
+| Euler 10 | 7100 | 7100 | 70.2 MHz | 69.4 MHz (-1.1%) |
+| Euler 14 | 6015 | 6015 | 73.3 MHz | 75.2 MHz (+2.6%) |
+| Euler 25 | 1324 | 1324 | 75.7 MHz | 75.7 MHz |
+| Euler 31 | 989 | 989 | 157.2 MHz | 157.2 MHz |
+| Euler 43 | 5959 | 5959 | 55.3 MHz | 56.4 MHz (+2.0%) |
+| Euler 48 | 6503 | 6503 | 76.6 MHz | 77.0 MHz (+0.5%) |
+| Euler 57 | 2629 | 2629 | 66.0 MHz | 67.7 MHz (+2.6%) |
+| Euler 58 | 7381 | 7381 | 69.4 MHz | 70.3 MHz (+1.3%) |
+| Euler 92 | 3841 | 3841 | 93.1 MHz | 92.6 MHz (-0.5%) |
+| Euler 97 | 1467 | 1467 | 91.6 MHz | 91.6 MHz |
+
+Without rv_fast's systems, Fmax rises 0.8% (geometric mean); the
+PicoRV32 SoC's median is 3% lower, within its spread over seeds (79-88
+MHz before, 79-86 after). A calibration of the carry chains in the
+mapper's delays (a tenth of the tile crossings per bit) was measured too,
+and left out: it changed nothing consistently.
