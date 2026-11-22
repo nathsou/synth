@@ -165,8 +165,6 @@ the default seed, the best of four placements):
   rv_pipe's critical path ended this way too.
 - **`SYNTH_TIMING_ENDPOINTS=n`** prints the latest path into each of the n
   worst endpoints, where the report gives the worst path only.
-- **Weft formatter.** A line starting with an operator continues the
-  statement before it.
 
 On the iCE40 benchmark of `tools/qor.sh`, with rv_pipe and rv_fast's two
 systems, against the revision before (`a87a7e9`): logic cells and Fmax,
